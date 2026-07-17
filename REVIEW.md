@@ -20,6 +20,37 @@ Two scoping questions raised after the pivot, resolved:
 2. **Target language — Rust retained.** Rust's explicit types + `use` statements make heuristic resolution tractable, which is what makes the `unresolved_ratio ≤ 10%` precision contract (R1) achievable without a full compiler. TS/JS remains the second target (larger market, dogfoodable) but its erased/structural types would force a `tsserver`-grade resolver — deferred, not adopted for v1.
 3. **Delivery — reversed to VS Code-extension-first.** ADR-003 previously chose "MCP + CLI, *not* a VS Code-only extension." Revised: the **VS Code extension is now the primary surface** (graph webview + inline rule diagnostics + embedded MCP), because IDE-native viz/diagnostics are the adoption wedge and MCP now has in-editor consumers (Copilot). *This does not reverse the pivot:* the extension is strictly read-only — it never edits code, so it is *not* an "editing surface" under §5.2 and needs no pivot-reversal ADR. The core stays protocol-agnostic and headless-first (MCP + CLI usable with no editor); the honest cost — narrower reach for non-VS Code agents — is tracked as **ArchSpec R10**.
 
+### 0.2 Reuse of a Prior Indexer (2026-07-16)
+
+A prior, fully-implemented and tested VS Code extension by the same author — code
+indexing with tree-sitter (12 languages) served over MCP — was folded in as a starting
+point. Its source is vendored at [`vendor/reference-indexer/`](vendor/reference-indexer/) with a file-by-file
+verdict in [`vendor/reference-indexer/REUSE.md`](vendor/reference-indexer/REUSE.md). Only the code-graph
+spine was kept; the original project's own docs, build artifacts, and unrelated
+memory subsystem were dropped before vendoring.
+
+- **What GIZEM reuses:** the *code-graph spine* — tree-sitter parser registry + grammars,
+  per-language extractors (symbols/edges/complexity), the `CodeStore` contract, the
+  two-pass `resolvePending` resolution with `resolved`/`fuzzy` confidence, the MCP stdio
+  server, the zod tool contracts, token-budgeting/pagination/freshness-footer rendering,
+  the VS Code extension shell, and the `.vsix` build pipeline. This collapses much of
+  Phase 0–1 from "build" to "adapt".
+- **What GIZEM drops:** the entire memory subsystem (OKF bundle, embeddings, recall,
+  lifecycle, `@memory` chat) — the "extra functionality not relevant to this project".
+- **Storage decision — KuzuDB retained (evaluated, not defaulted).** The reference project
+  runs on `node:sqlite` (zero native bindings) and already ships `findCycles` (Tarjan),
+  dead-code, file-deps, and hotspots — every GIZEM Tier-1 rule maps onto SQL, so **SQLite
+  would have retired risks R4 (Kuzu bindings) and S2 entirely.** GIZEM nonetheless keeps
+  KuzuDB to preserve Cypher as the rule/query language (the raw-Cypher escape hatch and
+  the "rules are queries" ergonomics in `idea.md` §0.2/§4). Consequence, recorded honestly:
+  R4/S2 stay live, and the Kuzu-backed `CodeStore` + Cypher ports of the analyses are
+  net-new work — the reference project's SQLite impl is what to translate from. The proven
+  SQLite path is the documented fallback if Kuzu bindings disappoint (ADR-001).
+- **Note for scope:** the reference project's parser layer already covers 12 languages. GIZEM keeps
+  **Rust-only as the v1 *validation* target** (precision contract, benchmarks), but
+  multi-language is now low-cost to switch on post-v1 — the parser/extractor layer is
+  language-parameterized, not Rust-specific.
+
 ---
 
 ## 1. Why v1 Was Abandoned (Market Evidence)

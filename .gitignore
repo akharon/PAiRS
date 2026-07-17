@@ -1,0 +1,55 @@
+# Node modules & package managers
+node_modules/
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Build outputs
+dist/
+build/
+out/
+*.vsix
+*.mcpb
+
+# TypeScript
+*.tsbuildinfo
+tsconfig.tsbuildlog
+
+# Tests
+coverage/
+.nyc_output/
+*.lcov
+
+# Environment & secrets
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/*
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/settings.json
+!.vscode/tasks.json
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# GIZEM derived index — disposable, rebuildable from source, never committed
+# (holds the KuzuDB code graph, cache, and build-state sidecar)
+.gizem/
+
+# rules.ron and baseline.json ARE committed (team-owned policy) — they live
+# in the repo being analyzed, not here, so no ignore needed in this repo.
+
+# Temporary / backups
+*.tmp
+*.temp
+*.bak
+*.backup
+backups/
+.cache/
+tmp/
+.pairs/

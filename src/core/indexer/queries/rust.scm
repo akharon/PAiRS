@@ -1,0 +1,121 @@
+; Rust extraction query. Capture-name contract: see ../extractors.ts.
+; An `impl Greeter` block is captured as a @scope, not a @def: it names a
+; qualifier segment (so methods come out as `Greeter::get`) without emitting a
+; symbol, which would duplicate the struct_item captured separately below.
+
+; --- scopes (qualifier segments, not symbols) -------------------------------------
+; Scope by the `type:` field, never `trait:` — in `impl T for S`, the methods
+; belong to S. (T's own signatures are captured under the trait_item below.)
+(impl_item type: (type_identifier) @scope.name) @scope
+; `impl<T> Wrapper<T>` puts a generic_type in the same field; scope by its base
+; name so methods qualify as `Wrapper::get`, not bare.
+(impl_item type: (generic_type type: (type_identifier) @scope.name)) @scope
+(mod_item name: (identifier) @scope.name) @scope
+
+; top-level functions only: anchored under source_file so this pattern does
+; not also match function_item inside an impl_item/trait_item body (those
+; are captured separately below as @def.method). NOTE: no @doc here —
+; parent-anchoring (needed to prevent duplicate matches against nested
+; impl/trait methods) is incompatible with the sibling-adjacency `.` needed
+; for correct doc-comment attachment in this tree-sitter query engine
+; (verified empirically: combining both either drops later siblings or lets
+; a doc comment leak onto every later sibling, not just the next one) — v1
+; accepts no doc capture for top-level Rust functions specifically.
+(source_file
+  (function_item
+    (visibility_modifier)? @exported
+    name: (identifier) @name
+    parameters: (parameters) @params
+    return_type: (_)? @ret) @def.function
+)
+
+; Same, for functions inside an inline `mod { ... }` block. Needed as its own
+; pattern because the anchor above is source_file: without this, every fn in an
+; inline module (including `#[cfg(test)] mod tests`) is dropped from the index
+; entirely. The mod_item is a @scope above, so these qualify as `inner::helper`.
+(mod_item
+  body: (declaration_list
+    (function_item
+      (visibility_modifier)? @exported
+      name: (identifier) @name
+      parameters: (parameters) @params
+      return_type: (_)? @ret) @def.function))
+
+; impl-block methods (with body). NOTE: no @doc — see the top-level
+; @def.function pattern's comment above for why parent-anchoring (required
+; here so these function_item nodes aren't ALSO matched by the top-level
+; @def.function pattern) can't be combined with `.` sibling-adjacency: this
+; query engine only matches the FIRST child at a given anchored position and
+; silently drops later siblings (verified empirically — m2/m3 in a 3-method
+; impl block were dropped when this pattern used the parent+`.` form).
+(impl_item
+  body: (declaration_list
+    (function_item
+      (visibility_modifier)? @exported
+      name: (identifier) @name
+      parameters: (parameters) @params
+      return_type: (_)? @ret) @def.method))
+
+; trait method signatures (no body) — captured so find_implementations /
+; get_declaration can see the trait surface. No @doc, same reason as above.
+(trait_item
+  body: (declaration_list
+    (function_signature_item
+      name: (identifier) @name
+      parameters: (parameters) @params
+      return_type: (_)? @ret) @def.method))
+
+(
+  (line_comment)? @doc
+  .
+  (struct_item
+    (visibility_modifier)? @exported
+    name: (type_identifier) @name) @def.struct
+)
+
+(
+  (line_comment)? @doc
+  .
+  (enum_item
+    (visibility_modifier)? @exported
+    name: (type_identifier) @name) @def.enum
+)
+
+(
+  (line_comment)? @doc
+  .
+  (trait_item
+    (visibility_modifier)? @exported
+    name: (type_identifier) @name) @def.interface
+)
+
+; Supertrait bound (`trait Shape: Draw`) as its own pattern. Folding @ref.extends
+; into the @def.interface pattern above dropped it: the `(line_comment)? @doc .`
+; anchor there is incompatible with also capturing an optional nested field in
+; this query engine (the same fragility documented on the @def.function patterns).
+(trait_item bounds: (trait_bounds (type_identifier) @ref.extends))
+
+(
+  (line_comment)? @doc
+  .
+  (const_item
+    (visibility_modifier)? @exported
+    name: (identifier) @name
+    type: (_)? @ret) @def.var
+)
+
+; --- implements ------------------------------------------------------------------
+(impl_item trait: (type_identifier) @ref.implements type: (type_identifier))
+
+; --- calls -----------------------------------------------------------------------
+(call_expression function: (identifier) @ref.call)
+(call_expression function: (field_expression field: (field_identifier) @ref.call))
+; Capture the whole scoped path, not just the final segment: `Foo::new` must
+; reach the resolver qualified, or every `X::new()` in the codebase collapses
+; onto one bare `new` candidate set (61% of all fuzzy edges before this — see
+; plan.md S1). extractors.ts keeps both forms; the resolver tries qualified first.
+(call_expression function: (scoped_identifier) @ref.call)
+(macro_invocation macro: (identifier) @ref.reference)
+
+; --- imports -----------------------------------------------------------------------
+(use_declaration argument: (_) @import.specifier)

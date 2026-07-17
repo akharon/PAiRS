@@ -4,6 +4,8 @@ The parse → resolve → extract pipeline that turns source files into the deri
 
 Status: Draft · Addresses R1 (precision), R2 (staleness), R7 (incremental drift), O1, O5, O6
 
+**Reuse:** the parse/resolve/extract pipeline is **adapted from the reference indexer** (`vendor/reference-indexer/src/index/` — `parserRegistryImpl`, `extractorImpl`, `codeIndexerImpl`, two-pass `resolvePending` with `resolved`/`fuzzy` confidence, `types.ts` data model). Net-new here is only the KuzuDB store binding (see [`subsystem_graph_store_spec.md`](subsystem_graph_store_spec.md)) and Rust-precision measurement. Reused tests: `pipeline.test.ts` (golden model), `codeIndexerImpl.test.ts`, `types.test.ts`, `provenanceImpl.test.ts`. See [`vendor/reference-indexer/REUSE.md`](vendor/reference-indexer/REUSE.md).
+
 ---
 
 ## 1. Responsibilities

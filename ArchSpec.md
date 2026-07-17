@@ -135,11 +135,13 @@ Patterns: **Pipeline** (parse → resolve → extract → store), **single-write
 └─────────────────────────────────────────────────────────────┘
 ```
 
+Reuse legend: **↻ adapt** from `vendor/reference-indexer/` (see `vendor/reference-indexer/REUSE.md`) · **✦ net-new** for GIZEM.
+
 | Module | Responsibility | Spec |
 |--------|---------------|------|
-| `core/indexer` | Parse files, resolve names, extract nodes/edges, incremental updates, freshness metadata | [`subsystem_indexer_spec.md`](subsystem_indexer_spec.md) |
-| `store/graph` | KuzuDB lifecycle, schema/migration, single-writer transactions, read snapshots | [`subsystem_graph_store_spec.md`](subsystem_graph_store_spec.md) |
-| `core/rules` + `adapters/mcp` | Rule parsing/execution, violation formatting, baseline, MCP tool surface | [`subsystem_mcp_rules_spec.md`](subsystem_mcp_rules_spec.md) |
+| `core/indexer` **↻** | Parse files, resolve names, extract nodes/edges, incremental updates, freshness metadata — adapted from the reference-indexer parser registry + extractors + `resolvePending` | [`subsystem_indexer_spec.md`](subsystem_indexer_spec.md) |
+| `store/graph` **✦** | KuzuDB lifecycle, schema/migration, single-writer transactions, read snapshots — net-new; implements the reference project's `CodeStore` contract in Cypher | [`subsystem_graph_store_spec.md`](subsystem_graph_store_spec.md) |
+| `core/rules` **✦** + `adapters/mcp` **↻** | Rule engine net-new (the differentiator); MCP tool surface + rendering (token budget, pagination, freshness) adapted from the reference indexer | [`subsystem_mcp_rules_spec.md`](subsystem_mcp_rules_spec.md) |
 | `core/analyze` | Tier-3 queries: impact, dead code, coupling, fan-out, test gap, cycles, Louvain map | in MCP/rules spec §5 |
 | `adapters/cli` | `index`, `check`, `query`, `map`, `init`; exit codes; SARIF | in MCP/rules spec §6 |
 | `adapters/vscode` | **Primary surface.** Extension host: embeds the core, module-graph webview, inline rule diagnostics (VS Code Diagnostics API), status bar (freshness/`unresolved_ratio`), spawns the MCP server. Read-only — never edits | in MCP/rules spec §7 |
@@ -226,6 +228,8 @@ gizem init
 | 005 | Rules as RON config with mandatory `explain`; built-in kinds + raw Cypher escape hatch | Accepted |
 | 006 | Louvain for module map and `init` inference (carried over from v1 ADR-006) | Accepted |
 | 007 | Baseline/ratchet mode for CI adoption on legacy codebases | Accepted |
+| 008 | Reuse the reference-indexer code-graph spine (parser/extractors/tool-contracts/MCP server/VS Code shell) — vendored at `vendor/reference-indexer/`, see `vendor/reference-indexer/REUSE.md`; drop its memory subsystem | Accepted — 2026-07-16 |
+| 009 | Keep KuzuDB despite the reference project proving SQLite (zero-binding) suffices — retain Cypher for rules/escape-hatch; SQLite stays the documented fallback (ADR-001) | Accepted — 2026-07-16 (R4/S2 remain live as a consequence) |
 | — | v1 ADRs on serializer, Cranelift, semantic VCS, dummy file tools | **Retired** (pivot) |
 
 ---
@@ -251,10 +255,10 @@ Scores are residual **before** exit tests pass. "Eliminated" requires the named 
 
 | ID | Risk | Score | Mitigation | Exit test |
 |----|------|-------|-----------|-----------|
-| R1 | Resolution precision too low → false positives → teams disable rules | **High** | unresolved-ratio metric; "possible violation" class excluded from CI fail; resolver golden corpus; syn upgrade path | V2, V4, precision bench ≥ 90% |
+| R1 | Resolution precision too low → false positives → teams disable rules | **High** | unresolved-ratio metric; "possible violation" class excluded from CI fail; resolver golden corpus; syn upgrade path. **De-risked:** the reference project already ships a working two-pass resolver with `resolved`/`fuzzy` confidence (`vendor/reference-indexer/`), so S1 shifts from *build a resolver* to *measure the existing one on ARES* | V2, V4, precision bench ≥ 90% |
 | R2 | Index staleness causes wrong agent answers | **Medium** | freshness stamp on every answer; watcher + on-demand reindex before `check_rules`; CI always cold-indexes | V5, staleness E2E |
 | R3 | Retrieval commoditization — graph-MCP rivals add rules | **Medium** | rules ship in MVP (week 4), not post-MVP; `init` inference and agent-legible explanations are the moat | V4, V7 |
-| R4 | KuzuDB binding instability | **Medium** | disposable index (worst case: re-index); cross-platform CI week 1; SQLite fallback design documented | V1 on 3 platforms |
+| R4 | KuzuDB binding instability **+ native-addon packaging** (must ship a platform-specific binary per `.vsix`; the reference project's `node:sqlite` needed none) | **Medium** | disposable index (worst case: re-index); cross-platform CI + per-platform `.vsix` from week 1; **SQLite fallback is now proven code, not just a design** — the reference project runs the identical spine on `node:sqlite` with zero native bindings (`vendor/reference-indexer/`), so falling back is a store-adapter swap behind the `CodeStore` interface, not a rewrite | V1 on 3 platforms; per-platform `.vsix` installs; S2 |
 | R5 | Empty-config problem — nobody writes rules | **Medium** | `gizem init` proposes layers/rules from structure + Louvain; starter packs | V7 |
 | R6 | MCP spec churn | **Low-Med** | protocol-agnostic core, thin adapter; CLI parity for everything | adapter conformance tests |
 | R7 | Incremental-index drift vs. full index | **Medium** | property test incremental ≡ full in CI | V8 |
@@ -298,4 +302,4 @@ Scores are residual **before** exit tests pass. "Eliminated" requires the named 
 | Last updated | 2026-07-16 |
 | Version | 2.0.0 — post-pivot draft; risk register honest per REVIEW.md discipline |
 
-References: [`REVIEW.md`](REVIEW.md) (pivot rationale + market research) · CodexGraph (NAACL 2025) · Codebase-Memory (arXiv 2603.27277) · Blondel et al. 2008 (Louvain) · modelcontextprotocol.io · docs.kuzudb.com
+References: [`REVIEW.md`](REVIEW.md) (pivot + reference-indexer reuse rationale) · [`vendor/reference-indexer/REUSE.md`](vendor/reference-indexer/REUSE.md) (file-by-file reuse map) · CodexGraph (NAACL 2025) · Codebase-Memory (arXiv 2603.27277) · Blondel et al. 2008 (Louvain) · modelcontextprotocol.io · docs.kuzudb.com

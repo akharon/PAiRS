@@ -1,0 +1,16 @@
+**/*.test.ts
+**/*.test.js
+.git
+.gitignore
+.gizem/**
+.pairs/**
+scripts/
+spikes/
+vendor/
+node_modules/
+*.md
+esbuild.mjs
+eslint.config.mjs
+tsconfig.json
+vitest.config.ts
+src/

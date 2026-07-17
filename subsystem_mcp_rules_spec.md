@@ -4,6 +4,8 @@ The product surface: retrieval tools the agent queries, the rule engine that tur
 
 Status: Draft · Addresses R1 (false positives), R3 (differentiation), R5 (empty config), R6, R10 (VS Code coupling), O3, O4
 
+**Reuse:** the MCP server, zod tool contracts (`tools.ts`), executor dispatch, and rendering (token budgeting, pagination, confidence markers, index-freshness footer) are **adapted from the reference indexer** (`vendor/reference-indexer/src/mcp/` + `integration/`); reused tests include `renderShared.test.ts`, `codeToolExecutor.test.ts`. The **rule engine (§3), guardrail tools (§4), and VS Code inline diagnostics (§7) are net-new** — the reference project has retrieval/analysis but no architectural rules. See [`vendor/reference-indexer/REUSE.md`](vendor/reference-indexer/REUSE.md).
+
 ---
 
 ## 1. Layering

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+  <!-- Simple brain, top view: two mirrored lobes with a central fissure.
+       Single solid color — the VS Code activity bar masks and recolors it. -->
+  <path fill="#424242" d="M11.4 4 C10.5 2.9 8.9 2.6 7.8 3.3 C6.7 4 6.2 5.3 6.6 6.5 C5.1 7 4 8.5 4.1 10.1 C4.2 11 4.6 11.8 5.3 12.4 C4.6 13.2 4.3 14.3 4.6 15.4 C5 16.6 6 17.5 7.3 17.6 C7.6 19 8.9 20 10.4 20 C10.8 20 11.1 19.9 11.4 19.8 Z"/>
+  <path fill="#424242" d="M11.4 4 C10.5 2.9 8.9 2.6 7.8 3.3 C6.7 4 6.2 5.3 6.6 6.5 C5.1 7 4 8.5 4.1 10.1 C4.2 11 4.6 11.8 5.3 12.4 C4.6 13.2 4.3 14.3 4.6 15.4 C5 16.6 6 17.5 7.3 17.6 C7.6 19 8.9 20 10.4 20 C10.8 20 11.1 19.9 11.4 19.8 Z" transform="matrix(-1 0 0 1 24 0)"/>
+</svg>

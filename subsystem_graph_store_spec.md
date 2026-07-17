@@ -4,6 +4,8 @@ The KuzuDB access layer for the derived index. Dramatically simpler than its v1 
 
 Status: Draft · Addresses R4 (Kuzu bindings), O2 (concurrency), R2 (snapshots)
 
+**Reuse:** this is the **primary net-new component** — GIZEM keeps KuzuDB (Cypher) where the reference project used `node:sqlite`. It implements the reference project's `CodeStore` contract (`vendor/reference-indexer/src/index/codeStore.ts`), porting its SQLite logic — `applyExtraction`, `resolvePending`, `findCycles` (Tarjan), `unreferenced`, `fileEdges`, `hotspots`, `untested` — from SQL to Cypher (`codeStoreImpl.ts` is the reference). Because the interface is preserved, the proven SQLite impl is a drop-in fallback if Kuzu bindings disappoint (R4). See [`vendor/reference-indexer/REUSE.md`](vendor/reference-indexer/REUSE.md).
+
 ---
 
 ## 1. Responsibilities

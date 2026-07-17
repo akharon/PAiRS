@@ -222,9 +222,9 @@ Built-in rule kinds (`Layering`, `NoCycles`, `MaxFanOut`, `ForbiddenDep`, `Visib
 
 ## 5. Indexer
 
-The graph is produced by an incremental indexer (fully specified in [`subsystem_indexer_spec.md`](subsystem_indexer_spec.md)):
+The graph is produced by an incremental indexer (fully specified in [`subsystem_indexer_spec.md`](subsystem_indexer_spec.md)), **adapted from a proven, tested multi-language indexer** (a prior project by the same author, vendored at [`vendor/reference-indexer/`](vendor/reference-indexer/) — see [`REVIEW.md`](REVIEW.md) §0.2):
 
-- **Parse:** tree-sitter grammars (multi-language path; 66 languages exist) with a Rust-aware resolution layer first. `syn`-based deep resolution is a post-MVP precision upgrade, evaluated against measured `unresolved_ratio`.
+- **Parse:** tree-sitter grammars — the reused parser layer already ships 12 languages; v1 *validates* on Rust with a Rust-aware resolution layer. `syn`-based deep resolution is a post-MVP precision upgrade, evaluated against measured `unresolved_ratio`.
 - **Two-pass:** (1) declare all symbols, (2) resolve references and extract edges.
 - **Incremental:** file watcher + content hashes; a saved file re-indexes in < 100 ms; only that file's `DECLARES` subgraph is replaced.
 - **Honest resolution:** unresolvable references stored with `resolved: false`, counted in `unresolved_ratio`.
