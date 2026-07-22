@@ -172,6 +172,32 @@ async function main(): Promise<void> {
         process.stdout.write(`Baseline written: ${outPath} (${baseline.keys.length} accepted violation(s)).\n`);
         break;
       }
+      case 'init': {
+        // gizem init [--force] — index, infer layers, write starter rules.ron
+        // + a findings report (plan.md 3.4 / R5). Never overwrites an existing
+        // ruleset without --force.
+        const rulesPath = path.join(root, '.gizem', 'rules.ron');
+        const exists = await fs.access(rulesPath).then(() => true, () => false);
+        if (exists && !rest.includes('--force')) {
+          process.stderr.write(`${rulesPath} already exists — review it, or re-run with --force to overwrite.\n`);
+          process.exitCode = 2;
+          break;
+        }
+        process.stderr.write('Indexing…\n');
+        const report = await indexer.fullIndex(root);
+        process.stderr.write(`Indexed ${report.files} files in ${report.elapsedMs} ms.\n`);
+        const { proposeInit } = await import('../../core/analyze/initProposal');
+        const proposal = await proposeInit(store);
+        await fs.writeFile(rulesPath, proposal.rulesRon);
+        const nLayers = Object.keys(proposal.layers).length;
+        process.stdout.write(`Wrote ${rulesPath}: ${nLayers} inferred layer(s) over ${proposal.map.modules.length} module(s).\n`);
+        if (proposal.findings.length) {
+          process.stdout.write(`\nReview these before trusting the proposal:\n`);
+          for (const f of proposal.findings) process.stdout.write(`  - ${f}\n`);
+        }
+        process.stdout.write(`\nNext: \`gizem check\` to see day-1 violations, \`gizem baseline update\` to accept them.\n`);
+        break;
+      }
       case 'watch': {
         // gizem watch [--check] — incremental re-index on save (plan.md 3.1);
         // with --check, re-evaluate rules after each settled batch (3.3-lite).
@@ -217,7 +243,7 @@ async function main(): Promise<void> {
         break;
       }
       default:
-        process.stderr.write('Usage: gizem <index|query|stats|impact|check|baseline|rules|watch>\n');
+        process.stderr.write('Usage: gizem <index|init|query|stats|impact|check|baseline|rules|watch>\n');
         process.exitCode = 1;
     }
   } finally {

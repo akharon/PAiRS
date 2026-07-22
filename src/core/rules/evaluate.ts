@@ -10,6 +10,7 @@
  * themselves track the weakest confidence seen.
  */
 
+import { isTestPath } from '../indexer/types';
 import type { CodeStore } from '../../store/graph/codeStore';
 import type { CheckResult, LayeringRule, MaxFanOutRule, Rule, RuleSet, Violation, ViolationNode, ForbiddenDepRule, VisibilityBoundaryRule, NoCyclesRule, CypherRule } from './types';
 
@@ -155,7 +156,7 @@ async function evalMaxFanOut(rule: Rule, kind: MaxFanOutRule, store: CodeStore):
   // a ceiling crossed only via fuzzy edges is a `possible` finding.
   const rows = await store.query(
     `MATCH (a:Symbol)-[e:CALLS]->(:Symbol)
-     WHERE a.kind = 'function' OR a.kind = 'method'
+     WHERE (a.kind = 'function' OR a.kind = 'method') AND coalesce(e.test, false) = false
      RETURN a.qualified AS q, a.name AS n, a.file AS f, a.startLine AS l,
             count(e) AS total, sum(CASE WHEN e.confidence = 'fuzzy' THEN 1 ELSE 0 END) AS fuzzy`
   );
@@ -163,6 +164,7 @@ async function evalMaxFanOut(rule: Rule, kind: MaxFanOutRule, store: CodeStore):
   for (const r of rows) {
     const file = String(r.f);
     if (kind.pathPrefix && !file.startsWith(kind.pathPrefix)) continue;
+    if (isTestPath(file)) continue; // a test harness fanning out is not an architecture smell
     const total = Number(r.total);
     const fuzzyN = Number(r.fuzzy);
     if (total <= kind.max) continue;
