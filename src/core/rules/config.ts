@@ -8,6 +8,7 @@
 
 import { REFERENCE_EDGE_KINDS, STRUCTURAL_EDGE_KINDS } from '../indexer/types';
 import type { EdgeKind } from '../indexer/types';
+import { stripCypherLiterals } from '../../store/graph/codeStore';
 import { isVariant, parseRon } from './ron';
 import type { RonValue, RonVariant } from './ron';
 import type { Rule, RuleKind, RuleSet, RuleTier, Severity } from './types';
@@ -88,7 +89,9 @@ function parseKind(v: RonValue, ruleId: string): RuleKind {
 /** Reject mutating Cypher at parse time (spec §3.2: read-snapshot only). */
 export function assertReadOnlyCypher(query: string, ruleId: string): void {
   const banned = /\b(CREATE|MERGE|DELETE|DETACH|SET|DROP|ALTER|COPY|LOAD|CALL|INSTALL|ATTACH|EXPORT|IMPORT)\b/i;
-  const m = banned.exec(query);
+  // Scan with string literals/comments blanked: a quoted word like
+  // "… WHERE s.doc CONTAINS 'create'" is data, not a mutation.
+  const m = banned.exec(stripCypherLiterals(query));
   if (m) fail(`rule "${ruleId}": Cypher rules are read-only — "${m[0].toUpperCase()}" is not allowed`);
 }
 

@@ -37,6 +37,7 @@ import type {
 } from '../../core/indexer/types';
 import { isTestPath } from '../../core/indexer/types';
 import type { CodeStore, CodeStoreFactory } from './codeStore';
+import { stripCypherLiterals } from './codeStore';
 import { REFERENCE_EDGE_TABLES, SCHEMA_DDL, SCHEMA_VERSION } from './schema';
 
 /** Rust items that are never dead code even with zero incoming edges. */
@@ -836,7 +837,9 @@ export class KuzuCodeStore implements CodeStore {
   }
 
   async query(cypher: string): Promise<Record<string, unknown>[]> {
-    const lower = cypher.trim().toLowerCase();
+    // Scan with string literals/comments blanked so quoted data containing
+    // keyword words ("… CONTAINS 'create'") doesn't false-positive the guard.
+    const lower = stripCypherLiterals(cypher).trim().toLowerCase();
     if (/\b(create|merge|delete|set|remove)\b/.test(lower)) {
       throw new Error('query() is read-only — mutating Cypher is rejected (subsystem_mcp_rules_spec.md §2)');
     }
@@ -851,6 +854,16 @@ export class KuzuCodeStore implements CodeStore {
     const rows = await res.getAll();
     res.close();
 
+    // One aggregate query for all referenced ids, not one count() per symbol —
+    // the per-symbol probe made dead_code O(symbols) Kuzu round-trips
+    // (~0.6 ms each ⇒ seconds on a ripgrep-sized corpus).
+    const referenced = new Set<number>();
+    const refRes = await this.q(
+      `MATCH ()-[e]->(s:Symbol) WHERE label(e) IN [${REFERENCE_EDGE_TABLES.map((k) => `'${k}'`).join(',')}] RETURN DISTINCT s.id AS id`
+    );
+    for (const r of await refRes.getAll()) referenced.add(Number(r.id));
+    refRes.close();
+
     const candidates: DeadCodeCandidate[] = [];
     for (const r of rows) {
       const sym = toSymbolRecord(r);
@@ -859,13 +872,7 @@ export class KuzuCodeStore implements CodeStore {
       if (kinds && !kinds.includes(sym.kind)) continue;
       if (ENTRY_POINT_NAMES.has(sym.name)) continue;
       if (isTestPath(sym.file)) continue;
-
-      const incomingRes = await this.q(
-        `MATCH ()-[e]->(s:Symbol {id: ${sym.id}}) WHERE label(e) IN [${REFERENCE_EDGE_TABLES.map((k) => `'${k}'`).join(',')}] RETURN count(e) AS c`
-      );
-      const incoming = row(await incomingRes.getAll());
-      incomingRes.close();
-      if (Number(incoming?.c ?? 0) > 0) continue;
+      if (referenced.has(sym.id)) continue;
 
       if (sym.exported && !filter.includeExported) continue;
       candidates.push({ symbol: sym, note: sym.exported ? 'exported' : null });
@@ -880,7 +887,7 @@ export class KuzuCodeStore implements CodeStore {
   async fileEdges(path: string, direction: 'imports' | 'importers', opts?: { transitive?: boolean; maxDepth?: number; limit?: number }): Promise<FileDep[]> {
     const maxDepth = opts?.maxDepth ?? 5;
     const limit = opts?.limit ?? 50;
-    const visited = new Map<string, number>(); // path -> depth
+    const visited = new Map<string, { depth: number; line: number }>(); // path -> first sighting
     let frontier = [path];
     let depth = 0;
 
@@ -890,15 +897,15 @@ export class KuzuCodeStore implements CodeStore {
       for (const p of frontier) {
         const cypher =
           direction === 'imports'
-            ? `MATCH (a:Symbol {file: '${escapeStr(p)}'})-[e:DEPENDS_ON]->(b:Symbol) WHERE b.file <> '${escapeStr(p)}' RETURN DISTINCT b.file AS file, e.line AS line`
-            : `MATCH (a:Symbol)-[e:DEPENDS_ON]->(b:Symbol {file: '${escapeStr(p)}'}) WHERE a.file <> '${escapeStr(p)}' RETURN DISTINCT a.file AS file, e.line AS line`;
+            ? `MATCH (a:Symbol {file: '${escapeStr(p)}'})-[e:DEPENDS_ON]->(b:Symbol) WHERE b.file <> '${escapeStr(p)}' RETURN b.file AS file, min(e.line) AS line`
+            : `MATCH (a:Symbol)-[e:DEPENDS_ON]->(b:Symbol {file: '${escapeStr(p)}'}) WHERE a.file <> '${escapeStr(p)}' RETURN a.file AS file, min(e.line) AS line`;
         const res = await this.q(cypher);
         const rows = await res.getAll();
         res.close();
         for (const r of rows) {
           const file = String(r.file);
           if (visited.has(file)) continue;
-          visited.set(file, depth);
+          visited.set(file, { depth, line: Number(r.line) });
           next.push(file);
           if (visited.size >= limit) break;
         }
@@ -909,7 +916,7 @@ export class KuzuCodeStore implements CodeStore {
       if (visited.size >= limit) break;
     }
 
-    return [...visited.entries()].map(([p, d]) => ({ path: p, line: 0, depth: d }));
+    return [...visited.entries()].map(([p, v]) => ({ path: p, line: v.line, depth: v.depth }));
   }
 
   async hotspots(query: HotspotQuery): Promise<SymbolRecord[]> {
@@ -936,19 +943,22 @@ export class KuzuCodeStore implements CodeStore {
     const rows = await res.getAll();
     res.close();
 
+    // One aggregate query for all test-called symbol ids, not one count() per
+    // symbol (same round-trip amplification as unreferenced(), see above).
+    const testCalled = new Set<number>();
+    const testerRes = await this.q(
+      `MATCH (t:Symbol)-[:CALLS]->(s:Symbol) WHERE t.file =~ '.*(tests?/|__tests__/|\\\\.test\\\\.rs$|_test\\\\.rs$)' RETURN DISTINCT s.id AS id`
+    );
+    for (const r of await testerRes.getAll()) testCalled.add(Number(r.id));
+    testerRes.close();
+
     const untested: SymbolRecord[] = [];
     for (const r of rows) {
       const sym = toSymbolRecord(r);
       if (filter.pathPrefix && !sym.file.startsWith(filter.pathPrefix)) continue;
       if (filter.excludePath && sym.file.startsWith(filter.excludePath)) continue;
       if (isTestPath(sym.file)) continue;
-
-      const testerRes = await this.q(
-        `MATCH (t:Symbol)-[:CALLS]->(s:Symbol {id: ${sym.id}}) WHERE t.file =~ '.*(tests?/|__tests__/|\\\\.test\\\\.rs$|_test\\\\.rs$)' RETURN count(t) AS c`
-      );
-      const testers = row(await testerRes.getAll());
-      testerRes.close();
-      if (Number(testers?.c ?? 0) > 0) continue;
+      if (testCalled.has(sym.id)) continue;
       untested.push(sym);
     }
 

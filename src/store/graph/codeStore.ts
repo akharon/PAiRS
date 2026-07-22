@@ -36,6 +36,48 @@
 
 import type { DeadCodeCandidate, DeadCodeFilter, EdgeKind, EdgeRecord, FileDep, FileRecord, FileExtraction, HotspotQuery, IndexStats, SymbolRecord, AmbiguousSymbol } from '../../core/indexer/types';
 
+/**
+ * Blank out Cypher string literals and comments so keyword scans (`query()`'s
+ * read-only guard, config.ts's assertReadOnlyCypher) don't false-positive on
+ * words like "delete" appearing inside quoted data (`WHERE s.doc CONTAINS
+ * 'create'`). Replacement preserves length/newlines so any reported positions
+ * still line up. Handles single/double-quoted strings with backslash escapes,
+ * `//` line comments, and `/* *\/` block comments.
+ */
+export function stripCypherLiterals(cypher: string): string {
+  let out = '';
+  let i = 0;
+  const n = cypher.length;
+  while (i < n) {
+    const c = cypher[i]!;
+    if (c === "'" || c === '"') {
+      const quote = c;
+      out += ' ';
+      i++;
+      while (i < n) {
+        if (cypher[i] === '\\') { out += '  '; i += 2; continue; }
+        if (cypher[i] === quote) { out += ' '; i++; break; }
+        out += cypher[i] === '\n' ? '\n' : ' ';
+        i++;
+      }
+    } else if (c === '/' && cypher[i + 1] === '/') {
+      while (i < n && cypher[i] !== '\n') { out += ' '; i++; }
+    } else if (c === '/' && cypher[i + 1] === '*') {
+      out += '  ';
+      i += 2;
+      while (i < n && !(cypher[i] === '*' && cypher[i + 1] === '/')) {
+        out += cypher[i] === '\n' ? '\n' : ' ';
+        i++;
+      }
+      if (i < n) { out += '  '; i += 2; }
+    } else {
+      out += c;
+      i++;
+    }
+  }
+  return out;
+}
+
 export interface CodeStore {
   // -- Indexing (called by the Indexer) --------------------------------------
   /**

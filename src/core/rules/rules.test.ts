@@ -98,6 +98,10 @@ describe('parseRuleSet', () => {
       parseRuleSet('( rules: [ (id: "c", kind: Cypher("MATCH (s) DELETE s"), explain: "e") ] )')
     ).toThrowError(ConfigError);
     expect(() => assertReadOnlyCypher('CREATE (n)', 'r')).toThrowError(/read-only/);
+    // Keywords inside string literals or comments are data, not mutation.
+    expect(() => assertReadOnlyCypher(`MATCH (s) WHERE s.doc CONTAINS 'create table' RETURN s`, 'r')).not.toThrow();
+    expect(() => assertReadOnlyCypher(`MATCH (s) // delete me later\nRETURN s`, 'r')).not.toThrow();
+    expect(() => assertReadOnlyCypher(`MATCH (s) WHERE s.name = 'x' SET s.name = 'y'`, 'r')).toThrowError(/read-only/);
   });
 });
 

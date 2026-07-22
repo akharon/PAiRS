@@ -152,12 +152,12 @@ export function createExecutors(deps: ExecutorDeps): Executors {
           : await store.edgesFrom([r.sym.id], CALL_KINDS);
       const filtered = input.includeFuzzy ? edges : edges.filter((e) => e.confidence !== 'fuzzy');
       if (filtered.length === 0) return `No ${input.direction} for ${cite(r.sym)}.`;
-      const otherIds = filtered.map((e) => (input.direction === 'callers' ? e.fromId : e.toId));
-      const syms = await Promise.all(otherIds.map((id) => store.get(id)));
-      const { page, note } = paginate(
-        syms.map((s, i) => ({ s, e: filtered[i]! })).filter((x) => x.s),
-        input.limit
-      );
+      // Paginate the edge list first, then fetch only that page's symbols —
+      // fetching every counterpart before slicing made large fan-ins cost one
+      // store round-trip per edge for rows that were then discarded.
+      const { page: edgePage, note } = paginate(filtered, input.limit);
+      const syms = await Promise.all(edgePage.map((e) => store.get(input.direction === 'callers' ? e.fromId : e.toId)));
+      const page = syms.map((s, i) => ({ s, e: edgePage[i]! })).filter((x) => x.s);
       const body = page.map((x) => `  - ${cite(x.s!)}${x.e.confidence === 'fuzzy' ? '  [fuzzy]' : ''}`).join('\n');
       return `${filtered.length} ${input.direction} of ${r.sym.qualified || r.sym.name}:\n${body}${note}`;
     },
