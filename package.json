@@ -1,6 +1,6 @@
 {
   "name": "gizem",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "description": "Derived code-graph index + architectural rule engine for AI coding agents",
   "license": "MIT",
   "author": "Mustafa Kiyar",
@@ -20,6 +20,12 @@
     "onStartupFinished"
   ],
   "contributes": {
+    "mcpServerDefinitionProviders": [
+      {
+        "id": "gizem.mcpProvider",
+        "label": "GIZEM code-graph tools"
+      }
+    ],
     "commands": [
       {
         "command": "gizem.reindex",
@@ -60,7 +66,8 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint src",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "package": "bash scripts/package.sh"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",

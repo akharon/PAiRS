@@ -202,7 +202,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const diagnostics = vscode.languages.createDiagnosticCollection('gizem');
   context.subscriptions.push(diagnostics);
 
-  context.subscriptions.push(registerMcpProvider(context.extensionPath));
   context.subscriptions.push(
     vscode.commands.registerCommand('gizem.reindex', () => reindex(ws).then(() => refreshDiagnostics(ws, diagnostics))),
     vscode.commands.registerCommand('gizem.findSymbol', () => findSymbol(ws)),
@@ -215,6 +214,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       panel.webview.html = moduleMapHtml(map);
     })
   );
+
+  // After commands: a provider-registration failure must not take the palette
+  // commands down with it (0.4.0 shipped exactly that failure mode).
+  context.subscriptions.push(registerMcpProvider(context.extensionPath));
 
   // Re-check rules when rules.ron is edited (diagnostics follow the config live).
   const rulesWatcher = vscode.workspace.createFileSystemWatcher(
