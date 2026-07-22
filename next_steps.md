@@ -104,7 +104,19 @@ typecheck + lint clean, all three bundles build.**
 ## Do next (in order)
 
 1. **Phase 1 exit criteria still to close** (plan.md 1.x exit list):
-   - **`.vsix` install test** — PACKAGED (4.45 MB). Manual verification in a real VS Code: run `code --install-extension gizem-0.1.0.vsix`, then check activation, .gizem creation, status bar, and MCP registration. See `scripts/test-extension.sh` for full checklist.
+   - **`.vsix` install test — DONE (2026-07-22), and it caught a shipping bug.**
+     The 4.45 MB package could never activate: `kuzu` is an esbuild external
+     (native addon) but `.vscodeignore` excluded all of `node_modules/`, so the
+     installed extension threw `Cannot find module 'kuzu'` on activate. Fixed by
+     whitelisting kuzu's runtime files (js + kuzujs.node, ~25 MB; kuzu-source/
+     prebuilt still excluded) → 13 MB .vsix. Verified: `code --install-extension
+     gizem-0.2.0.vsix` on VS Code 1.124, then packaged extension.js activated
+     against a workspace fixture — kuzu loads, `.gizem/index` created, both
+     commands + `gizem.mcpProvider` registered, and the installed dist/
+     mcp-server.js answers find_symbol over JSON-RPC against that index.
+     Note: shipped kuzujs.node is platform-specific (linux-x64 here); per-platform
+     .vsix targets are a later packaging item. Remaining GUI-only nicety: eyeball
+     the status bar in a real window (all programmatic checks pass).
 2. **Cross-platform CI** — WIRED (`.github/workflows/ci.yml`). Typecheck + lint + test + smoke index on ubuntu-latest/macos-latest/windows-latest; locally verified on Linux/Node 22. Awaits first push to GitHub (still a Phase 0 exit criterion for real CI run).
 3. **Index-time regression — FIXED (2026-07-22).** Root cause was not write
    batching: `applyExtraction` invalidated the in-memory symbol mirror per file,
