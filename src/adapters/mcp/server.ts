@@ -25,6 +25,8 @@ import type { CodeToolInput, CodeToolName } from './tools';
 export interface McpServerConfig {
   /** Absolute path to the `.gizem/index` Kuzu database directory. */
   dbPath: string;
+  /** Path to `.gizem/rules.ron` (defaults to the db's sibling rules.ron). */
+  rulesPath: string;
   serverName: string;
   version: string;
   /** Tool names to skip registering. */
@@ -33,18 +35,22 @@ export interface McpServerConfig {
 
 export function parseArgs(argv: string[]): McpServerConfig {
   let dbPath = path.join(process.cwd(), '.gizem', 'index');
+  let rulesPath: string | null = null;
   const disabled = new Set<string>();
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--db') dbPath = path.resolve(argv[++i] ?? dbPath);
+    else if (a === '--rules') rulesPath = path.resolve(argv[++i] ?? '');
     else if (a === '--disabled-tools') for (const t of (argv[++i] ?? '').split(',')) if (t) disabled.add(t);
   }
-  return { dbPath, serverName: 'gizem', version: '0.2.0', disabledTools: disabled };
+  // Convention: db lives at <ws>/.gizem/index, rules at <ws>/.gizem/rules.ron.
+  rulesPath ??= path.join(path.dirname(dbPath), 'rules.ron');
+  return { dbPath, rulesPath, serverName: 'gizem', version: '0.2.0', disabledTools: disabled };
 }
 
 export async function main(config: McpServerConfig): Promise<void> {
   const store = await KuzuCodeStore.open(config.dbPath, nodeKuzuDriver);
-  const executors = createExecutors({ store });
+  const executors = createExecutors({ store, rulesPath: config.rulesPath });
   const server = new McpServer({ name: config.serverName, version: config.version });
 
   for (const [name, schema] of Object.entries(codeToolSchemas)) {

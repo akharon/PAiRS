@@ -26,6 +26,9 @@ import { KuzuCodeStore } from '../../store/graph/codeStoreImpl';
 import { nodeKuzuDriver } from '../../store/graph/kuzuDriver';
 import type { CodeStore } from '../../store/graph/codeStore';
 import type { Indexer } from '../../core/indexer/codeIndexer';
+import { parseRuleSet } from '../../core/rules/config';
+import { checkRules } from '../../core/rules/evaluate';
+import type { Violation } from '../../core/rules/types';
 
 interface Workspace {
   root: string;
@@ -121,6 +124,65 @@ async function findSymbol(ws: Workspace): Promise<void> {
   editor.revealRange(new vscode.Range(line, 0, line, 0), vscode.TextEditorRevealType.InCenter);
 }
 
+/**
+ * Inline diagnostics (plan.md 2.9, spec §7): violations from the rule engine
+ * rendered as squiggles. `confirmed` maps to the rule's severity, `possible`
+ * to Hint — visible in the hover, never alarming (R1). Read-only: no code
+ * actions that mutate source.
+ */
+async function refreshDiagnostics(ws: Workspace, collection: vscode.DiagnosticCollection): Promise<void> {
+  const rulesPath = path.join(ws.root, '.gizem', 'rules.ron');
+  let src: string;
+  try {
+    src = await fs.readFile(rulesPath, 'utf8');
+  } catch {
+    collection.clear(); // no ruleset — no diagnostics
+    return;
+  }
+  let violations: Violation[];
+  try {
+    const ruleset = parseRuleSet(src);
+    ({ violations } = await checkRules(ws.store, ruleset));
+  } catch (err) {
+    // Bad rules.ron: surface the parse error on the config file itself.
+    collection.clear();
+    collection.set(vscode.Uri.file(rulesPath), [
+      new vscode.Diagnostic(new vscode.Range(0, 0, 0, 1), String((err as Error).message), vscode.DiagnosticSeverity.Error),
+    ]);
+    return;
+  }
+  const byFile = new Map<string, vscode.Diagnostic[]>();
+  for (const v of violations) {
+    const n = v.nodes[0];
+    if (!n) continue;
+    const line = Math.max(0, n.line - 1);
+    const severity =
+      v.confidence === 'possible'
+        ? vscode.DiagnosticSeverity.Hint
+        : v.severity === 'error'
+          ? vscode.DiagnosticSeverity.Error
+          : vscode.DiagnosticSeverity.Warning;
+    const d = new vscode.Diagnostic(
+      new vscode.Range(line, 0, line, 200),
+      `${v.explanation}${v.suggestion ? ` — ${v.suggestion}` : ''}`,
+      severity
+    );
+    d.source = 'gizem';
+    d.code = v.rule;
+    d.relatedInformation = v.nodes.slice(1).map(
+      (r) =>
+        new vscode.DiagnosticRelatedInformation(
+          new vscode.Location(vscode.Uri.file(path.join(ws.root, r.file)), new vscode.Range(Math.max(0, r.line - 1), 0, Math.max(0, r.line - 1), 1)),
+          r.qualified
+        )
+    );
+    const key = n.file;
+    (byFile.get(key) ?? byFile.set(key, []).get(key)!).push(d);
+  }
+  collection.clear();
+  for (const [file, diags] of byFile) collection.set(vscode.Uri.file(path.join(ws.root, file)), diags);
+}
+
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const folder = vscode.workspace.workspaceFolders?.[0];
   if (!folder) return; // no workspace → nothing to index
@@ -133,15 +195,30 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   statusBar.command = 'gizem.reindex';
   context.subscriptions.push(statusBar);
 
+  const diagnostics = vscode.languages.createDiagnosticCollection('gizem');
+  context.subscriptions.push(diagnostics);
+
   context.subscriptions.push(registerMcpProvider(context.extensionPath));
   context.subscriptions.push(
-    vscode.commands.registerCommand('gizem.reindex', () => reindex(ws)),
-    vscode.commands.registerCommand('gizem.findSymbol', () => findSymbol(ws))
+    vscode.commands.registerCommand('gizem.reindex', () => reindex(ws).then(() => refreshDiagnostics(ws, diagnostics))),
+    vscode.commands.registerCommand('gizem.findSymbol', () => findSymbol(ws)),
+    vscode.commands.registerCommand('gizem.checkRules', () => refreshDiagnostics(ws, diagnostics))
   );
 
+  // Re-check rules when rules.ron is edited (diagnostics follow the config live).
+  const rulesWatcher = vscode.workspace.createFileSystemWatcher(
+    new vscode.RelativePattern(folder, '.gizem/rules.ron')
+  );
+  const recheck = (): void => void refreshDiagnostics(ws, diagnostics);
+  rulesWatcher.onDidChange(recheck);
+  rulesWatcher.onDidCreate(recheck);
+  rulesWatcher.onDidDelete(recheck);
+  context.subscriptions.push(rulesWatcher);
+
   // Index on activation so the graph is fresh for the MCP server the moment a
-  // client connects; do it in the background so activation isn't blocked.
-  void reindex(ws);
+  // client connects; do it in the background so activation isn't blocked. Rule
+  // diagnostics follow once the graph exists.
+  void reindex(ws).then(() => refreshDiagnostics(ws, diagnostics));
 }
 
 export function deactivate(): void {

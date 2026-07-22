@@ -462,7 +462,14 @@ export class KuzuCodeStore implements CodeStore {
         const tail = u.specifier.split('::').filter(Boolean).pop();
         if (!tail) continue;
         const resolved = await this.resolveOneRef(tail, u.specifier, useSpecifiers);
-        if (resolved === 'unresolved') continue;
+        if (resolved === 'unresolved') {
+          // The imported file may simply not be indexed yet (index order is
+          // arbitrary). Park as a pending DEPENDS_ON from the module symbol so
+          // resolvePending() completes the edge once the target arrives —
+          // otherwise every forward `use` dep is silently lost.
+          pending.push({ fromIndex: 0, name: tail, qualifiedName: u.specifier, kind: 'DEPENDS_ON', line: u.line });
+          continue;
+        }
         for (const toId of resolved.ids) {
           // Skip self-edges and duplicate deps on the same target symbol.
           if (toId === moduleId || seenDep.has(toId)) continue;

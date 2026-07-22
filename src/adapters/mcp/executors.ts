@@ -9,14 +9,21 @@
  * text, not JSON — agents read prose more reliably and it costs fewer tokens.
  */
 
+import * as fs from 'node:fs';
 import type { CodeStore } from '../../store/graph/codeStore';
 import type { AmbiguousSymbol, EdgeKind, SymbolRecord } from '../../core/indexer/types';
 import { impact } from '../../core/analyze/impact';
 import { moduleMap } from '../../core/analyze/moduleMap';
+import { parseRuleSet } from '../../core/rules/config';
+import { checkRules } from '../../core/rules/evaluate';
+import { renderViolation, describeRuleKind } from '../../core/rules/render';
+import type { RuleSet } from '../../core/rules/types';
 import type { CodeToolInput, CodeToolName } from './tools';
 
 export interface ExecutorDeps {
   store: CodeStore;
+  /** Path to `.gizem/rules.ron`. Re-read on every rule-tool call so edits apply live. */
+  rulesPath?: string;
 }
 
 export type Executors = {
@@ -70,6 +77,22 @@ const CALL_KINDS: EdgeKind[] = ['CALLS'];
 
 export function createExecutors(deps: ExecutorDeps): Executors {
   const { store } = deps;
+
+  /** rules.ron → RuleSet, or a user-facing message when missing/invalid. */
+  function loadRules(): RuleSet | { message: string } {
+    if (!deps.rulesPath) return { message: 'No rules configured (server started without a rules path).' };
+    let src: string;
+    try {
+      src = fs.readFileSync(deps.rulesPath, 'utf8');
+    } catch {
+      return { message: `No ruleset at ${deps.rulesPath}. Create .gizem/rules.ron to enable architectural rules.` };
+    }
+    try {
+      return parseRuleSet(src);
+    } catch (e) {
+      return { message: `Invalid ${deps.rulesPath}: ${(e as Error).message}` };
+    }
+  }
 
   return {
     async find_symbol(input) {
@@ -161,6 +184,45 @@ export function createExecutors(deps: ExecutorDeps): Executors {
         `Subsystems:\n${clusters}` +
         (map.drift.length ? `\n\nCross-subsystem edges (drift, heaviest first):\n${drift}` : '\n\nNo cross-subsystem drift.')
       );
+    },
+
+    async check_rules(input) {
+      const rs = loadRules();
+      if ('message' in rs) return rs.message;
+      let ruleset = rs;
+      if (input.tier !== undefined || input.rule !== undefined) {
+        const rules = rs.rules.filter((r) => (input.tier === undefined || r.tier === input.tier) && (input.rule === undefined || r.id === input.rule));
+        if (rules.length === 0) return input.rule ? `No rule "${input.rule}" in the ruleset.` : `No tier-${input.tier} rules.`;
+        ruleset = { ...rs, rules };
+      }
+      const { violations, checkedRules } = await checkRules(store, ruleset);
+      if (violations.length === 0) return `OK — ${checkedRules.length} rule(s) checked, no violations.`;
+      const confirmed = violations.filter((v) => v.confidence === 'confirmed').length;
+      const { page, note } = paginate(violations, input.limit);
+      return (
+        `${violations.length} violation(s) (${confirmed} confirmed, ${violations.length - confirmed} possible) from ${checkedRules.length} rule(s):\n\n` +
+        page.map(renderViolation).join('\n\n') +
+        note
+      );
+    },
+
+    async list_rules() {
+      const rs = loadRules();
+      if ('message' in rs) return rs.message;
+      const layers = Object.entries(rs.layers)
+        .sort((a, b) => a[1] - b[1])
+        .map(([n, r]) => `${n}=${r}`)
+        .join(', ');
+      const body = rs.rules.map((r) => `  - ${r.id} [tier ${r.tier}, ${r.severity}] ${describeRuleKind(r.kind)}`).join('\n');
+      return `${rs.rules.length} rule(s)${layers ? `; layers: ${layers}` : ''}:\n${body}`;
+    },
+
+    async explain_rule(input) {
+      const rs = loadRules();
+      if ('message' in rs) return rs.message;
+      const r = rs.rules.find((x) => x.id === input.rule);
+      if (!r) return `No rule "${input.rule}". Known: ${rs.rules.map((x) => x.id).join(', ')}.`;
+      return `${r.id} [tier ${r.tier}, ${r.severity}]\nkind: ${describeRuleKind(r.kind)}\nexplain: ${r.explain}`;
     },
 
     async analyze(input) {

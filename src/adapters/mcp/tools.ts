@@ -134,6 +134,30 @@ export const codeToolSchemas = {
       offset,
     }),
   },
+  check_rules: {
+    description:
+      'Evaluate the workspace\'s architectural rules (.gizem/rules.ron) against ' +
+      'the code graph. Call AFTER editing code to verify no architecture rule is ' +
+      'violated — each violation returns the rule\'s explanation so you can ' +
+      'self-correct. `possible` findings come from fuzzy edges and never fail CI.',
+    input: z.object({
+      tier: z.number().int().min(1).max(2).optional().describe('Only evaluate rules of this tier.'),
+      rule: z.string().optional().describe('Only evaluate this rule id.'),
+      limit: z.number().int().min(1).max(100).default(30),
+    }),
+  },
+
+  list_rules: {
+    description: 'Summarize the active ruleset: rule ids, kinds, tiers, severities, and layers.',
+    input: z.object({}),
+  },
+
+  explain_rule: {
+    description: 'Full detail of one rule: its kind, configuration, and the explanation shown on violations.',
+    input: z.object({
+      rule: z.string().min(1).describe('Rule id from list_rules.'),
+    }),
+  },
 } as const;
 
 export type CodeToolName = keyof typeof codeToolSchemas;

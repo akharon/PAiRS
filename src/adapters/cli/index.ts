@@ -15,6 +15,11 @@ import { nodeListWorkspaceFiles, nodeReadFile } from '../../core/indexer/nodeFsD
 import { KuzuCodeStore } from '../../store/graph/codeStoreImpl';
 import { nodeKuzuDriver } from '../../store/graph/kuzuDriver';
 import { impact } from '../../core/analyze/impact';
+import { parseRuleSet } from '../../core/rules/config';
+import { checkRules } from '../../core/rules/evaluate';
+import { renderViolation, summarizeRule } from '../../core/rules/render';
+import { toSarif } from '../../core/rules/sarif';
+import { ciFailures, createBaseline, diffAgainstBaseline, parseBaseline } from '../../core/rules/baseline';
 
 async function main(): Promise<void> {
   const [, , command, ...rest] = process.argv;
@@ -84,8 +89,86 @@ async function main(): Promise<void> {
         process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
         break;
       }
+      case 'check': {
+        // gizem check [--ci] [--baseline <f>] [--format human|sarif|json] [--rules <f>]
+        const opt = (name: string): string | undefined => {
+          const i = rest.indexOf(name);
+          return i >= 0 ? rest[i + 1] : undefined;
+        };
+        const ci = rest.includes('--ci');
+        const format = opt('--format') ?? 'human';
+        const rulesPath = opt('--rules') ?? path.join(root, '.gizem', 'rules.ron');
+        const baselinePath = opt('--baseline');
+
+        let src: string;
+        try {
+          src = await fs.readFile(rulesPath, 'utf8');
+        } catch {
+          process.stderr.write(`No ruleset at ${rulesPath}. Create .gizem/rules.ron first.\n`);
+          process.exitCode = 2;
+          break;
+        }
+        const ruleset = parseRuleSet(src); // ConfigError propagates with the fixable message
+
+        if (ci) await indexer.fullIndex(root); // a gate must never judge a stale graph
+        const { violations, checkedRules } = await checkRules(store, ruleset);
+
+        // Baseline: only violations NOT in the snapshot can fail the run.
+        let fresh = violations;
+        let known = 0;
+        if (baselinePath) {
+          const b = parseBaseline(await fs.readFile(baselinePath, 'utf8'));
+          const diff = diffAgainstBaseline(violations, b);
+          fresh = diff.fresh;
+          known = diff.known.length;
+          if (diff.fixedKeys.length > 0 && format === 'human') {
+            process.stderr.write(`${diff.fixedKeys.length} baselined violation(s) fixed — run \`gizem baseline update\` to ratchet.\n`);
+          }
+        }
+
+        if (format === 'sarif') process.stdout.write(`${toSarif(fresh, ruleset.rules, '0.3.0')}\n`);
+        else if (format === 'json') process.stdout.write(`${JSON.stringify({ violations: fresh, known, checkedRules }, null, 2)}\n`);
+        else {
+          if (fresh.length === 0) {
+            process.stdout.write(`OK — ${checkedRules.length} rule(s), ${known} baselined, no new violations.\n`);
+          } else {
+            process.stdout.write(fresh.map(renderViolation).join('\n\n') + '\n');
+            process.stdout.write(`\n${fresh.length} new violation(s) (${known} baselined).\n`);
+          }
+        }
+
+        // Exit 1 only on new CONFIRMED error-severity violations (R1).
+        if (ciFailures(fresh).length > 0) process.exitCode = 1;
+        break;
+      }
+      case 'baseline': {
+        // gizem baseline update [--rules <f>] [--out <f>]
+        if (rest[0] !== 'update') {
+          process.stderr.write('Usage: gizem baseline update [--rules <f>] [--out <f>]\n');
+          process.exitCode = 1;
+          break;
+        }
+        const opt = (name: string): string | undefined => {
+          const i = rest.indexOf(name);
+          return i >= 0 ? rest[i + 1] : undefined;
+        };
+        const rulesPath = opt('--rules') ?? path.join(root, '.gizem', 'rules.ron');
+        const outPath = opt('--out') ?? path.join(root, '.gizem', 'baseline.json');
+        const ruleset = parseRuleSet(await fs.readFile(rulesPath, 'utf8'));
+        const { violations } = await checkRules(store, ruleset);
+        const baseline = createBaseline(violations);
+        await fs.writeFile(outPath, `${JSON.stringify(baseline, null, 2)}\n`);
+        process.stdout.write(`Baseline written: ${outPath} (${baseline.keys.length} accepted violation(s)).\n`);
+        break;
+      }
+      case 'rules': {
+        const rulesPath = rest[0] ?? path.join(root, '.gizem', 'rules.ron');
+        const ruleset = parseRuleSet(await fs.readFile(rulesPath, 'utf8'));
+        process.stdout.write(ruleset.rules.map((r) => `${summarizeRule(r)}\n`).join(''));
+        break;
+      }
       default:
-        process.stderr.write('Usage: gizem <index|query|stats|impact>\n');
+        process.stderr.write('Usage: gizem <index|query|stats|impact|check|baseline|rules>\n');
         process.exitCode = 1;
     }
   } finally {

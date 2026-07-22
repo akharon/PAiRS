@@ -101,6 +101,49 @@ typecheck + lint clean, all three bundles build.**
   subsystems / 45% drift. Regression-tested. See BENCHMARKS.md "Real-client MCP
   conformance".
 
+## Phase 2 progress (v0.3.0 — rule engine)
+
+- **2.1–2.4 rule engine core — DONE (2026-07-22).** `src/core/rules/`:
+  `ron.ts` (hand-rolled RON-subset reader, line:col errors), `config.ts`
+  (validated RuleSet; `explain` mandatory; mutating Cypher rejected at parse),
+  `evaluate.ts` (Layering/ForbiddenDep over one shared cross-module edge query,
+  MaxFanOut, VisibilityBoundary, NoCycles via store.findCycles, raw Cypher with
+  citable-row mapping), `types.ts` (Violation model; `possible` iff fuzzy-edge
+  derived), `render.ts`, `sarif.ts` (SARIF 2.1.0), `baseline.ts` (O4 keys:
+  rule id + sorted qualified names). Tested in `rules.test.ts` (17 tests over a
+  real Kuzu fixture).
+- **Indexer fix along the way:** forward `use` deps were silently lost —
+  `applyExtraction` dropped unresolved use-specifiers instead of parking them,
+  so any file indexed before its dependency never got the DEPENDS_ON edge.
+  Now parked as PendingRef (kind DEPENDS_ON from the module symbol) and
+  completed by `resolvePending()`. Also: glob `src/ui/**` now matches `src/ui`
+  itself.
+- **2.5 MCP tools — DONE.** `check_rules` (tier/rule filters), `list_rules`,
+  `explain_rule` in tools.ts/executors.ts; rules.ron re-read per call so edits
+  apply live. Server takes `--rules` (defaults to the db's sibling rules.ron).
+  Smoke-verified over JSON-RPC on ARES.
+- **2.6 CLI — DONE.** `gizem check [--ci] [--baseline f] [--format
+  human|sarif|json] [--rules f]`, `gizem baseline update`, `gizem rules`.
+  Exit 1 only on new confirmed error-severity violations (R1). Verified on
+  ARES: starter ruleset found 1 real layering violation (test module calling
+  upward) → exit 1; baselined → exit 0; SARIF validates (2 results).
+- **2.7 baseline — DONE** (core + CLI; see above).
+- **2.8 hook recipes — DONE.** `recipes/README.md` (Claude Code PostToolUse
+  hook + MCP registration, Cursor rules + mcp.json, pre-commit, GitHub Actions
+  SARIF upload) + `recipes/claude-hook-filter.mjs` (exit 2 = blocking feedback
+  only on new confirmed errors).
+- **2.9 VS Code inline diagnostics — DONE (code).** `refreshDiagnostics` in
+  extension.ts: violations → squiggles (confirmed→Error/Warning,
+  possible→Hint), explain in the hover, related locations for multi-node
+  violations, rules.ron parse errors surfaced on the config file itself,
+  live re-check on rules.ron change + `gizem.checkRules` command. GUI eyeball
+  still pending (same caveat as the status bar).
+
+**Phase 2 exit criteria still open:** V4 live-agent self-correction demo,
+V6 legacy-repo CI flow on GitHub (needs the same first push as CI), SARIF
+render check in GitHub code scanning, R1 zero-FP triage across the 3-repo
+corpus (ARES pass done: the layering hit is a true positive).
+
 ## Do next (in order)
 
 1. **Phase 1 exit criteria still to close** (plan.md 1.x exit list):

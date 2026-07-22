@@ -28,6 +28,10 @@
       {
         "command": "gizem.findSymbol",
         "title": "GIZEM: Find Symbol"
+      },
+      {
+        "command": "gizem.checkRules",
+        "title": "GIZEM: Check Rules"
       }
     ],
     "configuration": {
