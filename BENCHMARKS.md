@@ -194,3 +194,46 @@ level: refs/uses inside `#[cfg(test)]` mods / `#[test]` fns are flagged
 Layering/ForbiddenDep/VisibilityBoundary/NoCycles exclude test-origin edges.
 Post-fix: **0 Tier-1 violations on ARES**, `resolvableMisses` 0, the seeded
 violation above still detected (no lost recall on prod code).
+
+## V5 — incremental latency after transactions + prepared statements (2026-07-22)
+
+Two store changes (semantics verified bit-identical: fuzzyRate/resolvableMisses
+unchanged):
+1. **Explicit transactions**: applyExtraction/removeFile/resolvePending's write
+   tail each run in one BEGIN/COMMIT. Auto-commit was flushing the WAL per
+   statement — ~45 ms × ~17 statements on the grown ARES index.
+2. **Parameterized UNWIND** (`execRows`): symbol/edge/pending batch inserts go
+   through prepared statements with `$rows` bound as a parameter; literal
+   UNWINDs made Kuzu re-parse megabyte struct literals (measured 10x slower).
+   kuzu 0.11.3 trap: nulls inside param structs throw ("vector with ANY
+   type") — nullable columns travel as sentinels ('' / -1) CASEd back to
+   typed NULLs in the statement.
+
+| Metric (ARES) | Before | After | Bar |
+|---|---|---|---|
+| incremental indexFile p50 | 140 ms | **58 ms** | — |
+| incremental indexFile p95 | 638 ms | **125 ms** | < 100 ms |
+| cold full index | 23 s | **4.5 s** | < 15 s ✓ |
+| check after save | 72–103 ms | (unchanged) | < 200 ms ✓ |
+
+p95 remains 25% over bar; the residual is tree-sitter parse (34 ms for the
+55 KB maneuvers.rs) + the cascade DETACH DELETE (21 ms) on the single heaviest
+file — statement overhead is gone. Next lever would be incremental parse trees,
+out of v1 scope.
+
+## V7 self-review — `gizem init` on ripgrep (2026-07-22)
+
+Fresh clone, never previously configured. After fixes (workspace-aware layer
+names, crate-granularity coarsening, one-dense-cluster per-module fallback,
+test-edge exclusion in moduleMap): proposal names every crate correctly and
+gets the extremes right (cli/globset foundational; tests on top), but middle
+ranks scramble — **~40% pairwise agreement with the Cargo dependency DAG**
+(printer/searcher/core inverted). Root cause is measured, not mysterious:
+ripgrep's 74% fuzzyRate (S1 method-call deferral, documented worst case)
+feeds direction inference noise. On ARES (48% fuzzy) the proposal matched the
+maintainer's curated layering at the extremes (map foundational, ui/scenario
+top) with the mid-stack flagged ambiguous. Every guess is emitted as a
+finding — the proposal never claims more confidence than the graph supports.
+V7's exit (external maintainer rates "mostly right") remains open; proposal
+quality is resolver-precision-bound, so the v1.1 receiver-type inference is
+the lever.

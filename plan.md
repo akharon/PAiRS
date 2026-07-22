@@ -237,7 +237,7 @@ Status as of 2026-07-17 (measured, not estimated — see the S1/S2 results above
 
 ### Exit Criteria
 
-- [~] Save-to-fresh-index < 100 ms p95 on ARES; changed-scope check < 200 ms (V5). **Check: 72–103 ms ✓. Index: p50 140 ms / p95 638 ms ✗** — heavy files dominate; same lever as the Phase-0 index-time budget (coarser write batching). Re-profile with R9.
+- [~] Save-to-fresh-index < 100 ms p95 on ARES; changed-scope check < 200 ms (V5). **Check: 72–103 ms ✓. Index: p50 58 ms / p95 125 ms** after explicit transactions + parameterized UNWIND (was 140/638; BENCHMARKS.md "V5"). Residual 25% over bar is tree-sitter parse of the single heaviest file — statement overhead eliminated. Cold full index dropped 23 s → 4.5 s, putting the Phase-0 < 15 s bar back in the green.
 - [x] Random edits: incremental graph isomorphic to cold full index (V8) — property test in CI (`watchQueue.test.ts`), plus a targeted re-park regression test.
 - [ ] `gizem init` on a repo the team has never seen: maintainer rates proposal "mostly right" (V7, design-partner test). *(Needs an external design partner.)*
 
