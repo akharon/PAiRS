@@ -298,8 +298,11 @@ describe('in-memory symbol mirror stays consistent across re-apply and remove', 
       `MATCH (:Symbol {name: 'caller2.rs'})-[:CALLS]->(b:Symbol) RETURN b.name AS name`
     );
     expect(edges.map((r) => r.name)).toEqual(['beta']);
+    // Two claims on the vanished alpha: caller.rs's old edge re-parked when
+    // a.rs was re-applied (R7 — referrers keep their claim), plus caller2's
+    // fresh unresolved ref.
     const pend = await store.query(`MATCH (p:PendingRef {name: 'alpha'}) RETURN p.name AS name`);
-    expect(pend).toHaveLength(1);
+    expect(pend).toHaveLength(2);
   });
 
   it('removeFile drops the file from the mirror', async () => {

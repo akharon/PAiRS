@@ -345,6 +345,37 @@ export class KuzuCodeStore implements CodeStore {
 
   // -- Indexing ---------------------------------------------------------------
 
+  /**
+   * Convert every reference edge coming INTO file `fileId`'s symbols from a
+   * DIFFERENT file back into PendingRefs owned by the referring file, so the
+   * upcoming symbol deletion doesn't orphan them — resolvePending() re-links
+   * (or leaves unresolved, truthfully) once the file's new symbols land.
+   * The target's stored name/qualified become the retry hint; an edge that was
+   * fuzzy re-parks with methodCall=true so the confidence cap survives.
+   */
+  private async reparkIncomingRefs(fileId: number): Promise<void> {
+    const rows = await this.rows(
+      `MATCH (a:Symbol)-[e:${REFERENCE_EDGE_TABLES.join('|')}]->(s:Symbol {fileId: ${fileId}})
+       WHERE a.fileId <> ${fileId}
+       RETURN a.id AS fromId, a.fileId AS fromFileId, s.name AS name, s.qualified AS qualified,
+              label(e) AS kind, e.line AS line, e.confidence AS conf, e.test AS test`
+    );
+    if (rows.length === 0) return;
+    const firstPid = await this.reserveIds('next_pending_id', rows.length);
+    const pendRows = rows.map((r, i) => {
+      // A top-level fn's stored qualified IS its bare name; parking that as a
+      // qualifiedName would hit the qualified ladder's "single segment never
+      // matches" rule and stay unresolved forever — park it bare instead.
+      const q = String(r.qualified ?? '');
+      const qualifiedName = q.includes('::') ? q : '';
+      return `{id: ${firstPid + i}, fileId: ${Number(r.fromFileId)}, fromSymbolId: ${Number(r.fromId)}, name: '${escapeStr(String(r.name))}', qualifiedName: '${escapeStr(qualifiedName)}', kind: '${String(r.kind)}', line: ${Number(r.line)}, methodCall: ${String(r.conf) === 'fuzzy'}, inTest: ${r.test === true}}`;
+    });
+    await this.exec(
+      `UNWIND [${pendRows.join(',')}] AS r
+       CREATE (:PendingRef {id: r.id, fileId: r.fileId, fromSymbolId: r.fromSymbolId, name: r.name, qualifiedName: r.qualifiedName, kind: r.kind, line: r.line, methodCall: r.methodCall, inTest: r.inTest})`
+    );
+  }
+
   async applyExtraction(extraction: FileExtraction): Promise<FileRecord> {
     const now = Date.now();
     const existingRes = await this.q(`MATCH (f:File {path: '${escapeStr(extraction.path)}'}) RETURN f.id AS id`);
@@ -354,6 +385,11 @@ export class KuzuCodeStore implements CodeStore {
     let fileId: number;
     if (existing) {
       fileId = Number(existing.id);
+      // Re-park incoming references from OTHER files before the cascade
+      // deletes their edges: a referring file is not re-indexed when its
+      // target changes, so without this every cross-file edge into an edited
+      // file is silently lost (R7 incremental drift — V8 caught it).
+      await this.reparkIncomingRefs(fileId);
       // Cascade: delete prior symbols (and their edges) declared by this file.
       await (
         await this.q(
@@ -508,6 +544,7 @@ export class KuzuCodeStore implements CodeStore {
     res.close();
     if (!r) return;
     const fileId = Number(r.id);
+    await this.reparkIncomingRefs(fileId); // referrers keep their claim (see applyExtraction)
     await this.exec(`MATCH (p:PendingRef {fileId: ${fileId}}) DETACH DELETE p`);
     await this.exec(`MATCH (f:File {id: ${fileId}})-[:DECLARES]->(s:Symbol) DETACH DELETE s`);
     await this.exec(`MATCH (f:File {id: ${fileId}}) DETACH DELETE f`);

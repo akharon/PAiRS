@@ -93,6 +93,13 @@ export class IndexerImpl implements Indexer {
     return this.serialize(() => this.indexOneFile(path, { skipResolve: false }));
   }
 
+  async removeFile(path: string): Promise<void> {
+    return this.serialize(async () => {
+      await this.deps.store.removeFile(path);
+      this.fileCache?.delete(path);
+    });
+  }
+
   onFileChanged(path: string): void {
     // v1 CLI has no watcher; VS Code extension (Phase 1) debounces and calls
     // indexFile() directly. This hook exists to satisfy the Indexer contract.

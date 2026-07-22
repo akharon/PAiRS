@@ -43,6 +43,8 @@ export interface IndexReport {
 export interface Indexer {
   fullIndex(root: string): Promise<IndexReport>;
   indexFile(path: string): Promise<FileIndexResult>;
+  /** Drop a deleted file's rows (serialized behind other index ops). */
+  removeFile(path: string): Promise<void>;
   onFileChanged(path: string): void;
   stats(): Promise<IndexStats>;
 }

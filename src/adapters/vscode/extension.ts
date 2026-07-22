@@ -21,7 +21,9 @@ import * as vscode from 'vscode';
 import { ParserRegistryImpl, fileQuerySource } from '../../core/indexer/parserRegistryImpl';
 import { ExtractorImpl } from '../../core/indexer/extractorImpl';
 import { IndexerImpl } from '../../core/indexer/codeIndexerImpl';
-import { nodeListWorkspaceFiles, nodeReadFile } from '../../core/indexer/nodeFsDeps';
+import { isSkippedPath, nodeListWorkspaceFiles, nodeReadFile } from '../../core/indexer/nodeFsDeps';
+import { langForPath } from '../../core/indexer/parserRegistry';
+import { WatchQueue } from '../../core/indexer/watchQueue';
 import { KuzuCodeStore } from '../../store/graph/codeStoreImpl';
 import { nodeKuzuDriver } from '../../store/graph/kuzuDriver';
 import type { CodeStore } from '../../store/graph/codeStore';
@@ -214,6 +216,29 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   rulesWatcher.onDidCreate(recheck);
   rulesWatcher.onDidDelete(recheck);
   context.subscriptions.push(rulesWatcher);
+
+  // Incremental loop (plan.md 3.1): source saves/creates/deletes flow through
+  // the debounced WatchQueue into indexFile/removeFile (both serialized on the
+  // indexer's opChain), then rules re-evaluate and the status bar refreshes —
+  // squiggles track the code without a manual reindex.
+  const queue = new WatchQueue({
+    indexFile: (p) => ws.indexer.indexFile(p),
+    removeFile: (p) => ws.indexer.removeFile(p),
+    onFlushed: async () => {
+      await refreshDiagnostics(ws, diagnostics);
+      await refreshStatus(ws);
+    },
+  });
+  context.subscriptions.push({ dispose: () => queue.dispose() });
+  const srcWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(folder, '**/*'));
+  const rel = (uri: vscode.Uri): string | null => {
+    const r = path.relative(ws.root, uri.fsPath).split(path.sep).join('/');
+    return !r.startsWith('..') && !isSkippedPath(r) && langForPath(r) ? r : null;
+  };
+  srcWatcher.onDidChange((u) => { const r = rel(u); if (r) queue.changed(r); });
+  srcWatcher.onDidCreate((u) => { const r = rel(u); if (r) queue.changed(r); });
+  srcWatcher.onDidDelete((u) => { const r = rel(u); if (r) queue.deleted(r); });
+  context.subscriptions.push(srcWatcher);
 
   // Index on activation so the graph is fresh for the MCP server the moment a
   // client connects; do it in the background so activation isn't blocked. Rule

@@ -11,7 +11,8 @@ import * as path from 'node:path';
 import { ParserRegistryImpl, fileQuerySource } from '../../core/indexer/parserRegistryImpl';
 import { ExtractorImpl } from '../../core/indexer/extractorImpl';
 import { IndexerImpl } from '../../core/indexer/codeIndexerImpl';
-import { nodeListWorkspaceFiles, nodeReadFile } from '../../core/indexer/nodeFsDeps';
+import { nodeListWorkspaceFiles, nodeReadFile, nodeWatchWorkspace } from '../../core/indexer/nodeFsDeps';
+import { WatchQueue } from '../../core/indexer/watchQueue';
 import { KuzuCodeStore } from '../../store/graph/codeStoreImpl';
 import { nodeKuzuDriver } from '../../store/graph/kuzuDriver';
 import { impact } from '../../core/analyze/impact';
@@ -171,6 +172,44 @@ async function main(): Promise<void> {
         process.stdout.write(`Baseline written: ${outPath} (${baseline.keys.length} accepted violation(s)).\n`);
         break;
       }
+      case 'watch': {
+        // gizem watch [--check] — incremental re-index on save (plan.md 3.1);
+        // with --check, re-evaluate rules after each settled batch (3.3-lite).
+        const withCheck = rest.includes('--check');
+        const rulesPath = path.join(root, '.gizem', 'rules.ron');
+        process.stderr.write('Indexing…\n');
+        const report = await indexer.fullIndex(root);
+        process.stderr.write(`Indexed ${report.files} files in ${report.elapsedMs} ms. Watching (Ctrl-C to stop).\n`);
+        const queue = new WatchQueue({
+          indexFile: (p) => indexer.indexFile(p),
+          removeFile: (p) => indexer.removeFile(p),
+          async onFlushed(changed, removed) {
+            const t0 = Date.now();
+            for (const p of [...changed, ...removed]) process.stderr.write(`  ~ ${p}\n`);
+            if (!withCheck) return;
+            let src: string;
+            try {
+              src = await fs.readFile(rulesPath, 'utf8');
+            } catch {
+              return; // no ruleset — watch is still useful for the index alone
+            }
+            const { violations } = await checkRules(store, parseRuleSet(src));
+            const line = violations.length === 0 ? 'OK' : violations.map(renderViolation).join('\n\n');
+            process.stdout.write(`${line}\n[check ${Date.now() - t0} ms]\n`);
+          },
+          onError: (p, err) => process.stderr.write(`  ! ${p}: ${err.message}\n`),
+        });
+        const stop = nodeWatchWorkspace(root, queue);
+        // Keep the process alive until SIGINT.
+        await new Promise<void>((resolve) => {
+          process.on('SIGINT', () => {
+            stop();
+            queue.dispose();
+            resolve();
+          });
+        });
+        break;
+      }
       case 'rules': {
         const rulesPath = rest[0] ?? path.join(root, '.gizem', 'rules.ron');
         const ruleset = parseRuleSet(await fs.readFile(rulesPath, 'utf8'));
@@ -178,7 +217,7 @@ async function main(): Promise<void> {
         break;
       }
       default:
-        process.stderr.write('Usage: gizem <index|query|stats|impact|check|baseline|rules>\n');
+        process.stderr.write('Usage: gizem <index|query|stats|impact|check|baseline|rules|watch>\n');
         process.exitCode = 1;
     }
   } finally {
