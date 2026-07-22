@@ -173,3 +173,24 @@ scales with symbol/edge volume. So the budget is currently missed on both repos
 are cached; the next lever is likely coarser transaction batching across files
 rather than per-file. Re-profile before the Phase 4 10k-function bench (R9); this
 does not block Phase 1.
+
+## V4 gate — agent self-correction (2026-07-22): PASS
+
+Seeded a real Tier-1 layering violation in ARES (`src/core/v4_seed.rs`
+importing + calling `sim::longitudinal::integrate_bicycle` from core).
+`gizem check` reported it with citations and the rule's `explain`. A live
+`claude -p` agent (haiku) restricted to the gizem MCP tools + Read/Edit ran
+`check_rules`, identified the violation, and self-corrected (removed the
+breaching file, correctly noting `step_from_core` had no callers). Post-fix
+`check` is clean — only the pre-existing tier-2 fan-out warning remains.
+
+## R1 gate — Tier-1 false positives on ARES (2026-07-22): PASS (after fix)
+
+The starter ruleset initially produced 2 Tier-1 layering FPs: both from the
+`#[cfg(test)] mod tests` in `src/core/geom.rs`, whose tests deliberately drive
+the *real* sim integrator (upward dep by design). Fixed at the extraction
+level: refs/uses inside `#[cfg(test)]` mods / `#[test]` fns are flagged
+`inTest`, reference edges carry a `test` column (schema v3), and
+Layering/ForbiddenDep/VisibilityBoundary/NoCycles exclude test-origin edges.
+Post-fix: **0 Tier-1 violations on ARES**, `resolvableMisses` 0, the seeded
+violation above still detected (no lost recall on prod code).

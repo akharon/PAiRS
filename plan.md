@@ -214,10 +214,10 @@ Status as of 2026-07-17 (measured, not estimated — see the S1/S2 results above
 
 ### Exit Criteria
 
-- [ ] Seeded layering violation introduced by a *real agent session* is caught; agent self-corrects from the returned explanation (V4 — the demo).
-- [ ] Legacy-repo day-1: `check --ci --baseline` passes; new seeded violation fails CI (V6).
-- [ ] SARIF renders in GitHub code scanning.
-- [ ] Zero Tier-1 false positives on ARES with the starter ruleset (R1 gate — any FP triaged before release).
+- [x] Seeded layering violation introduced by a *real agent session* is caught; agent self-corrects from the returned explanation (V4 — the demo). **Passed 2026-07-22**: live `claude -p` (haiku) over the gizem MCP found the seeded core→sim breach via `check_rules` and removed it (BENCHMARKS.md "V4 gate").
+- [ ] Legacy-repo day-1: `check --ci --baseline` passes; new seeded violation fails CI (V6). *(Blocked on first GitHub push.)*
+- [ ] SARIF renders in GitHub code scanning. *(Blocked on first GitHub push.)*
+- [x] Zero Tier-1 false positives on ARES with the starter ruleset (R1 gate). **Passed 2026-07-22** after fixing the one FP class found: test-code edges (`#[cfg(test)]`) excluded from architectural rules (BENCHMARKS.md "R1 gate").
 
 ---
 
