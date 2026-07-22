@@ -1,10 +1,36 @@
 # Next steps
 
-Working handoff for GIZEM v2 (v0.1.0 / Phase 0). Companion to [`plan.md`](plan.md)
+Working handoff for GIZEM v2. Companion to [`plan.md`](plan.md)
 (the 6-week plan) and [`BENCHMARKS.md`](BENCHMARKS.md) (measured numbers). This
 file is the short "what now" — plan.md is the authority on scope.
 
-_Last updated: 2026-07-17, end of Phase 0 spike + hardening work._
+_Last updated: 2026-07-22, end of Phase 3._
+
+## Where things stand (2026-07-22)
+
+Phases 0–3 code-complete; 155/155 tests, typecheck/lint/build clean.
+
+- **Phase 2 gates:** V4 (live-agent self-correction) and R1 (zero Tier-1 FPs
+  on ARES) **passed** — see BENCHMARKS.md. The R1 fix: test-origin edges
+  (`#[cfg(test)]` mods / `#[test]` fns) are flagged at extraction (schema v3
+  `test` edge column) and excluded from architectural rules.
+- **Phase 3 shipped:** `WatchQueue` + per-dir watcher (`gizem watch
+  [--check]` + VS Code wiring), V8 incremental≡full property test (which
+  exposed and fixed the R7 edge-loss drift via PendingRef re-parking),
+  `gizem init` (inferred layers + starter rules.ron + findings), and the
+  `gizem.moduleMap` webview.
+
+### Open items
+
+1. **GitHub-dependent Phase 2 exits:** V6 legacy-CI flow + SARIF render in
+   code scanning — need the first push to a GitHub remote.
+2. **V5 index latency:** incremental indexFile on ARES p95 638 ms vs
+   < 100 ms bar (check-after-save is in budget at ~100 ms). Same lever as
+   the Phase-0 full-index budget: coarser Kuzu write batching. Fold into the
+   Phase-4 R9 profiling pass.
+3. **V7:** `gizem init` design-partner review — needs an external repo/maintainer.
+4. **.vsix install:** programmatically verified; visual status-bar check in a
+   real VS Code window still pending.
 
 ## Where Phase 0 stands
 

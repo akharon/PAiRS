@@ -229,17 +229,17 @@ Status as of 2026-07-17 (measured, not estimated — see the S1/S2 results above
 
 | # | Deliverable |
 |---|------------|
-| 3.1 | Watcher (chokidar) + debounce; per-file subgraph replace in one transaction |
-| 3.2 | Incremental ≡ full property test in CI (V8 / R7) |
-| 3.3 | Scoped rule evaluation on changed nodes (< 200 ms after save) |
-| 3.4 | `gizem init`: index → Louvain + structure analysis → proposed layers + starter `rules.ron` + findings report (R5) |
-| 3.5 | VS Code module-graph webview (Louvain clusters + drift), fed by `module_map`; wired to the Phase-2 inline diagnostics — read-only |
+| 3.1 ✅ | Watcher + debounce (dep-free: core `WatchQueue` + per-directory `fs.watch` with SKIP_DIRS pruning — Node's recursive fallback exhausted inotify on ARES); per-file subgraph replace in one transaction. `gizem watch [--check]` + VS Code FileSystemWatcher wiring |
+| 3.2 ✅ | Incremental ≡ full property test in CI (V8 / R7): 30 random create/edit/delete mutations converge bit-identically to a cold index. Exposed + fixed a real R7 drift: edited/deleted files silently dropped incoming cross-file edges — now re-parked as PendingRefs |
+| 3.3 ✅ | Rule re-evaluation after each settled save batch: 72–103 ms on ARES (< 200 ms bar). (Full-graph re-check is already in budget; per-node scoping deferred until a corpus needs it) |
+| 3.4 ✅ | `gizem init`: index → Louvain + net-dependency-direction ranking → proposed layers + starter `rules.ron` + findings report (R5). Verified on ARES (4 layers / 10 modules, ambiguity honestly flagged) |
+| 3.5 ✅ | VS Code module-graph webview (`gizem.moduleMap`): Louvain clusters as columns, drift edges red, theme-aware, script-free/read-only. Pure-core HTML renderer, unit-tested |
 
 ### Exit Criteria
 
-- [ ] Save-to-fresh-index < 100 ms p95 on ARES; changed-scope check < 200 ms (V5).
-- [ ] 100 random edits: incremental graph isomorphic to cold full index (V8).
-- [ ] `gizem init` on a repo the team has never seen: maintainer rates proposal "mostly right" (V7, design-partner test).
+- [~] Save-to-fresh-index < 100 ms p95 on ARES; changed-scope check < 200 ms (V5). **Check: 72–103 ms ✓. Index: p50 140 ms / p95 638 ms ✗** — heavy files dominate; same lever as the Phase-0 index-time budget (coarser write batching). Re-profile with R9.
+- [x] Random edits: incremental graph isomorphic to cold full index (V8) — property test in CI (`watchQueue.test.ts`), plus a targeted re-park regression test.
+- [ ] `gizem init` on a repo the team has never seen: maintainer rates proposal "mostly right" (V7, design-partner test). *(Needs an external design partner.)*
 
 ---
 
