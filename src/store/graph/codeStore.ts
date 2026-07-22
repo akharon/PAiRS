@@ -156,7 +156,7 @@ export interface CodeStore {
    * scope (subsystem_mcp_rules_spec.md's `NoCycles` rule kind). Returns
    * cycles of length ≥ 2; self-cycles suppressed.
    */
-  findCycles(opts: { edge: EdgeKind; scope: 'module' | 'type'; pathPrefix?: string; limit?: number; confirmedOnly?: boolean }): Promise<string[][]>;
+  findCycles(opts: { edge: EdgeKind; scope: 'module' | 'type'; pathPrefix?: string; limit?: number; confirmedOnly?: boolean; excludeTest?: boolean }): Promise<string[][]>;
   stats(): Promise<IndexStats>;
   /** Drop and recreate all tables (`gizem index --rebuild`). */
   reset(): Promise<void>;

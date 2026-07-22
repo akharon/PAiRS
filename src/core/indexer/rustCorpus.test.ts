@@ -363,6 +363,27 @@ describe('rust corpus: macros', () => {
     const x = extract(`#[cfg(test)]\nmod tests {\n  #[test]\n  fn t() {}\n}`);
     expect(find(x, 't')!.qualified).toBe('tests::t');
   });
+
+  it('flags refs and uses inside a #[cfg(test)] mod as inTest', () => {
+    const x = extract(
+      `use crate::real::thing;\nfn prod() { thing(); }\n` +
+        `#[cfg(test)]\nmod tests {\n  use crate::sim::integrator;\n  fn probe() { integrator(); }\n}`
+    );
+    const prodRef = x.refs.find((r) => r.name === 'thing')!;
+    const testRef = x.refs.find((r) => r.name === 'integrator')!;
+    expect(prodRef.inTest).toBe(false);
+    expect(testRef.inTest).toBe(true);
+    const prodUse = x.uses.find((u) => u.specifier === 'crate::real::thing')!;
+    const testUse = x.uses.find((u) => u.specifier === 'crate::sim::integrator')!;
+    expect(prodUse.inTest).toBe(false);
+    expect(testUse.inTest).toBe(true);
+  });
+
+  it('flags refs inside a #[test] fn as inTest', () => {
+    const x = extract(`#[test]\nfn it_works() { helper(); }\nfn prod() { helper(); }`);
+    const refs = x.refs.filter((r) => r.name === 'helper');
+    expect(refs.map((r) => r.inTest === true).sort()).toEqual([false, true]);
+  });
 });
 
 describe('rust corpus: resilience', () => {

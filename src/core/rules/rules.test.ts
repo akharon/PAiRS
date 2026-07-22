@@ -272,6 +272,24 @@ describe('checkRules over a real Kuzu store', () => {
     }
   });
 
+  it('excludes test-origin edges from architectural rules (R1)', async () => {
+    // A #[cfg(test)] mod in core deliberately depends upward on ui — the
+    // extractor flags the ref/use inTest; Layering/ForbiddenDep/NoCycles/
+    // VisibilityBoundary must not report it (this was a Tier-1 FP on ARES).
+    await store.applyExtraction(
+      extraction(
+        'src/core/tested.rs',
+        [sym('tests::probe', 'crate::core::tested::tests::probe')],
+        [{ fromIndex: 1, name: 'draw', qualifiedName: 'crate::ui::panel::draw', kind: 'CALLS', line: 7, inTest: true }],
+        [{ specifier: 'crate::ui::panel::draw', boundNames: ['draw'], isGlob: false, line: 2, inTest: true }]
+      )
+    );
+    await store.resolvePending();
+    const { violations } = await checkRules(store, RS());
+    const touching = violations.filter((v) => v.nodes.some((n) => n.file === 'src/core/tested.rs'));
+    expect(touching).toHaveLength(0);
+  });
+
   it('baseline: fresh vs known vs fixed, and CI verdict', async () => {
     const { violations } = await checkRules(store, RS());
     const baseline = createBaseline(violations);

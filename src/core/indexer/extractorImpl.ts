@@ -111,6 +111,25 @@ function buildSignature(paramsText: string | null, retText: string | null): stri
 }
 
 /** Strips a receiver that names no type and so can't qualify anything. */
+/**
+ * Does `#[<needle>...]` appear among the item's preceding attribute siblings?
+ * Rust attributes are `attribute_item` siblings immediately before the item
+ * node, so walk back over attributes/comments only. `needle` matches the start
+ * of the attribute body: 'test' matches `#[test]` but not `#[tests_util]`.
+ */
+function hasAttr(item: Node, needle: string): boolean {
+  for (let sib = item.previousNamedSibling; sib; sib = sib.previousNamedSibling) {
+    if (sib.type === 'attribute_item') {
+      const body = sib.text.replace(/^#\s*\[\s*/, '');
+      if (body.startsWith(needle) && !/^[A-Za-z0-9_]/.test(body.slice(needle.length))) return true;
+      continue;
+    }
+    if (sib.type === 'line_comment' || sib.type === 'block_comment') continue;
+    break;
+  }
+  return false;
+}
+
 function stripReceiver(name: string): string {
   return name.replace(/^(this|self|Self|cls)\./, '').replace(/^(self|Self)::/, '');
 }
@@ -160,7 +179,7 @@ export class ExtractorImpl implements Extractor {
       const matches = loaded.query.matches(tree.rootNode);
       const defs: PendingDef[] = [];
       const rawRefs: Array<{ node: Node; name: string; kind: ReferenceEdgeKind }> = [];
-      const rawUses: Array<{ specifier: string; bound: string[]; line: number }> = [];
+      const rawUses: Array<{ node: Node; specifier: string; bound: string[]; line: number }> = [];
       const standaloneExportedNames = new Set<string>();
 
       const refCaptures = refCaptureMap(loaded.lang);
@@ -231,6 +250,21 @@ export class ExtractorImpl implements Extractor {
         stack.push({ def, index, qualified });
       }
 
+      // Test regions: `#[cfg(test)]`-attributed mods (or the conventional
+      // `mod tests`) and `#[test]`-attributed fns. References/uses inside them
+      // are flagged inTest so architectural rules can exclude them — a core
+      // unit test calling the real sim integrator is deliberate, not a
+      // layering breach (R1: this was a Tier-1 FP on ARES).
+      const testRanges: Array<{ start: number; end: number }> = [];
+      for (const d of defs) {
+        const t = d.node.type;
+        const isTestMod = t === 'mod_item' && (d.name === 'tests' || hasAttr(d.node, 'cfg(test)'));
+        const isTestFn = t === 'function_item' && hasAttr(d.node, 'test');
+        if (isTestMod || isTestFn) testRanges.push({ start: d.node.startIndex, end: d.node.endIndex });
+      }
+      const inTestRegion = (n: Node): boolean =>
+        testRanges.some((r) => n.startIndex >= r.start && n.endIndex <= r.end);
+
       // Resolve refs to their innermost enclosing def (module symbol = index 0
       // when no def encloses the reference site).
       // Scope-only entries have no symbol, so a ref inside one attributes to
@@ -270,6 +304,7 @@ export class ExtractorImpl implements Extractor {
             ref.node.type === 'property_identifier' ||
             ref.node.parent?.type === 'attribute' ||
             ref.node.parent?.type === 'macro_invocation',
+          inTest: inTestRegion(ref.node),
         });
       }
 
@@ -279,6 +314,7 @@ export class ExtractorImpl implements Extractor {
           boundNames: use.bound,
           isGlob: use.specifier.endsWith('*'),
           line: use.line,
+          inTest: inTestRegion(use.node),
         });
       }
     } finally {
@@ -293,7 +329,7 @@ export class ExtractorImpl implements Extractor {
     refCaptures: Readonly<Record<string, ReferenceEdgeKind>>,
     defs: PendingDef[],
     rawRefs: Array<{ node: Node; name: string; kind: ReferenceEdgeKind }>,
-    rawUses: Array<{ specifier: string; bound: string[]; line: number }>,
+    rawUses: Array<{ node: Node; specifier: string; bound: string[]; line: number }>,
     standaloneExportedNames: Set<string>
   ): void {
     const byName = new Map<string, QueryCapture[]>();
@@ -349,6 +385,7 @@ export class ExtractorImpl implements Extractor {
     if (specCap) {
       const bound = (byName.get('import.bound') ?? []).map((c) => c.node.text);
       rawUses.push({
+        node: specCap.node,
         specifier: specCap.node.text.replace(/^["']|["']$/g, ''),
         bound,
         line: specCap.node.startPosition.row + 1,

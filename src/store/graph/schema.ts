@@ -4,7 +4,7 @@
  * DROP and recreate (the index is disposable derived data, never migrated).
  */
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 export const SCHEMA_DDL: readonly string[] = [
   `CREATE NODE TABLE File(
@@ -41,15 +41,17 @@ export const SCHEMA_DDL: readonly string[] = [
   `CREATE REL TABLE PARAM(FROM Symbol TO Symbol)`,
   `CREATE REL TABLE OF_TYPE(FROM Symbol TO Symbol)`,
   `CREATE REL TABLE RETURNS(FROM Symbol TO Symbol)`,
-  // Reference edges (Pass 2 RESOLVE) — carry line + confidence.
-  `CREATE REL TABLE CALLS(FROM Symbol TO Symbol, line INT64, confidence STRING)`,
-  `CREATE REL TABLE READS(FROM Symbol TO Symbol, line INT64, confidence STRING)`,
-  `CREATE REL TABLE WRITES(FROM Symbol TO Symbol, line INT64, confidence STRING)`,
-  `CREATE REL TABLE DEPENDS_ON(FROM Symbol TO Symbol, line INT64, confidence STRING)`,
-  `CREATE REL TABLE IMPLEMENTS(FROM Symbol TO Symbol, line INT64, confidence STRING)`,
-  `CREATE REL TABLE EXTENDS(FROM Symbol TO Symbol, line INT64, confidence STRING)`,
-  `CREATE REL TABLE REFERENCES(FROM Symbol TO Symbol, line INT64, confidence STRING)`,
-  `CREATE REL TABLE IMPORTS(FROM Symbol TO Symbol, line INT64, confidence STRING)`,
+  // Reference edges (Pass 2 RESOLVE) — carry line + confidence + test
+  // (true when the reference site is inside a #[cfg(test)] mod / #[test] fn;
+  // architectural rules exclude these edges — R1).
+  `CREATE REL TABLE CALLS(FROM Symbol TO Symbol, line INT64, confidence STRING, test BOOLEAN)`,
+  `CREATE REL TABLE READS(FROM Symbol TO Symbol, line INT64, confidence STRING, test BOOLEAN)`,
+  `CREATE REL TABLE WRITES(FROM Symbol TO Symbol, line INT64, confidence STRING, test BOOLEAN)`,
+  `CREATE REL TABLE DEPENDS_ON(FROM Symbol TO Symbol, line INT64, confidence STRING, test BOOLEAN)`,
+  `CREATE REL TABLE IMPLEMENTS(FROM Symbol TO Symbol, line INT64, confidence STRING, test BOOLEAN)`,
+  `CREATE REL TABLE EXTENDS(FROM Symbol TO Symbol, line INT64, confidence STRING, test BOOLEAN)`,
+  `CREATE REL TABLE REFERENCES(FROM Symbol TO Symbol, line INT64, confidence STRING, test BOOLEAN)`,
+  `CREATE REL TABLE IMPORTS(FROM Symbol TO Symbol, line INT64, confidence STRING, test BOOLEAN)`,
   // Unresolved references, retried by resolvePending as new files arrive.
   // qualifiedName: the ref as written when it carried a `::` qualifier
   // (`Foo::new`), else ''. Persisted so a retry resolves with the same
@@ -63,6 +65,7 @@ export const SCHEMA_DDL: readonly string[] = [
      kind STRING,
      line INT64,
      methodCall BOOLEAN,
+     inTest BOOLEAN,
      PRIMARY KEY(id)
    )`,
   `CREATE NODE TABLE Meta(key STRING, value STRING, PRIMARY KEY(key))`,

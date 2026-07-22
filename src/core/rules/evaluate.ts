@@ -58,7 +58,11 @@ interface CrossModuleEdge {
  */
 async function crossModuleEdges(store: CodeStore): Promise<CrossModuleEdge[]> {
   const rows = await store.query(
-    `MATCH (a:Symbol)-[e:DEPENDS_ON|CALLS]->(b:Symbol) WHERE a.file <> b.file
+    // e.test <> true excludes edges originating in test code (#[cfg(test)]
+    // mods / #[test] fns): a core unit test driving the real sim integrator is
+    // deliberate, not a layering breach (R1 — Tier-1 FP class seen on ARES).
+    `MATCH (a:Symbol)-[e:DEPENDS_ON|CALLS]->(b:Symbol)
+     WHERE a.file <> b.file AND coalesce(e.test, false) = false
      RETURN a.qualified AS aq, a.name AS an, a.file AS af, e.line AS line, e.confidence AS conf,
             b.qualified AS bq, b.name AS bn, b.file AS bf, b.startLine AS bl`
   );
@@ -174,6 +178,7 @@ async function evalVisibilityBoundary(rule: Rule, kind: VisibilityBoundaryRule, 
   const rows = await store.query(
     `MATCH (a:Symbol)-[e:CALLS|READS|WRITES|DEPENDS_ON|IMPLEMENTS|EXTENDS|REFERENCES]->(b:Symbol)
      WHERE a.file <> b.file AND b.exported = false AND b.kind <> 'module'
+       AND coalesce(e.test, false) = false
      RETURN a.qualified AS aq, a.name AS an, a.file AS af, e.line AS line, e.confidence AS conf,
             b.qualified AS bq, b.name AS bn, b.file AS bf, b.startLine AS bl`
   );
@@ -209,8 +214,8 @@ async function evalNoCycles(rule: Rule, kind: NoCyclesRule, store: CodeStore): P
   // `use`-derived (macro invocations land there fuzzy), so a cycle stitched
   // through fuzzy edges — ripgrep's `write!` sites fanning onto every
   // workspace `write` method — must report `possible`, never fail CI (R1).
-  const cycles = await store.findCycles({ edge: kind.edge, scope: kind.scope });
-  const confirmedCycles = await store.findCycles({ edge: kind.edge, scope: kind.scope, confirmedOnly: true });
+  const cycles = await store.findCycles({ edge: kind.edge, scope: kind.scope, excludeTest: true });
+  const confirmedCycles = await store.findCycles({ edge: kind.edge, scope: kind.scope, confirmedOnly: true, excludeTest: true });
   const confirmedMembers = new Set(confirmedCycles.flat());
   return cycles.map((members) =>
     base(

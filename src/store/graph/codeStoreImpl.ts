@@ -38,7 +38,7 @@ import type {
 import { isTestPath } from '../../core/indexer/types';
 import type { CodeStore, CodeStoreFactory } from './codeStore';
 import { stripCypherLiterals } from './codeStore';
-import { REFERENCE_EDGE_TABLES, SCHEMA_DDL, SCHEMA_VERSION } from './schema';
+import { REFERENCE_EDGE_TABLES, SCHEMA_DDL, SCHEMA_VERSION, STRUCTURAL_EDGE_TABLES } from './schema';
 
 /** Rust items that are never dead code even with zero incoming edges. */
 const ENTRY_POINT_NAMES: ReadonlySet<string> = new Set(['main']);
@@ -304,22 +304,19 @@ export class KuzuCodeStore implements CodeStore {
 
   async reset(): Promise<void> {
     this.invalidateSymbolIndex();
-    // Kuzu has no DROP TABLE IF EXISTS across all versions; delete node/rel
-    // data instead and reseed Meta — equivalent for a disposable index.
-    const tables = ['PendingRef', 'Symbol', 'File', 'Meta'];
-    for (const t of tables) {
+    // DROP and recreate, not just DELETE rows: a schema-version bump can
+    // change table *shape* (e.g. the v3 `test` edge column), and deleting rows
+    // from a v2-shaped table leaves later INSERTs binding against missing
+    // columns. Rel tables must drop before their node tables.
+    for (const t of [...REFERENCE_EDGE_TABLES, ...STRUCTURAL_EDGE_TABLES, 'PendingRef', 'Symbol', 'File', 'Meta']) {
       try {
-        await this.exec(`MATCH (n:${t}) DETACH DELETE n`);
+        await this.exec(`DROP TABLE ${t}`);
       } catch {
         /* table may not exist pre-migration */
       }
     }
     for (const ddl of SCHEMA_DDL) {
-      try {
-        await this.exec(ddl);
-      } catch {
-        /* table already exists */
-      }
+      await this.exec(ddl);
     }
     await this.exec(`CREATE (:Meta {key: 'schema_version', value: '${SCHEMA_VERSION}'})`);
     await this.exec(`CREATE (:Meta {key: 'next_id', value: '1'})`);
@@ -442,14 +439,14 @@ export class KuzuCodeStore implements CodeStore {
     // outcome kind — a file's refs then cost 2 write statements, not 2 per ref.
     const useSpecifiers = extraction.uses.map((u) => u.specifier);
     const pending: RawRef[] = [];
-    const edges: Array<{ fromId: number; toId: number; kind: EdgeKind; line: number; confidence: EdgeConfidence }> = [];
+    const edges: Array<{ fromId: number; toId: number; kind: EdgeKind; line: number; confidence: EdgeConfidence; test: boolean }> = [];
     for (const ref of extraction.refs) {
       const fromId = indexToId[ref.fromIndex]!;
       const resolved = await this.resolveOneRef(ref.name, ref.qualifiedName, useSpecifiers, ref.methodCall ?? false, extraction.path);
       if (resolved === 'unresolved') {
         pending.push(ref);
       } else {
-        for (const toId of resolved.ids) edges.push({ fromId, toId, kind: ref.kind, line: ref.line, confidence: resolved.confidence });
+        for (const toId of resolved.ids) edges.push({ fromId, toId, kind: ref.kind, line: ref.line, confidence: resolved.confidence, test: ref.inTest === true });
       }
     }
 
@@ -473,14 +470,14 @@ export class KuzuCodeStore implements CodeStore {
           // arbitrary). Park as a pending DEPENDS_ON from the module symbol so
           // resolvePending() completes the edge once the target arrives —
           // otherwise every forward `use` dep is silently lost.
-          pending.push({ fromIndex: 0, name: tail, qualifiedName: u.specifier, kind: 'DEPENDS_ON', line: u.line });
+          pending.push({ fromIndex: 0, name: tail, qualifiedName: u.specifier, kind: 'DEPENDS_ON', line: u.line, inTest: u.inTest });
           continue;
         }
         for (const toId of resolved.ids) {
           // Skip self-edges and duplicate deps on the same target symbol.
           if (toId === moduleId || seenDep.has(toId)) continue;
           seenDep.add(toId);
-          edges.push({ fromId: moduleId, toId, kind: 'DEPENDS_ON', line: u.line, confidence: resolved.confidence });
+          edges.push({ fromId: moduleId, toId, kind: 'DEPENDS_ON', line: u.line, confidence: resolved.confidence, test: u.inTest === true });
         }
       }
     }
@@ -489,11 +486,11 @@ export class KuzuCodeStore implements CodeStore {
       const firstPid = await this.reserveIds('next_pending_id', pending.length);
       const pendRows = pending.map(
         (ref, i) =>
-          `{id: ${firstPid + i}, fromSymbolId: ${indexToId[ref.fromIndex]!}, name: '${escapeStr(ref.name)}', qualifiedName: '${escapeStr(ref.qualifiedName ?? '')}', kind: '${ref.kind}', line: ${ref.line}, methodCall: ${ref.methodCall === true}}`
+          `{id: ${firstPid + i}, fromSymbolId: ${indexToId[ref.fromIndex]!}, name: '${escapeStr(ref.name)}', qualifiedName: '${escapeStr(ref.qualifiedName ?? '')}', kind: '${ref.kind}', line: ${ref.line}, methodCall: ${ref.methodCall === true}, inTest: ${ref.inTest === true}}`
       );
       await this.exec(
         `UNWIND [${pendRows.join(',')}] AS r
-         CREATE (:PendingRef {id: r.id, fileId: ${fileId}, fromSymbolId: r.fromSymbolId, name: r.name, qualifiedName: r.qualifiedName, kind: r.kind, line: r.line, methodCall: r.methodCall})`
+         CREATE (:PendingRef {id: r.id, fileId: ${fileId}, fromSymbolId: r.fromSymbolId, name: r.name, qualifiedName: r.qualifiedName, kind: r.kind, line: r.line, methodCall: r.methodCall, inTest: r.inTest})`
       );
     }
     await this.insertEdgesBatch(edges);
@@ -680,7 +677,7 @@ export class KuzuCodeStore implements CodeStore {
    * natural batch boundary). MERGE still keeps re-apply idempotent.
    */
   private async insertEdgesBatch(
-    edges: Array<{ fromId: number; toId: number; kind: EdgeKind; line: number; confidence: EdgeConfidence }>
+    edges: Array<{ fromId: number; toId: number; kind: EdgeKind; line: number; confidence: EdgeConfidence; test: boolean }>
   ): Promise<void> {
     const byKind = new Map<EdgeKind, typeof edges>();
     for (const e of edges) {
@@ -691,11 +688,11 @@ export class KuzuCodeStore implements CodeStore {
       byKind.set(e.kind, list);
     }
     for (const [kind, list] of byKind) {
-      const rows = list.map((e) => `{a: ${e.fromId}, b: ${e.toId}, line: ${e.line}, conf: '${e.confidence}'}`);
+      const rows = list.map((e) => `{a: ${e.fromId}, b: ${e.toId}, line: ${e.line}, conf: '${e.confidence}', test: ${e.test}}`);
       await this.exec(
         `UNWIND [${rows.join(',')}] AS r
          MATCH (a:Symbol {id: r.a}), (b:Symbol {id: r.b})
-         MERGE (a)-[:${kind} {line: r.line, confidence: r.conf}]->(b)`
+         MERGE (a)-[:${kind} {line: r.line, confidence: r.conf, test: r.test}]->(b)`
       );
     }
   }
@@ -703,7 +700,7 @@ export class KuzuCodeStore implements CodeStore {
   async resolvePending(namesHint?: string[]): Promise<number> {
     const filter = namesHint?.length ? `WHERE p.name IN [${namesHint.map((n) => `'${escapeStr(n)}'`).join(',')}]` : '';
     const res = await this.q(
-      `MATCH (p:PendingRef) ${filter} RETURN p.id AS id, p.fileId AS fileId, p.fromSymbolId AS fromSymbolId, p.name AS name, p.qualifiedName AS qualifiedName, p.kind AS kind, p.line AS line, p.methodCall AS methodCall`
+      `MATCH (p:PendingRef) ${filter} RETURN p.id AS id, p.fileId AS fileId, p.fromSymbolId AS fromSymbolId, p.name AS name, p.qualifiedName AS qualifiedName, p.kind AS kind, p.line AS line, p.methodCall AS methodCall, p.inTest AS inTest`
     );
     const rows = await res.getAll();
     res.close();
@@ -720,7 +717,7 @@ export class KuzuCodeStore implements CodeStore {
     // Decide first, write once: this runs over every pending ref in the
     // workspace after a full index, so per-ref writes dominated the index time.
     let created = 0;
-    const edges: Array<{ fromId: number; toId: number; kind: EdgeKind; line: number; confidence: EdgeConfidence }> = [];
+    const edges: Array<{ fromId: number; toId: number; kind: EdgeKind; line: number; confidence: EdgeConfidence; test: boolean }> = [];
     const settled: number[] = [];
     for (const r of rows) {
       const useSpecifiers = await this.useSpecifiersForFile(Number(r.fileId));
@@ -734,7 +731,7 @@ export class KuzuCodeStore implements CodeStore {
       const resolved = await this.resolveOneRef(String(r.name), String(r.qualifiedName ?? '') || null, useSpecifiers, r.methodCall === true, fromPath);
       if (resolved === 'unresolved') continue;
       for (const toId of resolved.ids) {
-        edges.push({ fromId: Number(r.fromSymbolId), toId, kind: r.kind as EdgeKind, line: Number(r.line), confidence: resolved.confidence });
+        edges.push({ fromId: Number(r.fromSymbolId), toId, kind: r.kind as EdgeKind, line: Number(r.line), confidence: resolved.confidence, test: r.inTest === true });
       }
       settled.push(Number(r.id));
       created += resolved.ids.length;
@@ -973,9 +970,13 @@ export class KuzuCodeStore implements CodeStore {
    * Cypher query and the algorithm runs in JS — identical to the reference
    * project's findCycles, just fed from Kuzu instead of better-sqlite3.
    */
-  async findCycles(opts: { edge: EdgeKind; scope: 'module' | 'type'; pathPrefix?: string; limit?: number; confirmedOnly?: boolean }): Promise<string[][]> {
+  async findCycles(opts: { edge: EdgeKind; scope: 'module' | 'type'; pathPrefix?: string; limit?: number; confirmedOnly?: boolean; excludeTest?: boolean }): Promise<string[][]> {
     const maxCycles = opts.limit ?? 20;
-    const confFilter = opts.confirmedOnly ? ` AND e.confidence = 'resolved'` : '';
+    const confFilter =
+      (opts.confirmedOnly ? ` AND e.confidence = 'resolved'` : '') +
+      // Rules exclude test-origin edges: a #[cfg(test)] `use` of a higher
+      // module must not stitch a module cycle (R1).
+      (opts.excludeTest ? ` AND coalesce(e.test, false) = false` : '');
 
     let adj: Map<string, Set<string>>;
     if (opts.scope === 'module') {

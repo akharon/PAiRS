@@ -141,6 +141,15 @@ export interface RawRef {
    * leaking 207 false confirmed layering violations (R1 breach).
    */
   methodCall?: boolean;
+  /**
+   * True when the reference site lies inside a test region — a
+   * `#[cfg(test)]`/`mod tests` block or a `#[test]` fn. Test code deliberately
+   * depends "upward" (a core unit test driving the real sim integrator), so
+   * architectural rules (Layering/ForbiddenDep/VisibilityBoundary/NoCycles)
+   * must exclude these edges or every inline test module is a Tier-1 false
+   * positive (R1 gate — seen on ARES geom.rs).
+   */
+  inTest?: boolean;
 }
 
 /** `use` statements — pass 2 uses these to scope name resolution. */
@@ -151,6 +160,8 @@ export interface RawUse {
   boundNames: string[];
   isGlob: boolean;
   line: number;
+  /** `use` written inside a test region (see RawRef.inTest). */
+  inTest?: boolean;
 }
 
 /** Complete pass-1 output for one file. Replaces all prior rows for that file. */
