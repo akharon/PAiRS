@@ -241,3 +241,37 @@ describe('use statements create cross-file DEPENDS_ON edges', () => {
     expect(importers.map((d) => d.path)).toContain('src/sim/driver.rs');
   });
 });
+
+describe('in-memory symbol mirror stays consistent across re-apply and remove', () => {
+  // applyExtraction patches the loaded mirror in place instead of rebuilding
+  // it from Kuzu per file (the rebuild made fullIndex O(files × symbols)).
+  // These pin that the patched mirror resolves identically to a fresh one.
+  let store: CodeStore;
+  beforeAll(async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gizem-mirror-'));
+    store = await KuzuCodeStore.open(path.join(dir, 'graph.kz'), nodeKuzuDriver);
+    await store.applyExtraction(extraction('a.rs', [sym('alpha', 'alpha', 'function')]));
+    // Force the mirror to load by resolving through it.
+    await store.applyExtraction(extraction('caller.rs', [sym('c', 'c', 'function')], [call('alpha', null)]));
+  });
+
+  it('re-applying a file swaps its old symbols out of the mirror', async () => {
+    // a.rs now declares beta instead of alpha; a later call to alpha must
+    // fall through to unresolved (stale mirror entry would resolve it).
+    await store.applyExtraction(extraction('a.rs', [sym('beta', 'beta', 'function')]));
+    await store.applyExtraction(extraction('caller2.rs', [sym('c2', 'c2', 'function')], [call('alpha', null), call('beta', null)]));
+    const edges = await store.query(
+      `MATCH (:Symbol {name: 'caller2.rs'})-[:CALLS]->(b:Symbol) RETURN b.name AS name`
+    );
+    expect(edges.map((r) => r.name)).toEqual(['beta']);
+    const pend = await store.query(`MATCH (p:PendingRef {name: 'alpha'}) RETURN p.name AS name`);
+    expect(pend).toHaveLength(1);
+  });
+
+  it('removeFile drops the file from the mirror', async () => {
+    await store.removeFile('a.rs');
+    await store.applyExtraction(extraction('caller3.rs', [sym('c3', 'c3', 'function')], [call('beta', null)]));
+    const edges = await store.query(`MATCH (:Symbol {name: 'caller3.rs'})-[:CALLS]->(b:Symbol) RETURN b.name AS name`);
+    expect(edges).toHaveLength(0); // beta gone → parked as pending, not resolved via stale mirror
+  });
+});

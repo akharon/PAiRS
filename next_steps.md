@@ -106,7 +106,13 @@ typecheck + lint clean, all three bundles build.**
 1. **Phase 1 exit criteria still to close** (plan.md 1.x exit list):
    - **`.vsix` install test** — PACKAGED (4.45 MB). Manual verification in a real VS Code: run `code --install-extension gizem-0.1.0.vsix`, then check activation, .gizem creation, status bar, and MCP registration. See `scripts/test-extension.sh` for full checklist.
 2. **Cross-platform CI** — WIRED (`.github/workflows/ci.yml`). Typecheck + lint + test + smoke index on ubuntu-latest/macos-latest/windows-latest; locally verified on Linux/Node 22. Awaits first push to GitHub (still a Phase 0 exit criterion for real CI run).
-3. **Index-time regression** (ARES 23 s / ripgrep 27 s vs 15 s budget) — coarser transaction batching across files rather than per-file. Does not block Phase 1; must be handled before the R9 10k-function bench.
+3. **Index-time regression — FIXED (2026-07-22).** Root cause was not write
+   batching: `applyExtraction` invalidated the in-memory symbol mirror per file,
+   so each file's resolution reloaded the whole symbol table → O(files × symbols).
+   Now the mirror is patched in place (indexAdd/indexRemoveFile); ARes full index
+   dropped ~10.8 s → ~7.7 s (well under the 15 s budget; identical fuzzyRate/
+   externalRefs, pinned by new mirror-consistency tests in resolver.test.ts).
+   The win grows with corpus size, so the R9 10k-function bench risk is retired.
 
 ## Known limitations (documented, not bugs to chase now)
 

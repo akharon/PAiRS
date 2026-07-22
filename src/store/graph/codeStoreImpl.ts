@@ -141,6 +141,17 @@ interface SymbolIndex {
   byNameWithPath: Map<string, Array<{ id: number; path: string }>>;
   /** id → qualified, for the `use`-specifier narrowing rung. */
   qualifiedById: Map<number, string>;
+  /** path → this file's index entries, so applyExtraction can patch the
+   * mirror in place instead of rebuilding it from Kuzu per file (a full-table
+   * rebuild per file made fullIndex O(files × symbols)). */
+  entriesByFile: Map<string, IndexEntry[]>;
+}
+
+interface IndexEntry {
+  id: number;
+  name: string;
+  qualified: string;
+  path: string;
 }
 
 export class KuzuCodeStore implements CodeStore {
@@ -163,6 +174,50 @@ export class KuzuCodeStore implements CodeStore {
     this.symbolIndex = null;
   }
 
+  private static indexAdd(idx: SymbolIndex, e: IndexEntry): void {
+    const push = <K, T>(m: Map<K, T[]>, k: K, v: T): void => {
+      const list = m.get(k);
+      if (list) list.push(v);
+      else m.set(k, [v]);
+    };
+    push(idx.byQualified, e.qualified, e.id);
+    push(idx.byName, e.name, e.id);
+    push(idx.byNameWithPath, e.name, { id: e.id, path: e.path });
+    idx.qualifiedById.set(e.id, e.qualified);
+    // Every proper `::` suffix, mirroring the ENDS WITH '::<candidate>' probe.
+    const segs = e.qualified.split('::');
+    for (let i = 1; i < segs.length; i++) push(idx.byQualifiedSuffix, segs.slice(i).join('::'), e.id);
+    push(idx.entriesByFile, e.path, e);
+  }
+
+  /** Remove one file's entries from the mirror (inverse of indexAdd). */
+  private static indexRemoveFile(idx: SymbolIndex, path: string): void {
+    const entries = idx.entriesByFile.get(path);
+    if (!entries) return;
+    idx.entriesByFile.delete(path);
+    const ids = new Set(entries.map((e) => e.id));
+    const prune = (m: Map<string, number[]>, k: string): void => {
+      const list = m.get(k);
+      if (!list) return;
+      const kept = list.filter((id) => !ids.has(id));
+      if (kept.length) m.set(k, kept);
+      else m.delete(k);
+    };
+    for (const e of entries) {
+      prune(idx.byQualified, e.qualified);
+      prune(idx.byName, e.name);
+      idx.qualifiedById.delete(e.id);
+      const segs = e.qualified.split('::');
+      for (let i = 1; i < segs.length; i++) prune(idx.byQualifiedSuffix, segs.slice(i).join('::'));
+      const withPath = idx.byNameWithPath.get(e.name);
+      if (withPath) {
+        const kept = withPath.filter((c) => !ids.has(c.id));
+        if (kept.length) idx.byNameWithPath.set(e.name, kept);
+        else idx.byNameWithPath.delete(e.name);
+      }
+    }
+  }
+
   private async loadSymbolIndex(): Promise<SymbolIndex> {
     if (this.symbolIndex) return this.symbolIndex;
     const rows = await this.rows(
@@ -174,23 +229,15 @@ export class KuzuCodeStore implements CodeStore {
       byQualifiedSuffix: new Map(),
       byNameWithPath: new Map(),
       qualifiedById: new Map(),
-    };
-    const push = <T,>(m: Map<string, T[]>, k: string, v: T): void => {
-      const list = m.get(k);
-      if (list) list.push(v);
-      else m.set(k, [v]);
+      entriesByFile: new Map(),
     };
     for (const r of rows) {
-      const id = Number(r.id);
-      const name = String(r.name);
-      const qualified = String(r.qualified);
-      push(idx.byQualified, qualified, id);
-      push(idx.byName, name, id);
-      push(idx.byNameWithPath, name, { id, path: String(r.path) });
-      idx.qualifiedById.set(id, qualified);
-      // Every proper `::` suffix, mirroring the ENDS WITH '::<candidate>' probe.
-      const segs = qualified.split('::');
-      for (let i = 1; i < segs.length; i++) push(idx.byQualifiedSuffix, segs.slice(i).join('::'), id);
+      KuzuCodeStore.indexAdd(idx, {
+        id: Number(r.id),
+        name: String(r.name),
+        qualified: String(r.qualified),
+        path: String(r.path),
+      });
     }
     this.symbolIndex = idx;
     return idx;
@@ -250,6 +297,7 @@ export class KuzuCodeStore implements CodeStore {
   }
 
   async reset(): Promise<void> {
+    this.invalidateSymbolIndex();
     // Kuzu has no DROP TABLE IF EXISTS across all versions; delete node/rel
     // data instead and reseed Meta — equivalent for a disposable index.
     const tables = ['PendingRef', 'Symbol', 'File', 'Meta'];
@@ -367,9 +415,22 @@ export class KuzuCodeStore implements CodeStore {
     // Pass 2, phase A: try resolving each ref immediately; anything left
     // unresolved is parked in PendingRef for resolvePending() to retry.
     // The symbol table just changed (old symbols dropped, new ones inserted);
-    // drop the mirror here, so resolution below rebuilds it from the settled
-    // table rather than reading a pre-write snapshot.
-    this.invalidateSymbolIndex();
+    // patch the loaded mirror in place — a full drop-and-rebuild here made
+    // fullIndex O(files × symbols) since every file's resolution reloaded the
+    // whole table. (If no mirror is loaded yet, the first lookup builds it
+    // from the already-settled table.)
+    if (this.symbolIndex) {
+      KuzuCodeStore.indexRemoveFile(this.symbolIndex, extraction.path);
+      extraction.symbols.forEach((sym, i) => {
+        if (sym.kind === 'module') return; // mirrors the loadSymbolIndex WHERE clause
+        KuzuCodeStore.indexAdd(this.symbolIndex!, {
+          id: indexToId[i]!,
+          name: sym.name,
+          qualified: sym.qualified,
+          path: extraction.path,
+        });
+      });
+    }
 
     // Resolution is read-only, so decide everything first and write once per
     // outcome kind — a file's refs then cost 2 write statements, not 2 per ref.
@@ -431,7 +492,7 @@ export class KuzuCodeStore implements CodeStore {
   }
 
   async removeFile(path: string): Promise<void> {
-    this.invalidateSymbolIndex();
+    if (this.symbolIndex) KuzuCodeStore.indexRemoveFile(this.symbolIndex, path);
     const res = await this.q(`MATCH (f:File {path: '${escapeStr(path)}'}) RETURN f.id AS id`);
     const r = row(await res.getAll());
     res.close();
