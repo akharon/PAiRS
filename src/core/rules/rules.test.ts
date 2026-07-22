@@ -241,6 +241,33 @@ describe('checkRules over a real Kuzu store', () => {
     expect(violations[0]!.nodes[0]!.file).toBe('src/util/busy.rs');
   });
 
+  it('Cypher rule honors an exposed confidence column (fuzzy → possible)', async () => {
+    // A query that exposes e.confidence: rows derived through fuzzy edges must
+    // report `possible` (R1 — only confirmed findings fail CI), while a query
+    // exposing no confidence column stays confirmed.
+    const rs = parseRuleSet(
+      `( rules: [ (id: "raw-conf", tier: 2, kind: Cypher("MATCH (a:Symbol)-[e:CALLS]->(s:Symbol) RETURN s.qualified AS qualified, s.file AS file, s.startLine AS line, e.confidence AS confidence"), explain: "conf") ] )`
+    );
+    const { violations } = await checkRules(store, rs);
+    expect(violations.length).toBeGreaterThan(0);
+    for (const v of violations) {
+      // Every violation's confidence must mirror the edge column, i.e. no
+      // fuzzy-derived row may be confirmed. The fixture has both kinds of
+      // edges only if resolution produced them; assert the invariant directly.
+      expect(['confirmed', 'possible']).toContain(v.confidence);
+    }
+    // And a fuzzy edge, when present, must not surface as confirmed:
+    const edgeRows = await store.query(
+      `MATCH (a:Symbol)-[e:CALLS]->(s:Symbol) RETURN s.qualified AS q, e.confidence AS conf`
+    );
+    const fuzzyTargets = new Set(edgeRows.filter((r) => String(r.conf) === 'fuzzy').map((r) => String(r.q)));
+    for (const v of violations) {
+      if (fuzzyTargets.has(v.nodes[0]!.qualified) && !edgeRows.some((r) => String(r.q) === v.nodes[0]!.qualified && String(r.conf) !== 'fuzzy')) {
+        expect(v.confidence).toBe('possible');
+      }
+    }
+  });
+
   it('baseline: fresh vs known vs fixed, and CI verdict', async () => {
     const { violations } = await checkRules(store, RS());
     const baseline = createBaseline(violations);

@@ -111,6 +111,16 @@ async function main(): Promise<void> {
         const ruleset = parseRuleSet(src); // ConfigError propagates with the fixable message
 
         if (ci) await indexer.fullIndex(root); // a gate must never judge a stale graph
+        else {
+          // Non-CI check against an empty graph would report a hollow OK —
+          // refuse rather than silently pass a gate over nothing.
+          const s = await store.stats();
+          if (s.files === 0) {
+            process.stderr.write('Index is empty — run `gizem index` (or `gizem check --ci`) first.\n');
+            process.exitCode = 2;
+            break;
+          }
+        }
         const { violations, checkedRules } = await checkRules(store, ruleset);
 
         // Baseline: only violations NOT in the snapshot can fail the run.

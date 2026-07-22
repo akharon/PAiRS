@@ -236,7 +236,13 @@ async function evalCypher(rule: Rule, kind: CypherRule, store: CodeStore): Promi
     const file = get('file');
     if (qualified === undefined || file === undefined) continue; // row shape not citable — skip
     const line = get('line') ?? get('startLine') ?? 1;
-    out.push(base(rule, [{ qualified: String(qualified), file: String(file), line: Number(line) }], false));
+    // R1: honor an exposed edge-confidence column — a row derived through a
+    // fuzzy edge must be `possible`, never a CI-failing confirmed finding.
+    // Queries that expose no confidence column stay confirmed (node-only
+    // queries carry no edge uncertainty).
+    const conf = get('confidence') ?? get('conf');
+    const fuzzy = String(conf) === 'fuzzy';
+    out.push(base(rule, [{ qualified: String(qualified), file: String(file), line: Number(line) }], fuzzy));
   }
   return out;
 }

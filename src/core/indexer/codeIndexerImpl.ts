@@ -21,12 +21,32 @@ export class IndexerImpl implements Indexer {
   private readonly deps: IndexerDeps;
   /** path → {mtimeMs, size, hash}, populated from store.listFiles() on first use. */
   private fileCache: Map<string, { mtimeMs: number; size: number; hash: string }> | null = null;
+  /**
+   * Serializes index operations within this process. The store is single-writer
+   * by design (ADR-009), but that invariant is *per store*, and the VS Code
+   * extension can trigger a `gizem.reindex` while the activation-time fullIndex
+   * is still running — two interleaved fullIndex runs would corrupt the store's
+   * in-memory symbol mirror and duplicate edges. Chain every index op behind
+   * the previous one instead.
+   */
+  private opChain: Promise<unknown> = Promise.resolve();
 
   constructor(deps: IndexerDeps) {
     this.deps = deps;
   }
 
+  /** Run `fn` after every previously enqueued index op has settled. */
+  private serialize<T>(fn: () => Promise<T>): Promise<T> {
+    const next = this.opChain.then(fn, fn);
+    this.opChain = next.catch(() => undefined); // errors surface to the caller, not the chain
+    return next;
+  }
+
   async fullIndex(root: string): Promise<IndexReport> {
+    return this.serialize(() => this.fullIndexInner(root));
+  }
+
+  private async fullIndexInner(root: string): Promise<IndexReport> {
     const start = Date.now();
     await this.deps.parsers.init();
 
@@ -70,7 +90,7 @@ export class IndexerImpl implements Indexer {
   }
 
   async indexFile(path: string): Promise<FileIndexResult> {
-    return this.indexOneFile(path, { skipResolve: false });
+    return this.serialize(() => this.indexOneFile(path, { skipResolve: false }));
   }
 
   onFileChanged(path: string): void {

@@ -195,6 +195,8 @@ export function createExecutors(deps: ExecutorDeps): Executors {
         if (rules.length === 0) return input.rule ? `No rule "${input.rule}" in the ruleset.` : `No tier-${input.tier} rules.`;
         ruleset = { ...rs, rules };
       }
+      const stats = await store.stats();
+      if (stats.files === 0) return 'Index is empty — run `gizem index` first; rules cannot be checked over nothing.';
       const { violations, checkedRules } = await checkRules(store, ruleset);
       if (violations.length === 0) return `OK — ${checkedRules.length} rule(s) checked, no violations.`;
       const confirmed = violations.filter((v) => v.confidence === 'confirmed').length;
