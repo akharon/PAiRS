@@ -258,6 +258,18 @@ export class ExtractorImpl implements Extractor {
           qualifiedName: qualifiedRefName(ref.name),
           kind: ref.kind,
           line: ref.node.startPosition.row + 1,
+          // Bare names that carry no path evidence about their target — the
+          // resolver caps these at `fuzzy` even on a unique name match:
+          // member/method calls (Rust `field_identifier`, TS/JS
+          // `property_identifier`, Python `attribute`) where the receiver's
+          // static type is unknown, and Rust macro invocations (`write!`,
+          // `matches!`) whose expansion is invisible to the AST — a workspace
+          // fn/method sharing the macro's name is pure coincidence.
+          methodCall:
+            ref.node.type === 'field_identifier' ||
+            ref.node.type === 'property_identifier' ||
+            ref.node.parent?.type === 'attribute' ||
+            ref.node.parent?.type === 'macro_invocation',
         });
       }
 

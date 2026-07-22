@@ -204,17 +204,19 @@ async function evalVisibilityBoundary(rule: Rule, kind: VisibilityBoundaryRule, 
 }
 
 async function evalNoCycles(rule: Rule, kind: NoCyclesRule, store: CodeStore): Promise<Violation[]> {
+  // Confidence via a second, confirmed-only pass: a cycle is `confirmed` only
+  // when it survives with every fuzzy edge removed. DEPENDS_ON is not purely
+  // `use`-derived (macro invocations land there fuzzy), so a cycle stitched
+  // through fuzzy edges — ripgrep's `write!` sites fanning onto every
+  // workspace `write` method — must report `possible`, never fail CI (R1).
   const cycles = await store.findCycles({ edge: kind.edge, scope: kind.scope });
+  const confirmedCycles = await store.findCycles({ edge: kind.edge, scope: kind.scope, confirmedOnly: true });
+  const confirmedMembers = new Set(confirmedCycles.flat());
   return cycles.map((members) =>
     base(
       rule,
       members.map((m) => ({ qualified: m, file: m, line: 1 })),
-      // Tarjan runs over all edges regardless of confidence — cycles are
-      // structural facts of the resolved+fuzzy graph; without per-edge
-      // attribution here, report as confirmed only if we can't know a fuzzy
-      // edge participated. Conservative: mark confirmed (cycle membership on
-      // Rust DEPENDS_ON comes from `use` statements, which are resolved).
-      false,
+      !members.every((m) => confirmedMembers.has(m)),
       `Break the cycle: ${members.join(' → ')} → ${members[0]}.`
     )
   );

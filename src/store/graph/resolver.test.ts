@@ -91,6 +91,40 @@ describe('resolveOneRef ladder', () => {
     expect(await confidenceOf('d.rs', call('new', 'Vec3::new'))).toBe('unresolved');
   });
 
+  // R1 leak fix: a bare METHOD call (`x.helper()`) is capped at fuzzy even
+  // when only one workspace symbol shares the name — the receiver's type is
+  // unknown and the true target is often a derive impl / stdlib method not in
+  // the graph at all. On ripgrep, `.clone()` in globset resolved "confirmed"
+  // onto ignore's `Error::clone`, leaking 207 false confirmed layering
+  // violations into `gizem check`.
+  it('caps a bare method call at fuzzy even with a unique name match', async () => {
+    expect(await confidenceOf('m.rs', { ...call('helper', null), methodCall: true })).toBe('fuzzy');
+  });
+
+  // Cross-crate gate: same-named symbols in sibling Cargo crates must not
+  // resolve "confirmed" onto each other without a corroborating `use`. On
+  // ripgrep, `Parser::new` in grep-regex resolved confirmed onto core's
+  // flag Parser (a different crate) — a false confirmed layering violation.
+  it('downgrades an uncorroborated cross-crate resolution to fuzzy', async () => {
+    await store.applyExtraction(
+      extraction('crates/beta/src/lib.rs', [sym('Widget', 'Widget', 'struct'), sym('spawn', 'Widget::spawn')])
+    );
+    // Caller in a DIFFERENT crate, no `use` naming Widget → fuzzy.
+    await store.applyExtraction(extraction('crates/alpha/src/main.rs', [], [call('spawn', 'Widget::spawn')]));
+    const noUse = await store.query(
+      `MATCH (a:Symbol)-[e:CALLS]->(b:Symbol) WHERE a.qualified = 'crates/alpha/src/main.rs' RETURN e.confidence AS conf`
+    );
+    expect(String(noUse[0]!.conf)).toBe('fuzzy');
+    // Same call WITH `use beta::Widget` → corroborated, stays resolved.
+    await store.applyExtraction(
+      extraction('crates/alpha/src/other.rs', [], [call('spawn', 'Widget::spawn')], [use_('beta::Widget')])
+    );
+    const withUse = await store.query(
+      `MATCH (a:Symbol)-[e:CALLS]->(b:Symbol) WHERE a.qualified = 'crates/alpha/src/other.rs' RETURN e.confidence AS conf`
+    );
+    expect(String(withUse[0]!.conf)).toBe('resolved');
+  });
+
   it('resolves a qualified call whose declaration is stored under a longer path', async () => {
     await store.applyExtraction(extraction('deep.rs', [sym('Inner', 'outer::Inner', 'struct'), sym('build', 'outer::Inner::build')]));
     expect(await confidenceOf('e.rs', call('build', 'Inner::build'))).toBe('resolved');

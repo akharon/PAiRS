@@ -139,10 +139,39 @@ typecheck + lint clean, all three bundles build.**
   live re-check on rules.ron change + `gizem.checkRules` command. GUI eyeball
   still pending (same caveat as the status bar).
 
-**Phase 2 exit criteria still open:** V4 live-agent self-correction demo,
-V6 legacy-repo CI flow on GitHub (needs the same first push as CI), SARIF
-render check in GitHub code scanning, R1 zero-FP triage across the 3-repo
-corpus (ARES pass done: the layering hit is a true positive).
+- **V4 live-agent self-correction — PASS (2026-07-22).** Fixture repo
+  (core/ui layers, Layering rule, PostToolUse hook →
+  `gizem check --ci --format json | claude-hook-filter.mjs`). A live
+  `claude -p` agent was *explicitly instructed* to import ui into core; the
+  hook blocked with the violation's `explain`, and the agent self-corrected —
+  final code keeps the logic in core (its summary: "the project enforces
+  layering rules where core cannot import from ui"), `check --ci` exits 0.
+  Also verified the seeded violation alone: 2 layering violations, exit 1.
+
+- **R1 zero-FP triage — PASS on 3 Rust corpora (2026-07-22).** Triage exposed
+  and fixed three confidence leaks (schema v2, index rebuild forced):
+  1. *Bare method calls* (`x.clone()`) resolved "confirmed" onto the single
+     workspace symbol sharing the name (ripgrep: globset `.clone()` →
+     ignore's `Error::clone`, 200+ false confirmed layering violations). New
+     `RawRef.methodCall` (grammar-level: `field_identifier` /
+     `property_identifier` / `attribute` parent) caps these at fuzzy.
+  2. *Macro invocations* (`write!`, `matches!` → DEPENDS_ON) same cap — a fn
+     sharing a macro's name is coincidence (fd: false confirmed cycle via
+     `write!` → `OutputBuffer::write`).
+  3. *Cross-crate collisions*: unique qualified matches landing in a sibling
+     Cargo crate without a corroborating `use` (`Parser::new` in grep-regex →
+     core's flag Parser) downgrade to fuzzy (crate = path prefix before
+     `src/`, or first 2 segments under crates/packages/libs/apps).
+  Plus: NoCycles now runs a second confirmed-only Tarjan pass — a cycle is
+  `confirmed` only if it survives with fuzzy edges removed (was
+  unconditionally confirmed on a now-false assumption).
+  Result: ARES 2 confirmed (the real layering hit) + 1 possible; ripgrep 1506
+  all-possible, 0 confirmed; fd 10 all-possible, 0 confirmed. True positives
+  still exit 1; ARES fuzzyRate honestly rises to 47.5% (formerly overconfident
+  edges), resolvableMisses stays 0. Pinned by 2 new resolver tests (144/144).
+
+**Phase 2 exit criteria still open:** V6 legacy-repo CI flow on GitHub (needs
+the same first push as CI), SARIF render check in GitHub code scanning.
 
 ## Do next (in order)
 

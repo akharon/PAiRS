@@ -4,7 +4,7 @@
  * DROP and recreate (the index is disposable derived data, never migrated).
  */
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 export const SCHEMA_DDL: readonly string[] = [
   `CREATE NODE TABLE File(
@@ -62,6 +62,7 @@ export const SCHEMA_DDL: readonly string[] = [
      qualifiedName STRING,
      kind STRING,
      line INT64,
+     methodCall BOOLEAN,
      PRIMARY KEY(id)
    )`,
   `CREATE NODE TABLE Meta(key STRING, value STRING, PRIMARY KEY(key))`,

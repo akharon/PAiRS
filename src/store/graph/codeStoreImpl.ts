@@ -141,6 +141,8 @@ interface SymbolIndex {
   byNameWithPath: Map<string, Array<{ id: number; path: string }>>;
   /** id → qualified, for the `use`-specifier narrowing rung. */
   qualifiedById: Map<number, string>;
+  /** id → declaring file path, for the cross-crate confidence gate. */
+  pathById: Map<number, string>;
   /** path → this file's index entries, so applyExtraction can patch the
    * mirror in place instead of rebuilding it from Kuzu per file (a full-table
    * rebuild per file made fullIndex O(files × symbols)). */
@@ -184,6 +186,7 @@ export class KuzuCodeStore implements CodeStore {
     push(idx.byName, e.name, e.id);
     push(idx.byNameWithPath, e.name, { id: e.id, path: e.path });
     idx.qualifiedById.set(e.id, e.qualified);
+    idx.pathById.set(e.id, e.path);
     // Every proper `::` suffix, mirroring the ENDS WITH '::<candidate>' probe.
     const segs = e.qualified.split('::');
     for (let i = 1; i < segs.length; i++) push(idx.byQualifiedSuffix, segs.slice(i).join('::'), e.id);
@@ -207,6 +210,7 @@ export class KuzuCodeStore implements CodeStore {
       prune(idx.byQualified, e.qualified);
       prune(idx.byName, e.name);
       idx.qualifiedById.delete(e.id);
+      idx.pathById.delete(e.id);
       const segs = e.qualified.split('::');
       for (let i = 1; i < segs.length; i++) prune(idx.byQualifiedSuffix, segs.slice(i).join('::'));
       const withPath = idx.byNameWithPath.get(e.name);
@@ -229,6 +233,7 @@ export class KuzuCodeStore implements CodeStore {
       byQualifiedSuffix: new Map(),
       byNameWithPath: new Map(),
       qualifiedById: new Map(),
+      pathById: new Map(),
       entriesByFile: new Map(),
     };
     for (const r of rows) {
@@ -439,7 +444,7 @@ export class KuzuCodeStore implements CodeStore {
     const edges: Array<{ fromId: number; toId: number; kind: EdgeKind; line: number; confidence: EdgeConfidence }> = [];
     for (const ref of extraction.refs) {
       const fromId = indexToId[ref.fromIndex]!;
-      const resolved = await this.resolveOneRef(ref.name, ref.qualifiedName, useSpecifiers);
+      const resolved = await this.resolveOneRef(ref.name, ref.qualifiedName, useSpecifiers, ref.methodCall ?? false, extraction.path);
       if (resolved === 'unresolved') {
         pending.push(ref);
       } else {
@@ -483,11 +488,11 @@ export class KuzuCodeStore implements CodeStore {
       const firstPid = await this.reserveIds('next_pending_id', pending.length);
       const pendRows = pending.map(
         (ref, i) =>
-          `{id: ${firstPid + i}, fromSymbolId: ${indexToId[ref.fromIndex]!}, name: '${escapeStr(ref.name)}', qualifiedName: '${escapeStr(ref.qualifiedName ?? '')}', kind: '${ref.kind}', line: ${ref.line}}`
+          `{id: ${firstPid + i}, fromSymbolId: ${indexToId[ref.fromIndex]!}, name: '${escapeStr(ref.name)}', qualifiedName: '${escapeStr(ref.qualifiedName ?? '')}', kind: '${ref.kind}', line: ${ref.line}, methodCall: ${ref.methodCall === true}}`
       );
       await this.exec(
         `UNWIND [${pendRows.join(',')}] AS r
-         CREATE (:PendingRef {id: r.id, fileId: ${fileId}, fromSymbolId: r.fromSymbolId, name: r.name, qualifiedName: r.qualifiedName, kind: r.kind, line: r.line})`
+         CREATE (:PendingRef {id: r.id, fileId: ${fileId}, fromSymbolId: r.fromSymbolId, name: r.name, qualifiedName: r.qualifiedName, kind: r.kind, line: r.line, methodCall: r.methodCall})`
       );
     }
     await this.insertEdgesBatch(edges);
@@ -520,13 +525,78 @@ export class KuzuCodeStore implements CodeStore {
   private async resolveOneRef(
     name: string,
     qualifiedName: string | null,
-    useSpecifiers: string[]
+    useSpecifiers: string[],
+    methodCall = false,
+    fromPath: string | null = null
   ): Promise<{ ids: number[]; confidence: 'resolved' | 'fuzzy' } | 'unresolved'> {
     // Every rung reads the in-memory mirror (see loadSymbolIndex): resolution is
     // pure lookup, and the round-trips it used to make dominated index time.
     // Returned id arrays are copied — they are the index's own, not the
     // caller's to keep.
     const idx = await this.loadSymbolIndex();
+
+    /**
+     * Confidence gate applied to every rung's outcome (R1: `resolved` must be
+     * trustworthy — rules only fail CI on confirmed findings):
+     *
+     * 1. A bare METHOD call (`x.foo()`) caps at `fuzzy` regardless of how few
+     *    candidates share the name — the receiver's static type is unknown
+     *    (S1 deferral) and the true target is often outside the graph
+     *    entirely (derive impls, trait defaults, stdlib).
+     * 2. A resolution that lands in a DIFFERENT crate (first-two-path-segment
+     *    heuristic, e.g. `crates/globset`) caps at `fuzzy` unless a `use`
+     *    specifier in the referring file corroborates the target. Same-named
+     *    symbols across sibling crates (`Parser::new` in grep-regex vs core)
+     *    otherwise resolve "confirmed" onto the wrong crate: on ripgrep this
+     *    leaked 200+ false confirmed layering violations.
+     */
+    const gate = (out: { ids: number[]; confidence: 'resolved' | 'fuzzy' }): { ids: number[]; confidence: 'resolved' | 'fuzzy' } => {
+      if (out.confidence === 'fuzzy') return out;
+      if (methodCall) return { ids: out.ids, confidence: 'fuzzy' };
+      if (fromPath) {
+        // Crate root = the path prefix before a `src` segment (Cargo layout:
+        // `crates/globset/src/lib.rs` → `crates/globset`), or the first two
+        // segments under a workspace container dir for crates without `src/`
+        // (`crates/core/flags/parse.rs` → `crates/core`). Everything else
+        // (flat repos, single-crate `src/…`) maps to '' — one crate, gate off.
+        const crateOf = (p: string): string => {
+          const segs = p.split('/');
+          const i = segs.indexOf('src');
+          if (i > 0) return segs.slice(0, i).join('/');
+          if (segs.length >= 3 && ['crates', 'packages', 'libs', 'apps'].includes(segs[0]!)) return segs.slice(0, 2).join('/');
+          return '';
+        };
+        const home = crateOf(fromPath);
+        const crossCrate = out.ids.some((id) => {
+          const p = idx.pathById.get(id);
+          return p !== undefined && crateOf(p) !== home;
+        });
+        if (crossCrate) {
+          // A `use` in the referring file corroborates the target when (a) its
+          // bound tail names the ref itself (`use x::helper` → helper()) or
+          // the ref's qualifier head (`use x::Parser` → Parser::new()), AND
+          // (b) the specifier's crate head is plausibly the candidate's crate
+          // (some candidate path segment, `-`→`_`, appears in the head — so
+          // `use grep_cli::…::ParseSizeError` corroborates crates/cli but
+          // `use regex_syntax::ast::Parser` does NOT corroborate crates/core's
+          // `Parser`). Errs toward fuzzy: a miss only downgrades confidence.
+          const head = qualifiedName?.split('::').find((s) => s !== 'crate' && s !== 'self' && s !== 'super') ?? null;
+          const candidateTokens = new Set(
+            out.ids.flatMap((id) => (idx.pathById.get(id) ?? '').split('/').slice(0, -1).map((s) => s.replace(/-/g, '_')))
+          );
+          const corroborated = useSpecifiers.some((spec) => {
+            const segs = spec.split(/::|\//).filter(Boolean);
+            const tail = segs[segs.length - 1];
+            const specHead = (segs[0] ?? '').replace(/-/g, '_');
+            const namesTarget = tail === name || (head !== null && tail === head);
+            const crateMatch = [...candidateTokens].some((t) => t.length > 2 && specHead.includes(t));
+            return namesTarget && crateMatch;
+          });
+          if (!corroborated) return { ids: out.ids, confidence: 'fuzzy' };
+        }
+      }
+      return out;
+    };
 
     // Rung 1: the ref as written, when it carried a `::` qualifier.
     //
@@ -552,12 +622,12 @@ export class KuzuCodeStore implements CodeStore {
       for (let i = 0; i < segments.length - 1; i++) {
         const candidate = segments.slice(i).join('::');
         const exact = idx.byQualified.get(candidate);
-        if (exact) return { ids: [...exact], confidence: exact.length === 1 ? 'resolved' : 'fuzzy' };
+        if (exact) return gate({ ids: [...exact], confidence: exact.length === 1 ? 'resolved' : 'fuzzy' });
 
         // The declaration may also be stored under a *longer* path than the call
         // writes (`shapes::Foo::new` reached via `use shapes::Foo`).
         const suffix = idx.byQualifiedSuffix.get(candidate);
-        if (suffix) return { ids: [...suffix], confidence: suffix.length === 1 ? 'resolved' : 'fuzzy' };
+        if (suffix) return gate({ ids: [...suffix], confidence: suffix.length === 1 ? 'resolved' : 'fuzzy' });
       }
 
       // Last resort for a path whose prefix is a *module*, not a type:
@@ -571,7 +641,7 @@ export class KuzuCodeStore implements CodeStore {
         const fileSuffix = `${modulePath.join('/')}.rs`;
         const byModule = (idx.byNameWithPath.get(name) ?? []).filter((c) => c.path === fileSuffix || c.path.endsWith(`/${fileSuffix}`));
         if (byModule.length > 0) {
-          return { ids: byModule.map((c) => c.id), confidence: byModule.length === 1 ? 'resolved' : 'fuzzy' };
+          return gate({ ids: byModule.map((c) => c.id), confidence: byModule.length === 1 ? 'resolved' : 'fuzzy' });
         }
       }
 
@@ -581,13 +651,13 @@ export class KuzuCodeStore implements CodeStore {
       return 'unresolved';
     }
 
-    // Rung 2: bare refs only.
+    // Rung 2: bare refs only (all outcomes pass through `gate` above).
     const byQualified = idx.byQualified.get(name);
-    if (byQualified) return { ids: [...byQualified], confidence: byQualified.length === 1 ? 'resolved' : 'fuzzy' };
+    if (byQualified) return gate({ ids: [...byQualified], confidence: byQualified.length === 1 ? 'resolved' : 'fuzzy' });
 
     const byName = idx.byName.get(name);
     if (!byName) return 'unresolved';
-    if (byName.length === 1) return { ids: [...byName], confidence: 'resolved' };
+    if (byName.length === 1) return gate({ ids: [...byName], confidence: 'resolved' });
 
     // Multiple candidates — narrow by `use` specifiers ending in this name
     // (e.g. `use auth::service::login` narrows a `login` call to that path).
@@ -597,7 +667,7 @@ export class KuzuCodeStore implements CodeStore {
         const q = idx.qualifiedById.get(id)!;
         return matchingUse.some((spec) => q === spec || spec.endsWith(q));
       });
-      if (narrowed.length === 1) return { ids: narrowed, confidence: 'resolved' };
+      if (narrowed.length === 1) return gate({ ids: narrowed, confidence: 'resolved' });
     }
 
     return { ids: [...byName], confidence: 'fuzzy' };
@@ -632,10 +702,19 @@ export class KuzuCodeStore implements CodeStore {
   async resolvePending(namesHint?: string[]): Promise<number> {
     const filter = namesHint?.length ? `WHERE p.name IN [${namesHint.map((n) => `'${escapeStr(n)}'`).join(',')}]` : '';
     const res = await this.q(
-      `MATCH (p:PendingRef) ${filter} RETURN p.id AS id, p.fileId AS fileId, p.fromSymbolId AS fromSymbolId, p.name AS name, p.qualifiedName AS qualifiedName, p.kind AS kind, p.line AS line`
+      `MATCH (p:PendingRef) ${filter} RETURN p.id AS id, p.fileId AS fileId, p.fromSymbolId AS fromSymbolId, p.name AS name, p.qualifiedName AS qualifiedName, p.kind AS kind, p.line AS line, p.methodCall AS methodCall`
     );
     const rows = await res.getAll();
     res.close();
+
+    // Referring-file paths for the cross-crate confidence gate (one query,
+    // not one per pending ref).
+    const pathByFileId = new Map<number, string>();
+    if (rows.length > 0) {
+      const fres = await this.q(`MATCH (f:File) RETURN f.id AS id, f.path AS path`);
+      for (const fr of await fres.getAll()) pathByFileId.set(Number(fr.id), String(fr.path));
+      fres.close();
+    }
 
     // Decide first, write once: this runs over every pending ref in the
     // workspace after a full index, so per-ref writes dominated the index time.
@@ -644,7 +723,14 @@ export class KuzuCodeStore implements CodeStore {
     const settled: number[] = [];
     for (const r of rows) {
       const useSpecifiers = await this.useSpecifiersForFile(Number(r.fileId));
-      const resolved = await this.resolveOneRef(String(r.name), String(r.qualifiedName ?? '') || null, useSpecifiers);
+      // A DEPENDS_ON pending WITH a qualifiedName is a parked `use` import —
+      // the import IS the dependency statement, so the cross-crate gate does
+      // not apply. Bare DEPENDS_ON refs (macro invocations captured as
+      // ref.reference) get the gate like any other ref: `normalize!(…)` in
+      // globset must not resolve confirmed onto ignore's `normalize` method.
+      const isUseImport = r.kind === 'DEPENDS_ON' && Boolean(String(r.qualifiedName ?? ''));
+      const fromPath = isUseImport ? null : (pathByFileId.get(Number(r.fileId)) ?? null);
+      const resolved = await this.resolveOneRef(String(r.name), String(r.qualifiedName ?? '') || null, useSpecifiers, r.methodCall === true, fromPath);
       if (resolved === 'unresolved') continue;
       for (const toId of resolved.ids) {
         edges.push({ fromId: Number(r.fromSymbolId), toId, kind: r.kind as EdgeKind, line: Number(r.line), confidence: resolved.confidence });
@@ -877,13 +963,14 @@ export class KuzuCodeStore implements CodeStore {
    * Cypher query and the algorithm runs in JS — identical to the reference
    * project's findCycles, just fed from Kuzu instead of better-sqlite3.
    */
-  async findCycles(opts: { edge: EdgeKind; scope: 'module' | 'type'; pathPrefix?: string; limit?: number }): Promise<string[][]> {
+  async findCycles(opts: { edge: EdgeKind; scope: 'module' | 'type'; pathPrefix?: string; limit?: number; confirmedOnly?: boolean }): Promise<string[][]> {
     const maxCycles = opts.limit ?? 20;
+    const confFilter = opts.confirmedOnly ? ` AND e.confidence = 'resolved'` : '';
 
     let adj: Map<string, Set<string>>;
     if (opts.scope === 'module') {
       const res = await this.q(
-        `MATCH (a:Symbol)-[e:${opts.edge}]->(b:Symbol) WHERE a.file <> b.file RETURN DISTINCT a.file AS fromFile, b.file AS toFile`
+        `MATCH (a:Symbol)-[e:${opts.edge}]->(b:Symbol) WHERE a.file <> b.file${confFilter} RETURN DISTINCT a.file AS fromFile, b.file AS toFile`
       );
       const rows = await res.getAll();
       res.close();
@@ -896,7 +983,7 @@ export class KuzuCodeStore implements CodeStore {
       }
     } else {
       const res = await this.q(
-        `MATCH (a:Symbol)-[e:${opts.edge}]->(b:Symbol) WHERE a.kind IN ['struct','class','trait','interface','enum'] AND b.kind IN ['struct','class','trait','interface','enum'] AND a.qualified <> b.qualified RETURN DISTINCT a.qualified AS fromQ, b.qualified AS toQ`
+        `MATCH (a:Symbol)-[e:${opts.edge}]->(b:Symbol) WHERE a.kind IN ['struct','class','trait','interface','enum'] AND b.kind IN ['struct','class','trait','interface','enum'] AND a.qualified <> b.qualified${confFilter} RETURN DISTINCT a.qualified AS fromQ, b.qualified AS toQ`
       );
       const rows = await res.getAll();
       res.close();

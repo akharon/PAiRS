@@ -130,6 +130,17 @@ export interface RawRef {
   qualifiedName: string | null;
   kind: ReferenceEdgeKind;
   line: number;
+  /**
+   * True when the reference is a method/member call on a receiver
+   * (`obj.foo()`, `self.bar()`) rather than a free-standing name. A bare
+   * method call carries NO path information about its target — the receiver's
+   * static type is unknown (S1 deferral) — so the resolver must never mark it
+   * `resolved` just because one workspace symbol happens to share the name.
+   * Without this cap, ripgrep's `#[derive(Clone)]` `.clone()` sites resolved
+   * "confirmed" onto the single explicit `Error::clone` in another crate,
+   * leaking 207 false confirmed layering violations (R1 breach).
+   */
+  methodCall?: boolean;
 }
 
 /** `use` statements — pass 2 uses these to scope name resolution. */
