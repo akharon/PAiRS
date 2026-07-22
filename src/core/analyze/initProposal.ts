@@ -13,7 +13,7 @@
  */
 
 import type { CodeStore } from '../../store/graph/codeStore';
-import { moduleMap } from './moduleMap';
+import { moduleMap, moduleMapFromEdges } from './moduleMap';
 import type { ModuleMap } from './moduleMap';
 
 export interface LayerProposal {
@@ -28,16 +28,23 @@ export interface LayerProposal {
   map: ModuleMap;
 }
 
-/** Short, stable layer name for a cluster: the most common top segment of its modules. */
+/**
+ * Short, stable layer name for a cluster: the most distinctive segment of its
+ * modules. Skips scaffolding segments that carry no meaning — `src`, and
+ * monorepo containers (`crates`, `packages`, `libs`, `apps`) whose *next*
+ * segment is the actual crate name (`crates/globset/src` → `globset`).
+ * Without this a cargo workspace degenerates to `crates`/`crates2`/`crates3`.
+ */
+const SCAFFOLD_SEGMENTS = new Set(['src', 'crates', 'packages', 'libs', 'apps', 'lib']);
+
 function layerName(modules: string[], taken: Set<string>): string {
   const counts = new Map<string, number>();
   for (const m of modules) {
-    // Prefer the second segment when everything starts with src/ ('src/core' → 'core').
     const segs = m.split('/');
-    const cand = segs[0] === 'src' && segs.length > 1 ? segs[1]! : segs[0]!;
+    const cand = segs.find((s) => !SCAFFOLD_SEGMENTS.has(s)) ?? segs[segs.length - 1]!;
     counts.set(cand, (counts.get(cand) ?? 0) + 1);
   }
-  let best = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? 'layer';
+  const best = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? 'layer';
   let name = best;
   let i = 2;
   while (taken.has(name)) name = `${best}${i++}`;
@@ -45,9 +52,47 @@ function layerName(modules: string[], taken: Set<string>): string {
   return name;
 }
 
+/**
+ * Coarsen a module path to proposal granularity: in a monorepo
+ * (`crates/<name>/…`), the crate is the unit a maintainer thinks in —
+ * `crates/core/flags/complete` as its own layer entry reads as noise
+ * (V7 self-review on ripgrep). Single-crate repos keep directory modules.
+ */
+function coarsen(module: string): string {
+  const segs = module.split('/');
+  if (segs.length >= 2 && ['crates', 'packages', 'libs', 'apps'].includes(segs[0]!)) {
+    return segs.slice(0, 2).join('/');
+  }
+  return module;
+}
+
 export async function proposeInit(store: CodeStore): Promise<LayerProposal> {
-  const map = await moduleMap(store);
+  const fine = await moduleMap(store);
   const findings: string[] = [];
+
+  // Aggregate the fine directory map to proposal granularity.
+  const weight = new Map<string, number>();
+  const moduleSet = new Set<string>();
+  for (const e of fine.edges) {
+    const from = coarsen(e.from);
+    const to = coarsen(e.to);
+    if (from === to) continue;
+    moduleSet.add(from);
+    moduleSet.add(to);
+    weight.set(`${from} ${to}`, (weight.get(`${from} ${to}`) ?? 0) + e.weight);
+  }
+  // Re-cluster at the coarse granularity when coarsening merged anything, so
+  // subsystems align with crates.
+  const map: ModuleMap =
+    moduleSet.size === fine.modules.length
+      ? fine
+      : moduleMapFromEdges(
+          [...moduleSet].sort(),
+          [...weight.entries()].map(([k, w]) => {
+            const [from, to] = k.split(' ');
+            return { from: from!, to: to!, weight: w };
+          })
+        );
 
   if (map.modules.length === 0) {
     return {
@@ -59,10 +104,22 @@ export async function proposeInit(store: CodeStore): Promise<LayerProposal> {
     };
   }
 
+  // A densely-connected workspace can Louvain into ONE cluster (ripgrep's
+  // crate graph does) — no cross-cluster flow means no ranking signal. Fall
+  // back to per-module clusters so the direction analysis ranks the modules
+  // themselves; the maintainer still reviews.
+  const effectiveClusters =
+    map.clusters.length === 1 && map.modules.length > 1
+      ? map.modules.map((m, i) => ({ id: i, modules: [m] }))
+      : map.clusters;
+  if (effectiveClusters !== map.clusters) {
+    findings.push('All modules form one dense subsystem — layers below are ranked per module by dependency direction, not by cluster. Coarse layers may fit better; review.');
+  }
+
   // Net dependency flow per cluster: inbound weight (others depend on it)
   // minus outbound (it depends on others), normalized by total involvement.
   const clusterOf = new Map<string, number>();
-  map.clusters.forEach((c) => c.modules.forEach((m) => clusterOf.set(m, c.id)));
+  effectiveClusters.forEach((c) => c.modules.forEach((m) => clusterOf.set(m, c.id)));
   const inW = new Map<number, number>();
   const outW = new Map<number, number>();
   for (const e of map.edges) {
@@ -73,7 +130,7 @@ export async function proposeInit(store: CodeStore): Promise<LayerProposal> {
     inW.set(ct, (inW.get(ct) ?? 0) + e.weight);
   }
 
-  const scored = map.clusters.map((c) => {
+  const scored = effectiveClusters.map((c) => {
     const inn = inW.get(c.id) ?? 0;
     const out = outW.get(c.id) ?? 0;
     const total = inn + out;
