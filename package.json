@@ -32,6 +32,10 @@
       {
         "command": "gizem.checkRules",
         "title": "GIZEM: Check Rules"
+      },
+      {
+        "command": "gizem.moduleMap",
+        "title": "GIZEM: Show Module Map"
       }
     ],
     "configuration": {

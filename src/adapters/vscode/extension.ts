@@ -28,6 +28,8 @@ import { KuzuCodeStore } from '../../store/graph/codeStoreImpl';
 import { nodeKuzuDriver } from '../../store/graph/kuzuDriver';
 import type { CodeStore } from '../../store/graph/codeStore';
 import type { Indexer } from '../../core/indexer/codeIndexer';
+import { moduleMap } from '../../core/analyze/moduleMap';
+import { moduleMapHtml } from '../../core/analyze/moduleMapHtml';
 import { parseRuleSet } from '../../core/rules/config';
 import { checkRules } from '../../core/rules/evaluate';
 import type { Violation } from '../../core/rules/types';
@@ -204,7 +206,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(
     vscode.commands.registerCommand('gizem.reindex', () => reindex(ws).then(() => refreshDiagnostics(ws, diagnostics))),
     vscode.commands.registerCommand('gizem.findSymbol', () => findSymbol(ws)),
-    vscode.commands.registerCommand('gizem.checkRules', () => refreshDiagnostics(ws, diagnostics))
+    vscode.commands.registerCommand('gizem.checkRules', () => refreshDiagnostics(ws, diagnostics)),
+    vscode.commands.registerCommand('gizem.moduleMap', async () => {
+      // Read-only module-graph webview (plan.md 3.5): Louvain subsystems as
+      // columns, drift edges red. Self-contained HTML — webview CSP-safe.
+      const map = await moduleMap(ws.store);
+      const panel = vscode.window.createWebviewPanel('gizemModuleMap', 'GIZEM Module Map', vscode.ViewColumn.Active, { enableScripts: false });
+      panel.webview.html = moduleMapHtml(map);
+    })
   );
 
   // Re-check rules when rules.ron is edited (diagnostics follow the config live).
