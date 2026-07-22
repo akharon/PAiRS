@@ -52,8 +52,11 @@ const ENTRY_POINT_NAMES: ReadonlySet<string> = new Set(['main']);
  * `query()` returns an array of results for multi-statement Cypher; the
  * single-statement callers here unwrap it via `first()`.
  */
-interface KuzuConnectionLike {
+export interface KuzuConnectionLike {
   query(cypher: string): Promise<KuzuResultLike | KuzuResultLike[]>;
+  /** Prepared-statement path (optional: fakes may omit it and fall back to literals). */
+  prepare?(cypher: string): Promise<unknown>;
+  execute?(prepared: unknown, params: Record<string, unknown>): Promise<KuzuResultLike | KuzuResultLike[]>;
 }
 interface KuzuResultLike {
   getAll(): Promise<Record<string, unknown>[]>;
@@ -267,6 +270,64 @@ export class KuzuCodeStore implements CodeStore {
     (await this.q(cypher)).close();
   }
 
+  /**
+   * Run `fn`'s statements inside one explicit transaction. Without this every
+   * statement auto-commits with its own WAL flush — on a grown index (~40 MB
+   * ARES) that cost ~45 ms *per statement*, and applyExtraction's ~17
+   * statements put incremental indexFile at p95 638 ms vs the < 100 ms V5
+   * bar. One BEGIN/COMMIT collapses those flushes. Also delivers the
+   * spec invariant that applyExtraction is atomic (delete-old + insert-new
+   * indivisible). ROLLBACK on error so a failed extraction can't leave a
+   * half-replaced file subgraph.
+   */
+  /** Prepared-statement cache: cypher text → prepared handle. */
+  private prepared = new Map<string, unknown>();
+
+  /**
+   * Run an `UNWIND $rows AS r …` statement with `rows` bound as a parameter.
+   * A literal UNWIND makes Kuzu re-parse a megabyte of inline structs — on a
+   * heavy file (maneuvers.rs: ~300 symbols + ~800 edges) that parsing was the
+   * whole V5 tail (125/99/71 ms per statement; the param path measured 10x
+   * faster). Falls back to caller-provided literal SQL when the driver has no
+   * prepare/execute (test fakes).
+   *
+   * NOTE: all-null columns bind as STRING by inference — the same trap as
+   * literal UNWINDs — so callers must pass typed non-null sentinels or rely on
+   * the CASTs in the statement text.
+   */
+  private async execRows(cypher: string, rows: Record<string, unknown>[], literalFallback: () => Promise<void>): Promise<void> {
+    if (rows.length === 0) return;
+    if (!this.conn.prepare || !this.conn.execute) return literalFallback();
+    let ps = this.prepared.get(cypher);
+    if (ps === undefined) {
+      ps = await this.conn.prepare(cypher);
+      this.prepared.set(cypher, ps);
+    }
+    first(await this.conn.execute(ps, { rows })).close();
+  }
+
+  private inTx = false;
+
+  private async inTransaction<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.inTx) return fn(); // nested call joins the outer transaction
+    this.inTx = true;
+    await this.exec('BEGIN TRANSACTION');
+    try {
+      const out = await fn();
+      await this.exec('COMMIT');
+      return out;
+    } catch (err) {
+      try {
+        await this.exec('ROLLBACK');
+      } catch {
+        /* connection state unknown — surface the original error */
+      }
+      throw err;
+    } finally {
+      this.inTx = false;
+    }
+  }
+
   /** Run a query and return its rows, always closing the result. */
   private async rows(cypher: string): Promise<Record<string, unknown>[]> {
     const res = await this.q(cypher);
@@ -377,6 +438,10 @@ export class KuzuCodeStore implements CodeStore {
   }
 
   async applyExtraction(extraction: FileExtraction): Promise<FileRecord> {
+    return this.inTransaction(() => this.applyExtractionInner(extraction));
+  }
+
+  private async applyExtractionInner(extraction: FileExtraction): Promise<FileRecord> {
     const now = Date.now();
     const existingRes = await this.q(`MATCH (f:File {path: '${escapeStr(extraction.path)}'}) RETURN f.id AS id`);
     const existing = row(await existingRes.getAll());
@@ -423,16 +488,45 @@ export class KuzuCodeStore implements CodeStore {
     extraction.symbols.forEach((_, i) => indexToId.push(firstId + i));
 
     if (extraction.symbols.length > 0) {
-      const symRows = extraction.symbols.map((sym, i) => {
-        const parentId = sym.parentIndex !== null ? indexToId[sym.parentIndex]! : null;
-        // Kuzu infers a STRUCT's field types from the literal, so a column that
-        // is null in every row would bind as STRING and fail against an INT64
-        // property. CAST pins the type independently of the data.
-        return `{id: ${indexToId[i]}, name: '${escapeStr(sym.name)}', qualified: '${escapeStr(sym.qualified)}', kind: '${sym.kind}', lang: '${sym.lang}', startLine: ${sym.startLine}, endLine: ${sym.endLine}, signature: CAST(${sym.signature ? `'${escapeStr(sym.signature)}'` : 'null'} AS STRING), doc: CAST(${sym.doc ? `'${escapeStr(sym.doc)}'` : 'null'} AS STRING), parentId: CAST(${parentId ?? 'null'} AS INT64), exported: ${sym.exported}}`;
-      });
-      await this.exec(
-        `UNWIND [${symRows.join(',')}] AS r
-         CREATE (:Symbol {id: r.id, fileId: ${fileId}, file: '${escapeStr(extraction.path)}', name: r.name, qualified: r.qualified, kind: r.kind, lang: r.lang, startLine: r.startLine, endLine: r.endLine, signature: r.signature, doc: r.doc, parentId: r.parentId, exported: r.exported})`
+      // Parameterized UNWIND (see execRows). Nulls inside param structs bind
+      // broken in kuzu 0.11.3 ("vector with ANY type"), so nullable columns
+      // travel as sentinels ('' / -1) and the statement CASEs them back to
+      // typed NULLs — same trap as literal type-inference, different spelling.
+      const symParamRows = extraction.symbols.map((sym, i) => ({
+        id: indexToId[i]!,
+        fileId,
+        file: extraction.path,
+        name: sym.name,
+        qualified: sym.qualified,
+        kind: sym.kind,
+        lang: sym.lang,
+        startLine: sym.startLine,
+        endLine: sym.endLine,
+        signature: sym.signature ?? '',
+        doc: sym.doc ?? '',
+        parentId: sym.parentIndex !== null ? indexToId[sym.parentIndex]! : -1,
+        exported: sym.exported,
+      }));
+      await this.execRows(
+        `UNWIND $rows AS r
+         CREATE (:Symbol {id: r.id, fileId: r.fileId, file: r.file, name: r.name, qualified: r.qualified, kind: r.kind, lang: r.lang, startLine: r.startLine, endLine: r.endLine,
+                 signature: CASE WHEN r.signature = '' THEN CAST(NULL AS STRING) ELSE r.signature END,
+                 doc: CASE WHEN r.doc = '' THEN CAST(NULL AS STRING) ELSE r.doc END,
+                 parentId: CASE WHEN r.parentId < 0 THEN CAST(NULL AS INT64) ELSE r.parentId END,
+                 exported: r.exported})`,
+        symParamRows,
+        async () => {
+          const symRows = extraction.symbols.map((sym, i) => {
+            const parentId = sym.parentIndex !== null ? indexToId[sym.parentIndex]! : null;
+            // Literal fallback: CAST pins types a null-in-every-row column
+            // would otherwise mis-infer as STRING.
+            return `{id: ${indexToId[i]}, name: '${escapeStr(sym.name)}', qualified: '${escapeStr(sym.qualified)}', kind: '${sym.kind}', lang: '${sym.lang}', startLine: ${sym.startLine}, endLine: ${sym.endLine}, signature: CAST(${sym.signature ? `'${escapeStr(sym.signature)}'` : 'null'} AS STRING), doc: CAST(${sym.doc ? `'${escapeStr(sym.doc)}'` : 'null'} AS STRING), parentId: CAST(${parentId ?? 'null'} AS INT64), exported: ${sym.exported}}`;
+          });
+          await this.exec(
+            `UNWIND [${symRows.join(',')}] AS r
+             CREATE (:Symbol {id: r.id, fileId: ${fileId}, file: '${escapeStr(extraction.path)}', name: r.name, qualified: r.qualified, kind: r.kind, lang: r.lang, startLine: r.startLine, endLine: r.endLine, signature: r.signature, doc: r.doc, parentId: r.parentId, exported: r.exported})`
+          );
+        }
       );
       await this.exec(
         `MATCH (f:File {id: ${fileId}})
@@ -520,13 +614,30 @@ export class KuzuCodeStore implements CodeStore {
 
     if (pending.length > 0) {
       const firstPid = await this.reserveIds('next_pending_id', pending.length);
-      const pendRows = pending.map(
-        (ref, i) =>
-          `{id: ${firstPid + i}, fromSymbolId: ${indexToId[ref.fromIndex]!}, name: '${escapeStr(ref.name)}', qualifiedName: '${escapeStr(ref.qualifiedName ?? '')}', kind: '${ref.kind}', line: ${ref.line}, methodCall: ${ref.methodCall === true}, inTest: ${ref.inTest === true}}`
-      );
-      await this.exec(
-        `UNWIND [${pendRows.join(',')}] AS r
-         CREATE (:PendingRef {id: r.id, fileId: ${fileId}, fromSymbolId: r.fromSymbolId, name: r.name, qualifiedName: r.qualifiedName, kind: r.kind, line: r.line, methodCall: r.methodCall, inTest: r.inTest})`
+      await this.execRows(
+        `UNWIND $rows AS r
+         CREATE (:PendingRef {id: r.id, fileId: r.fileId, fromSymbolId: r.fromSymbolId, name: r.name, qualifiedName: r.qualifiedName, kind: r.kind, line: r.line, methodCall: r.methodCall, inTest: r.inTest})`,
+        pending.map((ref, i) => ({
+          id: firstPid + i,
+          fileId,
+          fromSymbolId: indexToId[ref.fromIndex]!,
+          name: ref.name,
+          qualifiedName: ref.qualifiedName ?? '',
+          kind: ref.kind,
+          line: ref.line,
+          methodCall: ref.methodCall === true,
+          inTest: ref.inTest === true,
+        })),
+        async () => {
+          const pendRows = pending.map(
+            (ref, i) =>
+              `{id: ${firstPid + i}, fromSymbolId: ${indexToId[ref.fromIndex]!}, name: '${escapeStr(ref.name)}', qualifiedName: '${escapeStr(ref.qualifiedName ?? '')}', kind: '${ref.kind}', line: ${ref.line}, methodCall: ${ref.methodCall === true}, inTest: ${ref.inTest === true}}`
+          );
+          await this.exec(
+            `UNWIND [${pendRows.join(',')}] AS r
+             CREATE (:PendingRef {id: r.id, fileId: ${fileId}, fromSymbolId: r.fromSymbolId, name: r.name, qualifiedName: r.qualifiedName, kind: r.kind, line: r.line, methodCall: r.methodCall, inTest: r.inTest})`
+          );
+        }
       );
     }
     await this.insertEdgesBatch(edges);
@@ -544,10 +655,12 @@ export class KuzuCodeStore implements CodeStore {
     res.close();
     if (!r) return;
     const fileId = Number(r.id);
-    await this.reparkIncomingRefs(fileId); // referrers keep their claim (see applyExtraction)
-    await this.exec(`MATCH (p:PendingRef {fileId: ${fileId}}) DETACH DELETE p`);
-    await this.exec(`MATCH (f:File {id: ${fileId}})-[:DECLARES]->(s:Symbol) DETACH DELETE s`);
-    await this.exec(`MATCH (f:File {id: ${fileId}}) DETACH DELETE f`);
+    await this.inTransaction(async () => {
+      await this.reparkIncomingRefs(fileId); // referrers keep their claim (see applyExtraction)
+      await this.exec(`MATCH (p:PendingRef {fileId: ${fileId}}) DETACH DELETE p`);
+      await this.exec(`MATCH (f:File {id: ${fileId}})-[:DECLARES]->(s:Symbol) DETACH DELETE s`);
+      await this.exec(`MATCH (f:File {id: ${fileId}}) DETACH DELETE f`);
+    });
   }
 
   /**
@@ -725,11 +838,20 @@ export class KuzuCodeStore implements CodeStore {
       byKind.set(e.kind, list);
     }
     for (const [kind, list] of byKind) {
-      const rows = list.map((e) => `{a: ${e.fromId}, b: ${e.toId}, line: ${e.line}, conf: '${e.confidence}', test: ${e.test}}`);
-      await this.exec(
-        `UNWIND [${rows.join(',')}] AS r
+      const cypher = `UNWIND $rows AS r
          MATCH (a:Symbol {id: r.a}), (b:Symbol {id: r.b})
-         MERGE (a)-[:${kind} {line: r.line, confidence: r.conf, test: r.test}]->(b)`
+         MERGE (a)-[:${kind} {line: r.line, confidence: r.conf, test: r.test}]->(b)`;
+      await this.execRows(
+        cypher,
+        list.map((e) => ({ a: e.fromId, b: e.toId, line: e.line, conf: e.confidence, test: e.test })),
+        async () => {
+          const rows = list.map((e) => `{a: ${e.fromId}, b: ${e.toId}, line: ${e.line}, conf: '${e.confidence}', test: ${e.test}}`);
+          await this.exec(
+            `UNWIND [${rows.join(',')}] AS r
+             MATCH (a:Symbol {id: r.a}), (b:Symbol {id: r.b})
+             MERGE (a)-[:${kind} {line: r.line, confidence: r.conf, test: r.test}]->(b)`
+          );
+        }
       );
     }
   }
@@ -774,10 +896,12 @@ export class KuzuCodeStore implements CodeStore {
       created += resolved.ids.length;
     }
 
-    await this.insertEdgesBatch(edges);
-    if (settled.length > 0) {
-      await this.exec(`UNWIND [${settled.join(',')}] AS pid MATCH (p:PendingRef {id: pid}) DETACH DELETE p`);
-    }
+    await this.inTransaction(async () => {
+      await this.insertEdgesBatch(edges);
+      if (settled.length > 0) {
+        await this.exec(`UNWIND [${settled.join(',')}] AS pid MATCH (p:PendingRef {id: pid}) DETACH DELETE p`);
+      }
+    });
     return created;
   }
 
