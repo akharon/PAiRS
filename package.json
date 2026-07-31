@@ -1,6 +1,6 @@
 {
   "name": "gizem",
-  "version": "0.6.0",
+  "version": "0.9.0",
   "description": "Derived code-graph index + architectural rule engine for AI coding agents",
   "license": "MIT",
   "author": "Mustafa Kiyar",

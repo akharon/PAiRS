@@ -33,7 +33,26 @@ async function main(): Promise<void> {
 
   // Kuzu creates the database file itself but not its parent directory.
   await fs.mkdir(path.dirname(dbPath), { recursive: true });
-  const store = await KuzuCodeStore.open(dbPath, nodeKuzuDriver);
+
+  let store: KuzuCodeStore;
+  try {
+    store = await KuzuCodeStore.open(dbPath, nodeKuzuDriver);
+  } catch (err) {
+    const msg = (err as Error).message ?? String(err);
+    if (/lock/i.test(msg)) {
+      // Kuzu 0.11.3 takes an exclusive file lock regardless of read-only intent —
+      // a second process (this CLI) cannot open the DB at all while the VS Code
+      // extension (or another `gizem` invocation) holds it open.
+      process.stderr.write(
+        `Could not open ${dbPath}: ${msg}\n` +
+          'Another process (likely the VS Code extension, or another `gizem` command) has this index open. ' +
+          'Kuzu allows only one process to hold the database at a time — close that workspace/process, or wait for it to finish, then retry.\n'
+      );
+      process.exitCode = 1;
+      return;
+    }
+    throw err;
+  }
   const parsers = new ParserRegistryImpl(grammarsDir, fileQuerySource(queriesDir));
   const extractor = new ExtractorImpl();
   const indexer = new IndexerImpl({

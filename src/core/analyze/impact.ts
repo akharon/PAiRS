@@ -53,6 +53,8 @@ export async function impact(
   const seed = await store.get(id);
   if (!seed) return null;
 
+  if (kinds.length === 0) return { seed, dependants: [], truncated: false };
+
   const depth = maxDepth <= 0 ? 1 : maxDepth;
   const kindList = [...kinds];
 
@@ -71,10 +73,11 @@ export async function impact(
     const edges = await store.edgesTo(frontier, kindList);
     const next: number[] = [];
     for (const e of edges) {
-      if (e.fromId === id) continue; // don't re-add the seed
+      if (e.fromId === id) continue; // exclude self-edges (e.g. a recursive function calling itself)
       const prior = seen.get(e.fromId);
-      // Confidence of a path is the weakest edge on it; approximate with the
-      // reaching edge's own confidence (frontier already reached at ≤ current depth).
+      // A path's confidence is its weakest edge; here we approximate that with
+      // just the confidence of the edge that reached this node, since the frontier
+      // was already reached at <= the current depth via at-least-as-strong paths.
       const conf = e.confidence;
       if (!prior) {
         seen.set(e.fromId, { depth: hop, confidence: conf });
@@ -97,7 +100,7 @@ export async function impact(
   });
 
   dependants.sort(
-    (a, b) => a.depth - b.depth || a.symbol.file.localeCompare(b.symbol.file) || a.symbol.startLine - b.symbol.startLine
+    (a, b) => a.depth - b.depth || a.symbol.file.localeCompare(b.symbol.file, 'en') || a.symbol.startLine - b.symbol.startLine
   );
 
   return { seed, dependants, truncated };
