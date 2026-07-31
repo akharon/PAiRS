@@ -3,14 +3,14 @@
  *
  * Adapted from vendor/reference-indexer/src/index/extractors.ts, trimmed to
  * v1 scope: the complexity walk (cyclomatic/cognitive) and FTS name-splitting
- * are dropped — no GIZEM tool consumes them (subsystem_indexer_spec.md has no
+ * are dropped — no PAiRS tool consumes them (subsystem_indexer_spec.md has no
  * complexity metric; hotspots ranks by CALLS fan-out, computed by the store,
  * not here). One implementation over all 12 languages the reference project
  * shipped grammars for — everything language-specific lives in the query
  * file, not here. v1's *precision contract* (unresolved_ratio ≤ 10%,
  * benchmarks) validates Rust only (types.ts V1_VALIDATED_LANGS); the other
  * 11 languages parse and populate the graph unmeasured. Adding a language
- * means a new `.scm` file plus (if it needs GIZEM's refined edge vocabulary
+ * means a new `.scm` file plus (if it needs PAiRS's refined edge vocabulary
  * rather than the generic one) an entry in extractorImpl.ts's ref-kind map,
  * not new extraction logic.
  *

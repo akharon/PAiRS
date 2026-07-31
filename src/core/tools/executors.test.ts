@@ -25,7 +25,7 @@ const fromFn = (name: string, qualifiedName: string | null): RawRef => ({ fromIn
 describe('tool executors', () => {
   let x: Executors;
   beforeAll(async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gizem-exec-'));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pairs-exec-'));
     const store = await KuzuCodeStore.open(path.join(dir, 'g.kz'), nodeKuzuDriver);
     await store.applyExtraction(ext('core.rs', [sym('core', 'core')]));
     await store.applyExtraction(ext('mid.rs', [sym('mid', 'mid')], [fromFn('core', null)]));
@@ -81,7 +81,7 @@ describe('rename_symbol executor', () => {
   let dir: string;
 
   beforeAll(async () => {
-    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gizem-rename-'));
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pairs-rename-'));
     const store = await KuzuCodeStore.open(path.join(dir, 'g.kz'), nodeKuzuDriver);
 
     fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
@@ -119,7 +119,7 @@ describe('rename_symbol executor', () => {
   });
 
   it('reports unavailable without a root', async () => {
-    const store = await KuzuCodeStore.open(path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'gizem-rename-noroot-')), 'g.kz'), nodeKuzuDriver);
+    const store = await KuzuCodeStore.open(path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pairs-rename-noroot-')), 'g.kz'), nodeKuzuDriver);
     const noRoot = createExecutors({ store });
     expect(await noRoot.rename_symbol({ name: 'anything', newName: 'x', path: undefined })).toContain('unavailable');
   });
@@ -129,7 +129,7 @@ describe('rule tool executors', () => {
   let x: Executors;
   let rulesPath: string;
   beforeAll(async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gizem-ruletool-'));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pairs-ruletool-'));
     const store = await KuzuCodeStore.open(path.join(dir, 'g.kz'), nodeKuzuDriver);
     // busy() calls two targets; MaxFanOut(max: 1) flags it.
     await store.applyExtraction(ext('u/t.rs', [sym('t1', 't1'), sym('t2', 't2')]));

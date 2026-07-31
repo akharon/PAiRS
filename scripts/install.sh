@@ -1,11 +1,11 @@
 #!/bin/bash
 set -e
 
-# GIZEM VS Code extension installer
+# PAiRS VS Code extension installer
 # Usage: ./scripts/install.sh
 # Builds, packages, and installs the extension to VS Code
 
-echo "🚀 GIZEM installation — full pipeline"
+echo "🚀 PAiRS installation — full pipeline"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
@@ -30,7 +30,7 @@ echo "✅ Packaging complete"
 echo ""
 
 # Find the latest .vsix file
-VSIX_FILE=$(ls -t gizem-*.vsix 2>/dev/null | head -1)
+VSIX_FILE=$(ls -t pairs-*.vsix 2>/dev/null | head -1)
 
 if [ -z "$VSIX_FILE" ]; then
   echo "❌ Error: No .vsix file found"
@@ -50,5 +50,5 @@ echo ""
 echo "Next steps:"
 echo "  1. Reload VS Code window (Cmd+Shift+P → Reload Window)"
 echo "  2. Open a Rust workspace"
-echo "  3. GIZEM commands will appear in Command Palette (Cmd+Shift+P)"
+echo "  3. PAiRS commands will appear in Command Palette (Cmd+Shift+P)"
 echo ""

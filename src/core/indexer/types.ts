@@ -3,7 +3,7 @@
  * knowledge; EdgeRecords form the call/dependency graph over symbols.
  *
  * Adapted from vendor/reference-indexer/src/index/types.ts — trimmed to
- * GIZEM's scope (no embeddings/semantic search; edge vocabulary matches
+ * PAiRS's scope (no embeddings/semantic search; edge vocabulary matches
  * subsystem_indexer_spec.md §3/§4 rather than the reference's generic set).
  *
  * Resolution model: parsing is syntactic (web-tree-sitter), so cross-file
@@ -37,7 +37,7 @@ export const SYMBOL_KINDS: readonly SymbolKind[] = ['module', 'function', 'metho
  * (they come straight off the CST); reference edges carry `resolved: false`
  * when the resolver can't pin a unique target.
  *
- * GIZEM's own rule-engine vocabulary (CALLS/READS/WRITES/DEPENDS_ON/
+ * PAiRS's own rule-engine vocabulary (CALLS/READS/WRITES/DEPENDS_ON/
  * IMPLEMENTS) is a Rust-first refinement of the reference project's generic
  * multi-language set (calls/extends/implements/references/imports). Both are
  * kept: the Rust extractor emits the refined kinds; other languages' `.scm`
@@ -223,7 +223,7 @@ export interface IndexStats {
   /**
    * pendingRefs / (edges + pendingRefs).
    *
-   * NOT a resolver-precision metric: GIZEM indexes workspace code only, so
+   * NOT a resolver-precision metric: PAiRS indexes workspace code only, so
    * every `assert!`/`Vec::new`/framework call is correctly unresolved and lands
    * here. On the ARES sample this sat near 50% while *zero* unresolved refs
    * named a workspace symbol — it mostly measures how much stdlib a codebase

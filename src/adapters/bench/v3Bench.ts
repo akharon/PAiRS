@@ -1,12 +1,12 @@
 /**
- * V3 token benchmark (plan.md 1.7, the headline "why GIZEM" number).
+ * V3 token benchmark (plan.md 1.7, the headline "why PAiRS" number).
  *
  * Claim under test: answering an agent's structural code questions through the
- * GIZEM MCP tools costs ≤ 10% of the tokens a file-reading agent spends to
+ * PAiRS MCP tools costs ≤ 10% of the tokens a file-reading agent spends to
  * answer the *same* question by grep-then-read.
  *
  * Method — for each of 20 scripted questions:
- *   GIZEM cost  = tokens of the MCP tool response text an agent would receive.
+ *   PAiRS cost  = tokens of the MCP tool response text an agent would receive.
  *   Baseline    = tokens of the file contents a grep-then-read agent must pull
  *                 into context to answer, i.e. the full text of every file that
  *                 grep -l for the question's search term returns. This is the
@@ -17,7 +17,7 @@
  * Both sides are counted with the same cl100k tokenizer (gpt-tokenizer). The
  * baseline deliberately does NOT include the agent's own reasoning/thrash — it
  * is a lower bound on the file-reading path, which makes the ratio conservative
- * (real agents read more, re-read, and overshoot). GIZEM's side is the exact
+ * (real agents read more, re-read, and overshoot). PAiRS's side is the exact
  * bytes the tool returns, nothing hidden.
  *
  * Questions are authored against symbols/files the harness discovers in the
@@ -71,14 +71,14 @@ export interface BenchRow {
   gizemTokens: number;
   baselineTokens: number;
   baselineFiles: number;
-  ratio: number; // gizem / baseline
+  ratio: number; // pairs / baseline
 }
 
 export interface BenchResult {
   rows: BenchRow[];
   totalGizem: number;
   totalBaseline: number;
-  ratio: number; // aggregate gizem / baseline
+  ratio: number; // aggregate pairs / baseline
   meanRatio: number; // mean of per-question ratios
   passed: boolean; // aggregate ratio ≤ 0.10
 }

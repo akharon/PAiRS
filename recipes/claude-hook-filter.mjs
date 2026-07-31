@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Claude Code PostToolUse filter for `gizem check --format json`.
+ * Claude Code PostToolUse filter for `pairs check --format json`.
  *
  * Reads the check JSON from stdin and:
  *  - exits 2 with the violations on stderr when a NEW CONFIRMED error-severity

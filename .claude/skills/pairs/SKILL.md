@@ -1,19 +1,19 @@
 ---
-name: gizem
-description: Leverage GIZEM's code graph and architectural rules. Use instead of grep/Read for definitions, dependencies, refactoring safety, and rule compliance. In VS Code with Copilot, prefer the language model tools (find_symbol, impact, check_rules, rename_symbol, etc.); for CLI use the gizem commands.
+name: pairs
+description: Leverage PAiRS's code graph and architectural rules. Use instead of grep/Read for definitions, dependencies, refactoring safety, and rule compliance. In VS Code with Copilot, prefer the language model tools (find_symbol, impact, check_rules, rename_symbol, etc.); for CLI use the pairs commands.
 ---
 
-# GIZEM: Code Graph & Architectural Rules
+# PAiRS: Code Graph & Architectural Rules
 
-GIZEM maintains a live code graph (symbols, call/import edges, dependencies) and
+PAiRS maintains a live code graph (symbols, call/import edges, dependencies) and
 architectural rule engine for this workspace, updated by the VS Code extension
-while it's open. Use GIZEM instead of grep/Read for code navigation and
+while it's open. Use PAiRS instead of grep/Read for code navigation and
 refactoring — it catches renamed-import references grep misses, understands
 module structure, and enforces architecture rules.
 
 ## In VS Code with Copilot (Language Model Tools)
 
-Copilot has direct access to GIZEM tools — use these for navigation and refactoring:
+Copilot has direct access to PAiRS tools — use these for navigation and refactoring:
 
 - **find_symbol** — locate where a symbol is defined (by name, bare or qualified).
 - **get_symbol** — full declaration: signature, doc, members.
@@ -24,7 +24,7 @@ Copilot has direct access to GIZEM tools — use these for navigation and refact
 - **file_deps** — which files depend on this one, and what it depends on.
 - **module_map** — subsystems detected in the codebase and architectural drift.
 - **analyze** — dead code, cycles, hotspots, untested exports.
-- **check_rules** — verify `.gizem/rules.ron` against the graph (call AFTER
+- **check_rules** — verify `.pairs/rules.ron` against the graph (call AFTER
   editing to catch rule violations early).
 - **list_rules** — summarize the active ruleset: ids, kinds, severities.
 - **explain_rule** — detail of one rule, including its explanation.
@@ -34,21 +34,21 @@ Copilot has direct access to GIZEM tools — use these for navigation and refact
 
 ## In the CLI (from workspace root)
 
-For automation and CI/CD, use `gizem` commands:
+For automation and CI/CD, use `pairs` commands:
 
-- `gizem impact <name> [depth]` — blast radius (same as the tool above).
-- `gizem check [--ci] [--format human|sarif|json]` — evaluate
-  `.gizem/rules.ron` against the graph. Non-zero exit only on new confirmed
+- `pairs impact <name> [depth]` — blast radius (same as the tool above).
+- `pairs check [--ci] [--format human|sarif|json]` — evaluate
+  `.pairs/rules.ron` against the graph. Non-zero exit only on new confirmed
   error-severity violations.
-- `gizem rules [path]` — summarize the ruleset.
-- `gizem baseline update` — snapshot current violations so `check` only flags
+- `pairs rules [path]` — summarize the ruleset.
+- `pairs baseline update` — snapshot current violations so `check` only flags
   new ones going forward.
-- `gizem query '<cypher>'` — raw Cypher for anything not covered above.
-- `gizem stats` — index size and resolution quality.
-- `gizem index` — full re-index (rarely needed; extension keeps it live).
-- `gizem init [--force]` — bootstrap `.gizem/rules.ron` from inferred layers.
+- `pairs query '<cypher>'` — raw Cypher for anything not covered above.
+- `pairs stats` — index size and resolution quality.
+- `pairs index` — full re-index (rarely needed; extension keeps it live).
+- `pairs init [--force]` — bootstrap `.pairs/rules.ron` from inferred layers.
 
-## When to Use GIZEM
+## When to Use PAiRS
 
 - **Finding definitions** — `find_symbol` / `outline` instead of grep/Read.
 - **Checking impact before a change** — `impact` shows callers, readers, type

@@ -1,5 +1,5 @@
 /**
- * SARIF 2.1.0 output for `gizem check --format sarif` — the shape GitHub code
+ * SARIF 2.1.0 output for `pairs check --format sarif` — the shape GitHub code
  * scanning ingests (spec §6, plan.md Phase 2 exit). Minimal but valid: one run,
  * one rule descriptor per rule, one result per violation, first node as the
  * primary location, remaining nodes as relatedLocations.
@@ -16,8 +16,8 @@ export function toSarif(violations: Violation[], rules: Rule[], version: string)
       {
         tool: {
           driver: {
-            name: 'gizem',
-            informationUri: 'https://github.com/gizem',
+            name: 'pairs',
+            informationUri: 'https://github.com/pairs',
             version,
             rules: rules.map((r) => ({
               id: r.id,

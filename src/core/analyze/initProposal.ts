@@ -1,5 +1,5 @@
 /**
- * `gizem init` (plan.md 3.4 / R5): index → moduleMap → proposed layers +
+ * `pairs init` (plan.md 3.4 / R5): index → moduleMap → proposed layers +
  * starter rules.ron + findings. Turns the empty-config problem into a reviewed
  * starting point: everything emitted is a *proposal* — the human (V7) accepts
  * or edits, never trusts blindly.
@@ -158,7 +158,7 @@ export async function proposeInit(store: CodeStore): Promise<LayerProposal> {
   // Existing violations of the proposal = current drift the team must decide on.
   const pct = (map.driftRatio * 100).toFixed(0);
   if (map.drift.length > 0) {
-    findings.push(`${pct}% of dependency weight crosses subsystem boundaries. Heaviest: ${map.drift.slice(0, 3).map((d) => `${d.from} → ${d.to} (×${d.weight})`).join('; ')}. Baseline these (gizem baseline update) or refactor.`);
+    findings.push(`${pct}% of dependency weight crosses subsystem boundaries. Heaviest: ${map.drift.slice(0, 3).map((d) => `${d.from} → ${d.to} (×${d.weight})`).join('; ')}. Baseline these (pairs baseline update) or refactor.`);
   }
 
   const cycles = await store.findCycles({ edge: 'DEPENDS_ON', scope: 'module', excludeTest: true, limit: 5 });
@@ -179,7 +179,7 @@ function starterRules(layers: Record<string, number>, moduleLayers: Record<strin
     .map(([m, l]) => `"${m}": "${l}"`)
     .join(', ');
   const header = [
-    '// Starter ruleset proposed by `gizem init` — REVIEW BEFORE TRUSTING.',
+    '// Starter ruleset proposed by `pairs init` — REVIEW BEFORE TRUSTING.',
     '// Layer ranks were inferred from observed dependency direction; the',
     '// findings below list every place the inference was a guess.',
     ...findings.map((f) => `// finding: ${f}`),

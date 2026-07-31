@@ -1,6 +1,6 @@
 /**
  * Baseline/ratchet (spec §6, O4): a committed snapshot of accepted violations.
- * `gizem check --baseline` fails only on violations whose key is not in the
+ * `pairs check --baseline` fails only on violations whose key is not in the
  * snapshot — legacy repos pass day 1, new debt fails CI.
  *
  * Key = rule id + sorted module-qualified symbol names (not file paths):

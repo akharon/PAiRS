@@ -104,7 +104,7 @@ function makeWorkspace(dir: string, files: Record<string, string>): void {
 }
 
 async function openIndexer(root: string): Promise<{ store: CodeStore; indexer: IndexerImpl; dispose(): void }> {
-  const store = await KuzuCodeStore.open(path.join(root, '.gizem', 'index'), nodeKuzuDriver);
+  const store = await KuzuCodeStore.open(path.join(root, '.pairs', 'index'), nodeKuzuDriver);
   const parsers = new ParserRegistryImpl(
     path.join(__dirname, '../../../dist/grammars'),
     fileQuerySource(path.join(__dirname, '../../../dist/queries'))
@@ -121,8 +121,8 @@ async function openIndexer(root: string): Promise<{ store: CodeStore; indexer: I
 
 describe('re-park on target change (R7)', () => {
   it('an edited file keeps its incoming cross-file edges', async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gizem-repark-'));
-    fs.mkdirSync(path.join(root, '.gizem'), { recursive: true });
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pairs-repark-'));
+    fs.mkdirSync(path.join(root, '.pairs'), { recursive: true });
     makeWorkspace(root, {
       'src/lib.rs': `pub fn target() {}\n`,
       'src/user.rs': `use crate::lib::target;\npub fn caller() { target(); }\n`,
@@ -154,8 +154,8 @@ describe('re-park on target change (R7)', () => {
 
 describe('V8: incremental graph ≡ cold full index', () => {
   it('random create/edit/delete bursts converge to the cold-index graph', async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gizem-v8-'));
-    fs.mkdirSync(path.join(root, '.gizem'), { recursive: true });
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pairs-v8-'));
+    fs.mkdirSync(path.join(root, '.pairs'), { recursive: true });
 
     const gen = (n: number, calls: string[]): string =>
       `pub fn f${n}() { ${calls.map((c) => `${c}();`).join(' ')} }\n`;
@@ -205,8 +205,8 @@ describe('V8: incremental graph ≡ cold full index', () => {
     inc.dispose();
 
     // Cold index of the same final tree into a fresh store.
-    const coldRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'gizem-v8-cold-'));
-    fs.mkdirSync(path.join(coldRoot, '.gizem'), { recursive: true });
+    const coldRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pairs-v8-cold-'));
+    fs.mkdirSync(path.join(coldRoot, '.pairs'), { recursive: true });
     for (const p of paths) {
       const src = path.join(root, p);
       if (fs.existsSync(src)) {

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * gizem CLI — headless entry point (plan.md Phase 0: `gizem index`,
- * `gizem query`, `gizem stats`). Wires core/indexer to store/graph exactly
+ * pairs CLI — headless entry point (plan.md Phase 0: `pairs index`,
+ * `pairs query`, `pairs stats`). Wires core/indexer to store/graph exactly
  * as the VS Code extension (Phase 1) and MCP server will, over the same
  * `Indexer`/`CodeStore` interfaces — no vscode import here (R10).
  */
@@ -25,7 +25,7 @@ import { ciFailures, createBaseline, diffAgainstBaseline, parseBaseline } from '
 async function main(): Promise<void> {
   const [, , command, ...rest] = process.argv;
   const root = process.cwd();
-  const dbPath = path.join(root, '.gizem', 'index');
+  const dbPath = path.join(root, '.pairs', 'index');
   // This file ships bundled as dist/cli.js, so grammars/queries sit alongside
   // it in dist/ — resolve from __dirname, not from the src/ tree layout.
   const grammarsDir = path.join(__dirname, 'grammars');
@@ -42,10 +42,10 @@ async function main(): Promise<void> {
     if (/lock/i.test(msg)) {
       // Kuzu 0.11.3 takes an exclusive file lock regardless of read-only intent —
       // a second process (this CLI) cannot open the DB at all while the VS Code
-      // extension (or another `gizem` invocation) holds it open.
+      // extension (or another `pairs` invocation) holds it open.
       process.stderr.write(
         `Could not open ${dbPath}: ${msg}\n` +
-          'Another process (likely the VS Code extension, or another `gizem` command) has this index open. ' +
+          'Another process (likely the VS Code extension, or another `pairs` command) has this index open. ' +
           'Kuzu allows only one process to hold the database at a time — close that workspace/process, or wait for it to finish, then retry.\n'
       );
       process.exitCode = 1;
@@ -73,7 +73,7 @@ async function main(): Promise<void> {
       case 'query': {
         const cypher = rest.join(' ');
         if (!cypher) {
-          process.stderr.write("Usage: gizem query '<cypher>'\n");
+          process.stderr.write("Usage: pairs query '<cypher>'\n");
           process.exitCode = 1;
           break;
         }
@@ -87,11 +87,11 @@ async function main(): Promise<void> {
         break;
       }
       case 'impact': {
-        // gizem impact <nameOrQualified> [depth]
+        // pairs impact <nameOrQualified> [depth]
         const target = rest[0];
         const depth = rest[1] ? Number(rest[1]) : 5;
         if (!target) {
-          process.stderr.write('Usage: gizem impact <name> [depth]\n');
+          process.stderr.write('Usage: pairs impact <name> [depth]\n');
           process.exitCode = 1;
           break;
         }
@@ -110,21 +110,21 @@ async function main(): Promise<void> {
         break;
       }
       case 'check': {
-        // gizem check [--ci] [--baseline <f>] [--format human|sarif|json] [--rules <f>]
+        // pairs check [--ci] [--baseline <f>] [--format human|sarif|json] [--rules <f>]
         const opt = (name: string): string | undefined => {
           const i = rest.indexOf(name);
           return i >= 0 ? rest[i + 1] : undefined;
         };
         const ci = rest.includes('--ci');
         const format = opt('--format') ?? 'human';
-        const rulesPath = opt('--rules') ?? path.join(root, '.gizem', 'rules.ron');
+        const rulesPath = opt('--rules') ?? path.join(root, '.pairs', 'rules.ron');
         const baselinePath = opt('--baseline');
 
         let src: string;
         try {
           src = await fs.readFile(rulesPath, 'utf8');
         } catch {
-          process.stderr.write(`No ruleset at ${rulesPath}. Create .gizem/rules.ron first.\n`);
+          process.stderr.write(`No ruleset at ${rulesPath}. Create .pairs/rules.ron first.\n`);
           process.exitCode = 2;
           break;
         }
@@ -136,7 +136,7 @@ async function main(): Promise<void> {
           // refuse rather than silently pass a gate over nothing.
           const s = await store.stats();
           if (s.files === 0) {
-            process.stderr.write('Index is empty — run `gizem index` (or `gizem check --ci`) first.\n');
+            process.stderr.write('Index is empty — run `pairs index` (or `pairs check --ci`) first.\n');
             process.exitCode = 2;
             break;
           }
@@ -152,7 +152,7 @@ async function main(): Promise<void> {
           fresh = diff.fresh;
           known = diff.known.length;
           if (diff.fixedKeys.length > 0 && format === 'human') {
-            process.stderr.write(`${diff.fixedKeys.length} baselined violation(s) fixed — run \`gizem baseline update\` to ratchet.\n`);
+            process.stderr.write(`${diff.fixedKeys.length} baselined violation(s) fixed — run \`pairs baseline update\` to ratchet.\n`);
           }
         }
 
@@ -172,9 +172,9 @@ async function main(): Promise<void> {
         break;
       }
       case 'baseline': {
-        // gizem baseline update [--rules <f>] [--out <f>]
+        // pairs baseline update [--rules <f>] [--out <f>]
         if (rest[0] !== 'update') {
-          process.stderr.write('Usage: gizem baseline update [--rules <f>] [--out <f>]\n');
+          process.stderr.write('Usage: pairs baseline update [--rules <f>] [--out <f>]\n');
           process.exitCode = 1;
           break;
         }
@@ -182,8 +182,8 @@ async function main(): Promise<void> {
           const i = rest.indexOf(name);
           return i >= 0 ? rest[i + 1] : undefined;
         };
-        const rulesPath = opt('--rules') ?? path.join(root, '.gizem', 'rules.ron');
-        const outPath = opt('--out') ?? path.join(root, '.gizem', 'baseline.json');
+        const rulesPath = opt('--rules') ?? path.join(root, '.pairs', 'rules.ron');
+        const outPath = opt('--out') ?? path.join(root, '.pairs', 'baseline.json');
         const ruleset = parseRuleSet(await fs.readFile(rulesPath, 'utf8'));
         const { violations } = await checkRules(store, ruleset);
         const baseline = createBaseline(violations);
@@ -192,10 +192,10 @@ async function main(): Promise<void> {
         break;
       }
       case 'init': {
-        // gizem init [--force] — index, infer layers, write starter rules.ron
+        // pairs init [--force] — index, infer layers, write starter rules.ron
         // + a findings report (plan.md 3.4 / R5). Never overwrites an existing
         // ruleset without --force.
-        const rulesPath = path.join(root, '.gizem', 'rules.ron');
+        const rulesPath = path.join(root, '.pairs', 'rules.ron');
         const exists = await fs.access(rulesPath).then(() => true, () => false);
         if (exists && !rest.includes('--force')) {
           process.stderr.write(`${rulesPath} already exists — review it, or re-run with --force to overwrite.\n`);
@@ -214,14 +214,14 @@ async function main(): Promise<void> {
           process.stdout.write(`\nReview these before trusting the proposal:\n`);
           for (const f of proposal.findings) process.stdout.write(`  - ${f}\n`);
         }
-        process.stdout.write(`\nNext: \`gizem check\` to see day-1 violations, \`gizem baseline update\` to accept them.\n`);
+        process.stdout.write(`\nNext: \`pairs check\` to see day-1 violations, \`pairs baseline update\` to accept them.\n`);
         break;
       }
       case 'watch': {
-        // gizem watch [--check] — incremental re-index on save (plan.md 3.1);
+        // pairs watch [--check] — incremental re-index on save (plan.md 3.1);
         // with --check, re-evaluate rules after each settled batch (3.3-lite).
         const withCheck = rest.includes('--check');
-        const rulesPath = path.join(root, '.gizem', 'rules.ron');
+        const rulesPath = path.join(root, '.pairs', 'rules.ron');
         process.stderr.write('Indexing…\n');
         const report = await indexer.fullIndex(root);
         process.stderr.write(`Indexed ${report.files} files in ${report.elapsedMs} ms. Watching (Ctrl-C to stop).\n`);
@@ -256,13 +256,13 @@ async function main(): Promise<void> {
         break;
       }
       case 'rules': {
-        const rulesPath = rest[0] ?? path.join(root, '.gizem', 'rules.ron');
+        const rulesPath = rest[0] ?? path.join(root, '.pairs', 'rules.ron');
         const ruleset = parseRuleSet(await fs.readFile(rulesPath, 'utf8'));
         process.stdout.write(ruleset.rules.map((r) => `${summarizeRule(r)}\n`).join(''));
         break;
       }
       default:
-        process.stderr.write('Usage: gizem <index|init|query|stats|impact|check|baseline|rules|watch>\n');
+        process.stderr.write('Usage: pairs <index|init|query|stats|impact|check|baseline|rules|watch>\n');
         process.exitCode = 1;
     }
   } finally {

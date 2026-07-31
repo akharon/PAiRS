@@ -2,8 +2,8 @@
 
 Wire `check_rules` after every agent edit so architectural violations are caught
 and self-corrected inside the session — the V4 loop. All recipes assume the
-workspace is indexed (`gizem index` or the VS Code extension running) and has a
-`.gizem/rules.ron`.
+workspace is indexed (`pairs index` or the VS Code extension running) and has a
+`.pairs/rules.ron`.
 
 ## Claude Code — post-edit hook
 
@@ -16,7 +16,7 @@ workspace is indexed (`gizem index` or the VS Code extension running) and has a
       {
         "matcher": "Edit|Write",
         "hooks": [
-          { "type": "command", "command": "node <gizem>/dist/cli.js check --format json 2>/dev/null | node <gizem>/recipes/claude-hook-filter.mjs" }
+          { "type": "command", "command": "node <pairs>/dist/cli.js check --format json 2>/dev/null | node <pairs>/recipes/claude-hook-filter.mjs" }
         ]
       }
     ]
@@ -32,7 +32,7 @@ and can self-correct.
 Alternatively, register the MCP server and let the agent call the tool itself:
 
 ```sh
-claude mcp add gizem -- node <gizem>/dist/mcp-server.js --db "$PWD/.gizem/index"
+claude mcp add pairs -- node <pairs>/dist/mcp-server.js --db "$PWD/.pairs/index"
 ```
 
 then instruct in CLAUDE.md: *"After completing code edits, call the
@@ -40,16 +40,16 @@ then instruct in CLAUDE.md: *"After completing code edits, call the
 
 ## Cursor — rules file
 
-`.cursor/rules/gizem.mdc`:
+`.cursor/rules/pairs.mdc`:
 
 ```
 ---
-description: Architectural guardrails via GIZEM
+description: Architectural guardrails via PAiRS
 alwaysApply: true
 ---
 
-After any code edit, run `check_rules` from the gizem MCP server (or
-`node <gizem>/dist/cli.js check`). If it reports confirmed violations, fix them
+After any code edit, run `check_rules` from the pairs MCP server (or
+`node <pairs>/dist/cli.js check`). If it reports confirmed violations, fix them
 using each violation's `why:` explanation before declaring the task done.
 `possible` findings are advisory — verify, don't blindly fix.
 ```
@@ -59,7 +59,7 @@ MCP registration for Cursor (`.cursor/mcp.json`):
 ```json
 {
   "mcpServers": {
-    "gizem": { "command": "node", "args": ["<gizem>/dist/mcp-server.js", "--db", "${workspaceFolder}/.gizem/index"] }
+    "pairs": { "command": "node", "args": ["<pairs>/dist/mcp-server.js", "--db", "${workspaceFolder}/.pairs/index"] }
   }
 }
 ```
@@ -70,8 +70,8 @@ MCP registration for Cursor (`.cursor/mcp.json`):
 
 ```sh
 #!/bin/sh
-node <gizem>/dist/cli.js check --baseline .gizem/baseline.json || {
-  echo "gizem: new confirmed architecture violations — commit blocked." >&2
+node <pairs>/dist/cli.js check --baseline .pairs/baseline.json || {
+  echo "pairs: new confirmed architecture violations — commit blocked." >&2
   exit 1
 }
 ```
@@ -79,10 +79,10 @@ node <gizem>/dist/cli.js check --baseline .gizem/baseline.json || {
 ## CI (GitHub Actions + code scanning)
 
 ```yaml
-- run: node <gizem>/dist/cli.js check --ci --baseline .gizem/baseline.json --format sarif > gizem.sarif
+- run: node <pairs>/dist/cli.js check --ci --baseline .pairs/baseline.json --format sarif > pairs.sarif
 - uses: github/codeql-action/upload-sarif@v3
   if: always()
-  with: { sarif_file: gizem.sarif }
+  with: { sarif_file: pairs.sarif }
 ```
 
 Exit-code contract (all surfaces): **1 only on new confirmed error-severity

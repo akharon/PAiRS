@@ -2,7 +2,7 @@
  * Node-fs workspace enumeration + file reads for the headless CLI/MCP path.
  *
  * Adapted from vendor/reference-indexer/src/index/nodeFsDeps.ts as-is, with
- * `.pairs` swapped for `.gizem` in the skip set (`.gizem/` holds GIZEM's own
+ * `.pairs` swapped for `.pairs` in the skip set (`.pairs/` holds PAiRS's own
  * disposable index — never walk into it).
  */
 
@@ -11,7 +11,7 @@ import * as path from 'node:path';
 import { langForPath } from './parserRegistry';
 
 /** Directories never worth walking (also the watcher's ignore set). */
-export const SKIP_DIRS = new Set(['.git', 'node_modules', 'dist', 'out', 'build', '.gizem', '.vscode', 'target']);
+export const SKIP_DIRS = new Set(['.git', 'node_modules', 'dist', 'out', 'build', '.pairs', '.vscode', 'target']);
 
 /** Is any segment of this workspace-relative path a skipped directory? */
 export function isSkippedPath(relPath: string): boolean {
@@ -23,7 +23,7 @@ export function isSkippedPath(relPath: string): boolean {
  * (paths workspace-relative POSIX). One non-recursive fs.watch per
  * non-skipped directory, added/removed as directories appear/vanish —
  * `fs.watch({recursive})` is NOT used because Node's fallback recursive
- * implementation watches every directory including `target/`/`.gizem/`,
+ * implementation watches every directory including `target/`/`.pairs/`,
  * which exhausts the inotify watcher limit on real Rust workspaces (seen on
  * ARES) and crashes on the resulting unhandled 'error' event.
  * fs.watch cannot distinguish create/modify from delete on 'rename', so

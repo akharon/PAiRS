@@ -1,7 +1,7 @@
 #!/bin/bash
 # Bump the minor version in package.json when the git HEAD commit SHA has
 # changed since the last build. Stores the last-build SHA in a sidecar JSON
-# file at <repo-root>/.gizem/.build-state.json.
+# file at <repo-root>/.pairs/.build-state.json.
 #
 # This ensures that every build produces a distinct version number, so the
 # extension's checkVersion() mechanism (which compares the stored extension
@@ -18,7 +18,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_ROOT"
 
-STATE_DIR="$PROJECT_ROOT/.gizem"
+STATE_DIR="$PROJECT_ROOT/.pairs"
 STATE_FILE="$STATE_DIR/.build-state.json"
 
 # --- Get current HEAD SHA ---------------------------------------------------

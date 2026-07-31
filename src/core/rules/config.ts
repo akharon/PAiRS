@@ -1,5 +1,5 @@
 /**
- * `.gizem/rules.ron` → validated RuleSet (spec §3.1). Validation errors are
+ * `.pairs/rules.ron` → validated RuleSet (spec §3.1). Validation errors are
  * ConfigError with the rule id in the message where one exists — a bad config
  * must be fixable from the error alone, since agents hit these too.
  *

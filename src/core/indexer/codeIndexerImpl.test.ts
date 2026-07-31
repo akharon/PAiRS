@@ -6,7 +6,7 @@
  * Adapted from vendor/reference-indexer/src/index/codeIndexerImpl.test.ts —
  * the fake-store/fake-parsers/fake-extractor pattern is carried over;
  * onGitHeadChanged/watcher-debounce coverage is dropped (Phase 1+, not in
- * GIZEM's IndexerImpl — see codeIndexer.ts).
+ * PAiRS's IndexerImpl — see codeIndexer.ts).
  */
 
 import { describe, expect, it } from 'vitest';

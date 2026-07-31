@@ -25,7 +25,7 @@ if [ "$(node_major)" -lt "$REQUIRED_NODE_MAJOR" ] 2>/dev/null || [ -z "$(node_ma
   exit 1
 fi
 
-echo "🔨 Full build pipeline for GIZEM"
+echo "🔨 Full build pipeline for PAiRS"
 echo "   Using $(node -v)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
@@ -70,9 +70,9 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo "✅ Build complete!"
 echo ""
 echo "Extension package ready (one platform-specific .vsix per OS — R4):"
-ls -lh gizem-*.vsix 2>/dev/null || echo "  (run scripts/package.sh once Phase 1 packaging lands)"
+ls -lh pairs-*.vsix 2>/dev/null || echo "  (run scripts/package.sh once Phase 1 packaging lands)"
 echo ""
 echo "Install to VS Code:"
 echo "  • UI: Extensions → ⋯ → Install from VSIX"
-echo "  • CLI: code --install-extension gizem-*.vsix"
+echo "  • CLI: code --install-extension pairs-*.vsix"
 echo "  • Dev: code --extensionDevelopmentPath=\$(pwd)"

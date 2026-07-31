@@ -52,7 +52,7 @@ describe('resolveOneRef ladder', () => {
   let store: CodeStore;
 
   beforeAll(async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gizem-resolver-'));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pairs-resolver-'));
     store = await KuzuCodeStore.open(path.join(dir, 'graph.kz'), nodeKuzuDriver);
 
     // Two workspace types with a same-named `new`, plus a uniquely-named free fn.
@@ -96,7 +96,7 @@ describe('resolveOneRef ladder', () => {
   // unknown and the true target is often a derive impl / stdlib method not in
   // the graph at all. On ripgrep, `.clone()` in globset resolved "confirmed"
   // onto ignore's `Error::clone`, leaking 207 false confirmed layering
-  // violations into `gizem check`.
+  // violations into `pairs check`.
   it('caps a bare method call at fuzzy even with a unique name match', async () => {
     expect(await confidenceOf('m.rs', { ...call('helper', null), methodCall: true })).toBe('fuzzy');
   });
@@ -147,7 +147,7 @@ describe('resolveOneRef ladder', () => {
 
 describe('stats precision buckets', () => {
   it('counts a qualified external call as external, not a resolvable miss', async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gizem-stats-'));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pairs-stats-'));
     const store = await KuzuCodeStore.open(path.join(dir, 'graph.kz'), nodeKuzuDriver);
     await store.applyExtraction(extraction('shapes.rs', [sym('Circle', 'Circle', 'struct'), sym('new', 'Circle::new')]));
     // `Vec::new` is glam/std. The workspace having *a* `new` must not make it
@@ -169,7 +169,7 @@ describe('stats precision buckets', () => {
 describe('row mappers read node-prefixed columns', () => {
   let store: CodeStore;
   beforeAll(async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gizem-readers-'));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pairs-readers-'));
     store = await KuzuCodeStore.open(path.join(dir, 'graph.kz'), nodeKuzuDriver);
     await store.applyExtraction(extraction('svc.rs', [sym('login', 'auth::login', 'function')]));
   });
@@ -207,7 +207,7 @@ describe('impact() transitive dependants', () => {
   let store: CodeStore;
   let coreId: number;
   beforeAll(async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gizem-impact-'));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pairs-impact-'));
     store = await KuzuCodeStore.open(path.join(dir, 'graph.kz'), nodeKuzuDriver);
     // core <- mid <- top  (top calls mid, mid calls core); free functions.
     // The ref must originate from the *function* (symbols[1]), not the module
@@ -247,7 +247,7 @@ describe('use statements create cross-file DEPENDS_ON edges', () => {
   // module symbol to the imported symbol.
   let store: CodeStore;
   beforeAll(async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gizem-depends-'));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pairs-depends-'));
     store = await KuzuCodeStore.open(path.join(dir, 'graph.kz'), nodeKuzuDriver);
     await store.applyExtraction(extraction('src/map/loader.rs', [sym('load_map', 'crate::map::loader::load_map', 'function')]));
     // consumer.rs imports load_map — a cross-file dependency.
@@ -282,7 +282,7 @@ describe('in-memory symbol mirror stays consistent across re-apply and remove', 
   // These pin that the patched mirror resolves identically to a fresh one.
   let store: CodeStore;
   beforeAll(async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gizem-mirror-'));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pairs-mirror-'));
     store = await KuzuCodeStore.open(path.join(dir, 'graph.kz'), nodeKuzuDriver);
     await store.applyExtraction(extraction('a.rs', [sym('alpha', 'alpha', 'function')]));
     // Force the mirror to load by resolving through it.

@@ -146,7 +146,7 @@ const callFrom = (name: string, qualifiedName: string | null = null): RawRef =>
 describe('checkRules over a real Kuzu store', () => {
   let store: CodeStore;
   beforeAll(async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gizem-rules-'));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pairs-rules-'));
     store = await KuzuCodeStore.open(path.join(dir, 'graph.kz'), nodeKuzuDriver);
     // Layers: src/core(1) <- src/services(2) <- src/ui(3).
     await store.applyExtraction(extraction('src/core/kernel.rs', [sym('boot', 'crate::core::kernel::boot'), sym('secret', 'crate::core::kernel::secret', 'function', false)]));

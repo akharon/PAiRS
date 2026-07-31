@@ -1,5 +1,5 @@
 /**
- * Tool contracts for GIZEM's code-graph retrieval surface (plan.md 1.1–1.5).
+ * Tool contracts for PAiRS's code-graph retrieval surface (plan.md 1.1–1.5).
  *
  * One zod schema per tool; the VS Code Language Model Tools (Copilot) derive
  * their JSON schema from here via scripts/sync-lm-tools.mjs, so the contract
@@ -136,7 +136,7 @@ export const codeToolSchemas = {
   },
   check_rules: {
     description:
-      'Evaluate the workspace\'s architectural rules (.gizem/rules.ron) against ' +
+      'Evaluate the workspace\'s architectural rules (.pairs/rules.ron) against ' +
       'the code graph. Call AFTER editing code to verify no architecture rule is ' +
       'violated — each violation returns the rule\'s explanation so you can ' +
       'self-correct. `possible` findings come from fuzzy edges and never fail CI.',

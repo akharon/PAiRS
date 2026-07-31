@@ -7,10 +7,10 @@
  * Adapted from vendor/reference-indexer/src/index/extractorImpl.ts — the
  * containment-stack / qualified-name / ref-folding logic is unchanged in
  * shape; complexity counting and FTS name-splitting were dropped (out of
- * GIZEM's scope, see extractors.ts). DEF_CAPTURE_TO_KIND is the reference
+ * PAiRS's scope, see extractors.ts). DEF_CAPTURE_TO_KIND is the reference
  * project's map unchanged (`def.struct`/`def.interface` etc. already existed
  * for Rust/Java/TS there). REF_CAPTURE_TO_KIND is Rust-specific — it maps
- * onto GIZEM's own rule-engine vocabulary (subsystem_indexer_spec.md §3);
+ * onto PAiRS's own rule-engine vocabulary (subsystem_indexer_spec.md §3);
  * other languages fall back to GENERIC_REF_KIND (the reference project's
  * original calls/extends/implements/references, hoisted into EdgeKind — see
  * types.ts). Trait bounds in Rust ARE `ref.implements`, matching the .scm.
@@ -50,7 +50,7 @@ const DEF_CAPTURE_TO_KIND: Readonly<Record<string, SymbolKind>> = {
   'def.module': 'module',
 };
 
-/** Rust emits GIZEM's refined rule-engine vocabulary (subsystem_indexer_spec.md §3). */
+/** Rust emits PAiRS's refined rule-engine vocabulary (subsystem_indexer_spec.md §3). */
 const RUST_REF_CAPTURE_TO_KIND: Readonly<Record<string, ReferenceEdgeKind>> = {
   'ref.call': 'CALLS',
   'ref.implements': 'IMPLEMENTS',

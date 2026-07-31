@@ -3,7 +3,7 @@ import { isTestPath } from './types';
 
 /**
  * Adapted from vendor/reference-indexer/src/index/types.test.ts — trimmed to
- * GIZEM's narrower Rust-first TEST_PATH_PATTERNS (no .spec./_test. suffix
+ * PAiRS's narrower Rust-first TEST_PATH_PATTERNS (no .spec./_test. suffix
  * styles or pytest test_*.py; those return with multi-language validation).
  */
 describe('isTestPath', () => {

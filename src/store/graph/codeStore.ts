@@ -1,5 +1,5 @@
 /**
- * Code graph store contract. Backed by KuzuDB (Cypher) under `.gizem/index/`
+ * Code graph store contract. Backed by KuzuDB (Cypher) under `.pairs/index/`
  * (ADR-009) — the index is derived data: rebuildable, disposable, no write
  * guards (subsystem_graph_store_spec.md §4).
  *
@@ -8,7 +8,7 @@
  * `resolvePending`, `findCycles` (Tarjan), `unreferenced`, `fileEdges`,
  * `hotspots`, `untested` — see vendor/reference-indexer/REUSE.md). Trimmed:
  * no FTS (`ftsSearch`), no embeddings (`setEmbedding`/`semanticSearch`/
- * `similarPairs`) — out of GIZEM's scope. `findCycles` operates on the
+ * `similarPairs`) — out of PAiRS's scope. `findCycles` operates on the
  * DEPENDS_ON graph at Module or Type scope (subsystem_mcp_rules_spec.md's
  * `NoCycles` rule kind), not just file imports.
  *
@@ -158,13 +158,13 @@ export interface CodeStore {
    */
   findCycles(opts: { edge: EdgeKind; scope: 'module' | 'type'; pathPrefix?: string; limit?: number; confirmedOnly?: boolean; excludeTest?: boolean }): Promise<string[][]>;
   stats(): Promise<IndexStats>;
-  /** Drop and recreate all tables (`gizem index --rebuild`). */
+  /** Drop and recreate all tables (`pairs index --rebuild`). */
   reset(): Promise<void>;
   dispose(): void;
 }
 
 /** Factory — the only place that knows Kuzu specifics. */
 export interface CodeStoreFactory {
-  /** @param dbPath absolute path to `.gizem/index/` (Kuzu database directory) */
+  /** @param dbPath absolute path to `.pairs/index/` (Kuzu database directory) */
   open(dbPath: string): Promise<CodeStore>;
 }

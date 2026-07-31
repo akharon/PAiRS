@@ -1,5 +1,5 @@
 /**
- * Minimal RON (Rusty Object Notation) reader — just the subset `.gizem/rules.ron`
+ * Minimal RON (Rusty Object Notation) reader — just the subset `.pairs/rules.ron`
  * uses (spec §3.1): structs `(field: value, …)`, maps `{ "k": v }`, lists,
  * enum variants `Name` / `Name(args…)` (positional or named), strings with
  * escapes, numbers, booleans, `Some(x)`/`None`, line and block comments,

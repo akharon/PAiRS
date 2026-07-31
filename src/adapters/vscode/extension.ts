@@ -4,12 +4,12 @@
  * touches below the adapter boundary is the same editor-agnostic core the CLI
  * uses, so the extension host and headless CLI share one store and indexer.
  *
- * On activation it: opens the workspace's `.gizem/index` Kuzu store, indexes
+ * On activation it: opens the workspace's `.pairs/index` Kuzu store, indexes
  * the workspace, registers the code tools as VS Code Language Model Tools
  * (Copilot agent mode calls them in-process against the open store), writes
- * Claude Code skill files into the workspace so Claude drives the `gizem` CLI
+ * Claude Code skill files into the workspace so Claude drives the `pairs` CLI
  * directly, shows a status bar (index freshness + fuzzyRate), and registers
- * `gizem.reindex` / `gizem.findSymbol` commands.
+ * `pairs.reindex` / `pairs.findSymbol` commands.
  *
  * Trimmed from vendor/reference-indexer/src/integration/*: no memory tools, no
  * chat participant, no embeddings — code graph only.
@@ -48,7 +48,7 @@ interface Workspace {
 let statusBar: vscode.StatusBarItem | undefined;
 
 async function openWorkspace(root: string, extensionPath: string): Promise<Workspace> {
-  const dbPath = path.join(root, '.gizem', 'index');
+  const dbPath = path.join(root, '.pairs', 'index');
   await fs.mkdir(path.dirname(dbPath), { recursive: true });
   // Bundled next to dist/extension.js by scripts/fetch-grammars.mjs.
   const grammarsDir = path.join(extensionPath, 'dist', 'grammars');
@@ -70,10 +70,10 @@ async function refreshStatus(ws: Workspace): Promise<void> {
   try {
     const stats = await ws.indexer.stats();
     const pct = (stats.fuzzyRate * 100).toFixed(0);
-    statusBar.text = `$(symbol-structure) gizem ${stats.symbols} sym · ${pct}% fuzzy`;
-    statusBar.tooltip = `GIZEM code index\n${stats.files} files · ${stats.symbols} symbols · ${stats.edges} edges\nfuzzyRate ${pct}% · resolvableMisses ${stats.resolvableMisses}`;
+    statusBar.text = `$(symbol-structure) pairs ${stats.symbols} sym · ${pct}% fuzzy`;
+    statusBar.tooltip = `PAiRS code index\n${stats.files} files · ${stats.symbols} symbols · ${stats.edges} edges\nfuzzyRate ${pct}% · resolvableMisses ${stats.resolvableMisses}`;
   } catch (err) {
-    statusBar.text = '$(warning) gizem: not indexed';
+    statusBar.text = '$(warning) pairs: not indexed';
     statusBar.tooltip = String((err as Error).message);
   }
   statusBar.show();
@@ -81,7 +81,7 @@ async function refreshStatus(ws: Workspace): Promise<void> {
 
 async function reindex(ws: Workspace): Promise<void> {
   await vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Window, title: 'GIZEM: indexing workspace…' },
+    { location: vscode.ProgressLocation.Window, title: 'PAiRS: indexing workspace…' },
     async () => {
       await ws.indexer.fullIndex(ws.root);
     }
@@ -98,8 +98,8 @@ async function reindex(ws: Workspace): Promise<void> {
  * core/tools/tools.ts by scripts/sync-lm-tools.mjs.
  */
 function registerLmTools(ws: Workspace): vscode.Disposable[] {
-  const executors = createExecutors({ store: ws.store, rulesPath: path.join(ws.root, '.gizem', 'rules.ron'), root: ws.root });
-  const disabled = new Set(vscode.workspace.getConfiguration('gizem').get<string[]>('disabledTools', []));
+  const executors = createExecutors({ store: ws.store, rulesPath: path.join(ws.root, '.pairs', 'rules.ron'), root: ws.root });
+  const disabled = new Set(vscode.workspace.getConfiguration('pairs').get<string[]>('disabledTools', []));
   const disposables: vscode.Disposable[] = [];
   for (const [name, schema] of Object.entries(codeToolSchemas)) {
     if (disabled.has(name)) continue;
@@ -126,7 +126,7 @@ function registerLmTools(ws: Workspace): vscode.Disposable[] {
 
 /** Quick-pick symbol search over the store's lookup(). */
 async function findSymbol(ws: Workspace): Promise<void> {
-  const name = await vscode.window.showInputBox({ prompt: 'GIZEM: find symbol by name (bare or qualified)' });
+  const name = await vscode.window.showInputBox({ prompt: 'PAiRS: find symbol by name (bare or qualified)' });
   if (!name) return;
   const hit = await ws.store.lookup(name);
   const syms = Array.isArray(hit) ? hit : hit.candidates;
@@ -153,7 +153,7 @@ async function findSymbol(ws: Workspace): Promise<void> {
  * actions that mutate source.
  */
 async function refreshDiagnostics(ws: Workspace, collection: vscode.DiagnosticCollection): Promise<void> {
-  const rulesPath = path.join(ws.root, '.gizem', 'rules.ron');
+  const rulesPath = path.join(ws.root, '.pairs', 'rules.ron');
   let src: string;
   try {
     src = await fs.readFile(rulesPath, 'utf8');
@@ -189,7 +189,7 @@ async function refreshDiagnostics(ws: Workspace, collection: vscode.DiagnosticCo
       `${v.explanation}${v.suggestion ? ` — ${v.suggestion}` : ''}`,
       severity
     );
-    d.source = 'gizem';
+    d.source = 'pairs';
     d.code = v.rule;
     d.relatedInformation = v.nodes.slice(1).map(
       (r) =>
@@ -214,21 +214,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push({ dispose: () => ws.parsers.dispose() });
 
   statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
-  statusBar.command = 'gizem.reindex';
+  statusBar.command = 'pairs.reindex';
   context.subscriptions.push(statusBar);
 
-  const diagnostics = vscode.languages.createDiagnosticCollection('gizem');
+  const diagnostics = vscode.languages.createDiagnosticCollection('pairs');
   context.subscriptions.push(diagnostics);
 
   context.subscriptions.push(
-    vscode.commands.registerCommand('gizem.reindex', () => reindex(ws).then(() => refreshDiagnostics(ws, diagnostics))),
-    vscode.commands.registerCommand('gizem.findSymbol', () => findSymbol(ws)),
-    vscode.commands.registerCommand('gizem.checkRules', () => refreshDiagnostics(ws, diagnostics)),
-    vscode.commands.registerCommand('gizem.moduleMap', async () => {
+    vscode.commands.registerCommand('pairs.reindex', () => reindex(ws).then(() => refreshDiagnostics(ws, diagnostics))),
+    vscode.commands.registerCommand('pairs.findSymbol', () => findSymbol(ws)),
+    vscode.commands.registerCommand('pairs.checkRules', () => refreshDiagnostics(ws, diagnostics)),
+    vscode.commands.registerCommand('pairs.moduleMap', async () => {
       // Read-only module-graph webview (plan.md 3.5): Louvain subsystems as
       // columns, drift edges red. Self-contained HTML — webview CSP-safe.
       const map = await moduleMap(ws.store);
-      const panel = vscode.window.createWebviewPanel('gizemModuleMap', 'GIZEM Module Map', vscode.ViewColumn.Active, { enableScripts: false });
+      const panel = vscode.window.createWebviewPanel('gizemModuleMap', 'PAiRS Module Map', vscode.ViewColumn.Active, { enableScripts: false });
       panel.webview.html = moduleMapHtml(map);
     })
   );
@@ -239,7 +239,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   // Re-check rules when rules.ron is edited (diagnostics follow the config live).
   const rulesWatcher = vscode.workspace.createFileSystemWatcher(
-    new vscode.RelativePattern(folder, '.gizem/rules.ron')
+    new vscode.RelativePattern(folder, '.pairs/rules.ron')
   );
   const recheck = (): void => void refreshDiagnostics(ws, diagnostics);
   rulesWatcher.onDidChange(recheck);

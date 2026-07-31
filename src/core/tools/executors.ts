@@ -23,7 +23,7 @@ import type { CodeToolInput, CodeToolName } from './tools';
 
 export interface ExecutorDeps {
   store: CodeStore;
-  /** Path to `.gizem/rules.ron`. Re-read on every rule-tool call so edits apply live. */
+  /** Path to `.pairs/rules.ron`. Re-read on every rule-tool call so edits apply live. */
   rulesPath?: string;
   /** Workspace root. Required for rename_symbol/rename_revert (they write source files). */
   root?: string;
@@ -88,7 +88,7 @@ export function createExecutors(deps: ExecutorDeps): Executors {
     try {
       src = fs.readFileSync(deps.rulesPath, 'utf8');
     } catch {
-      return { message: `No ruleset at ${deps.rulesPath}. Create .gizem/rules.ron to enable architectural rules.` };
+      return { message: `No ruleset at ${deps.rulesPath}. Create .pairs/rules.ron to enable architectural rules.` };
     }
     try {
       return parseRuleSet(src);
@@ -199,7 +199,7 @@ export function createExecutors(deps: ExecutorDeps): Executors {
         ruleset = { ...rs, rules };
       }
       const stats = await store.stats();
-      if (stats.files === 0) return 'Index is empty — run `gizem index` first; rules cannot be checked over nothing.';
+      if (stats.files === 0) return 'Index is empty — run `pairs index` first; rules cannot be checked over nothing.';
       const { violations, checkedRules } = await checkRules(store, ruleset);
       if (violations.length === 0) return `OK — ${checkedRules.length} rule(s) checked, no violations.`;
       const confirmed = violations.filter((v) => v.confidence === 'confirmed').length;

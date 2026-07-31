@@ -1,8 +1,8 @@
 /**
- * Rule engine domain types (subsystem_mcp_rules_spec.md §3). Net-new to GIZEM —
+ * Rule engine domain types (subsystem_mcp_rules_spec.md §3). Net-new to PAiRS —
  * the reference indexer has retrieval/analysis but no architectural rules.
  *
- * A ruleset lives in `.gizem/rules.ron` (committed). Every rule carries a
+ * A ruleset lives in `.pairs/rules.ron` (committed). Every rule carries a
  * mandatory `explain`, returned verbatim in violations: the mechanism that
  * makes a finding self-correcting for an agent rather than just red CI.
  */

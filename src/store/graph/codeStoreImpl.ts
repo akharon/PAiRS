@@ -1,5 +1,5 @@
 /**
- * CodeStore implementation over KuzuDB (Cypher). Lives at `.gizem/index/`
+ * CodeStore implementation over KuzuDB (Cypher). Lives at `.pairs/index/`
  * (ADR-009) — disposable derived data, single writer (the indexer), no write
  * guards (subsystem_graph_store_spec.md §4).
  *
@@ -8,7 +8,7 @@
  * resolution ladder, `findCycles`'s Tarjan SCC (run in JS over an edge list
  * pulled by one Cypher query — Kuzu has no native SCC procedure), and the
  * dead-code/file-deps/hotspots/untested exclusion rules. Not ported: FTS
- * search, embeddings/similarity (out of GIZEM's scope, see codeStore.ts).
+ * search, embeddings/similarity (out of PAiRS's scope, see codeStore.ts).
  *
  * Import-target resolution differs from the reference project: Rust `use`
  * paths are crate-qualified names, not relative file paths (unlike JS/Python
@@ -905,7 +905,7 @@ export class KuzuCodeStore implements CodeStore {
     return created;
   }
 
-  /** GIZEM doesn't persist `use` specifiers per file (unlike the reference
+  /** PAiRS doesn't persist `use` specifiers per file (unlike the reference
    *  project's pending_imports table) — v1 doesn't need file-scoped `use`
    *  disambiguation beyond what resolveOneRef's global qualified-name lookup
    *  already provides. Returns empty; kept as an extension point. */
@@ -1250,7 +1250,7 @@ export class KuzuCodeStore implements CodeStore {
    * spikes/s2-kuzu-concurrency.mjs (GIZEM_S2_VARIANT=1 and =2); letting the
    * process exit without closing (variant 3) is clean.
    *
-   * Leaving the handle to process exit is safe for GIZEM's usage: the CLI is
+   * Leaving the handle to process exit is safe for PAiRS's usage: the CLI is
    * one-shot, and the extension host holds a single long-lived store for its
    * lifetime. Revisit when kuzu ships a fix — the S2 spike is the regression
    * test. NOTE: this means an in-process store cannot be reopened against a

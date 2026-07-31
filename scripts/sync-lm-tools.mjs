@@ -18,18 +18,18 @@ const root = path.join(scriptsDir, '..');
 // reference name) — kept here rather than in tools.ts so that file stays
 // transport-agnostic (invariant: tools.ts has no VS Code-specific concepts).
 const DISPLAY = {
-  find_symbol: { name: 'gizem_find_symbol', displayName: 'GIZEM: find symbol definition', toolReferenceName: 'gizemFindSymbol' },
-  get_symbol: { name: 'gizem_get_symbol', displayName: 'GIZEM: get full declaration', toolReferenceName: 'gizemGetSymbol' },
-  outline: { name: 'gizem_outline', displayName: 'GIZEM: file outline', toolReferenceName: 'gizemOutline' },
-  impact: { name: 'gizem_impact', displayName: 'GIZEM: change impact (blast radius)', toolReferenceName: 'gizemImpact' },
-  who_calls: { name: 'gizem_who_calls', displayName: 'GIZEM: call graph (callers/callees)', toolReferenceName: 'gizemWhoCalls' },
-  file_deps: { name: 'gizem_file_deps', displayName: 'GIZEM: file dependencies', toolReferenceName: 'gizemFileDeps' },
-  module_map: { name: 'gizem_module_map', displayName: 'GIZEM: module map (subsystems)', toolReferenceName: 'gizemModuleMap' },
-  analyze: { name: 'gizem_analyze', displayName: 'GIZEM: analyze (dead code, cycles, hotspots)', toolReferenceName: 'gizemAnalyze' },
-  check_rules: { name: 'gizem_check_rules', displayName: 'GIZEM: check architectural rules', toolReferenceName: 'gizemCheckRules' },
-  list_rules: { name: 'gizem_list_rules', displayName: 'GIZEM: list architectural rules', toolReferenceName: 'gizemListRules' },
-  explain_rule: { name: 'gizem_explain_rule', displayName: 'GIZEM: explain a rule', toolReferenceName: 'gizemExplainRule' },
-  rename_symbol: { name: 'gizem_rename_symbol', displayName: 'GIZEM: rename symbol', toolReferenceName: 'gizemRenameSymbol' },
+  find_symbol: { name: 'gizem_find_symbol', displayName: 'PAiRS: find symbol definition', toolReferenceName: 'gizemFindSymbol' },
+  get_symbol: { name: 'gizem_get_symbol', displayName: 'PAiRS: get full declaration', toolReferenceName: 'gizemGetSymbol' },
+  outline: { name: 'gizem_outline', displayName: 'PAiRS: file outline', toolReferenceName: 'gizemOutline' },
+  impact: { name: 'gizem_impact', displayName: 'PAiRS: change impact (blast radius)', toolReferenceName: 'gizemImpact' },
+  who_calls: { name: 'gizem_who_calls', displayName: 'PAiRS: call graph (callers/callees)', toolReferenceName: 'gizemWhoCalls' },
+  file_deps: { name: 'gizem_file_deps', displayName: 'PAiRS: file dependencies', toolReferenceName: 'gizemFileDeps' },
+  module_map: { name: 'gizem_module_map', displayName: 'PAiRS: module map (subsystems)', toolReferenceName: 'gizemModuleMap' },
+  analyze: { name: 'gizem_analyze', displayName: 'PAiRS: analyze (dead code, cycles, hotspots)', toolReferenceName: 'gizemAnalyze' },
+  check_rules: { name: 'gizem_check_rules', displayName: 'PAiRS: check architectural rules', toolReferenceName: 'gizemCheckRules' },
+  list_rules: { name: 'gizem_list_rules', displayName: 'PAiRS: list architectural rules', toolReferenceName: 'gizemListRules' },
+  explain_rule: { name: 'gizem_explain_rule', displayName: 'PAiRS: explain a rule', toolReferenceName: 'gizemExplainRule' },
+  rename_symbol: { name: 'gizem_rename_symbol', displayName: 'PAiRS: rename symbol', toolReferenceName: 'gizemRenameSymbol' },
 };
 
 // Minimal zod -> VS Code inputSchema (JSON Schema subset) converter — only
@@ -140,9 +140,9 @@ async function main() {
   const pkg = JSON.parse(await fs.readFile(pkgPath, 'utf8'));
   pkg.contributes.languageModelTools = entries;
 
-  // Keep gizem.disabledTools' enum in lockstep with the tool contract so it
+  // Keep pairs.disabledTools' enum in lockstep with the tool contract so it
   // can't drift when a tool is added/renamed (wire names, not gizem_-prefixed).
-  const disabledTools = pkg.contributes.configuration?.properties?.['gizem.disabledTools'];
+  const disabledTools = pkg.contributes.configuration?.properties?.['pairs.disabledTools'];
   if (disabledTools?.items) disabledTools.items.enum = toolNames;
 
   await fs.writeFile(pkgPath, JSON.stringify(pkg, null, 2) + '\n', 'utf8');
