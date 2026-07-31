@@ -2,14 +2,14 @@
  * VS Code extension shell (plan.md 1.6). The ONLY file permitted to import
  * `vscode` (R10 — enforced by eslint no-restricted-imports); everything it
  * touches below the adapter boundary is the same editor-agnostic core the CLI
- * and MCP server use, so the extension host and headless surfaces share one
- * store and one indexer.
+ * uses, so the extension host and headless CLI share one store and indexer.
  *
  * On activation it: opens the workspace's `.gizem/index` Kuzu store, indexes
- * the workspace, registers an MCP stdio server definition pointing at the
- * bundled `dist/mcp-server.js` (Copilot agent mode / any MCP client picks it up
- * against the SAME db), shows a status bar (index freshness + fuzzyRate), and
- * registers `gizem.reindex` / `gizem.findSymbol` commands.
+ * the workspace, registers the code tools as VS Code Language Model Tools
+ * (Copilot agent mode calls them in-process against the open store), writes
+ * Claude Code skill files into the workspace so Claude drives the `gizem` CLI
+ * directly, shows a status bar (index freshness + fuzzyRate), and registers
+ * `gizem.reindex` / `gizem.findSymbol` commands.
  *
  * Trimmed from vendor/reference-indexer/src/integration/*: no memory tools, no
  * chat participant, no embeddings — code graph only.
@@ -33,6 +33,10 @@ import { moduleMapHtml } from '../../core/analyze/moduleMapHtml';
 import { parseRuleSet } from '../../core/rules/config';
 import { checkRules } from '../../core/rules/evaluate';
 import type { Violation } from '../../core/rules/types';
+import { createExecutors } from '../../core/tools/executors';
+import { codeToolSchemas } from '../../core/tools/tools';
+import type { CodeToolInput, CodeToolName } from '../../core/tools/tools';
+import { writeSkillFiles } from './skills';
 
 interface Workspace {
   root: string;
@@ -85,25 +89,39 @@ async function reindex(ws: Workspace): Promise<void> {
   await refreshStatus(ws);
 }
 
-/** MCP stdio provider: one server per folder, against that folder's .gizem db. */
-function registerMcpProvider(extensionPath: string): vscode.Disposable {
-  const provider: vscode.McpServerDefinitionProvider = {
-    provideMcpServerDefinitions: () => {
-      const folders = vscode.workspace.workspaceFolders ?? [];
-      const disabled = vscode.workspace.getConfiguration('gizem').get<string[]>('disabledTools', []);
-      const disabledArgs = disabled.length ? ['--disabled-tools', disabled.join(',')] : [];
-      const serverScript = path.join(extensionPath, 'dist', 'mcp-server.js');
-      return folders.map((folder) => {
-        const dbPath = path.join(folder.uri.fsPath, '.gizem', 'index');
-        return new vscode.McpStdioServerDefinition(
-          `GIZEM (${folder.name})`,
-          process.execPath,
-          [serverScript, '--db', dbPath, ...disabledArgs]
-        );
-      });
-    },
-  };
-  return vscode.lm.registerMcpServerDefinitionProvider('gizem.mcpProvider', provider);
+/**
+ * In-process Language Model Tools (plan.md 1.6) for Copilot agent mode,
+ * registered via vscode.lm.registerTool against the extension's already-open
+ * store — Kuzu is single-process (one lock holder, even for read-only opens),
+ * so a separately spawned process could never share the db. Names/schemas
+ * come from package.json's languageModelTools block, generated from
+ * core/tools/tools.ts by scripts/sync-lm-tools.mjs.
+ */
+function registerLmTools(ws: Workspace): vscode.Disposable[] {
+  const executors = createExecutors({ store: ws.store, rulesPath: path.join(ws.root, '.gizem', 'rules.ron'), root: ws.root });
+  const disabled = new Set(vscode.workspace.getConfiguration('gizem').get<string[]>('disabledTools', []));
+  const disposables: vscode.Disposable[] = [];
+  for (const [name, schema] of Object.entries(codeToolSchemas)) {
+    if (disabled.has(name)) continue;
+    const toolName = name as CodeToolName;
+    disposables.push(
+      vscode.lm.registerTool(`gizem_${name}`, {
+        invoke: async (options) => {
+          try {
+            const input = schema.input.parse(options.input) as CodeToolInput<CodeToolName>;
+            const exec = executors[toolName] as (i: CodeToolInput<CodeToolName>) => Promise<string>;
+            const text = await exec(input);
+            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(text)]);
+          } catch (err) {
+            return new vscode.LanguageModelToolResult([
+              new vscode.LanguageModelTextPart(`Error: ${(err as Error).message}`),
+            ]);
+          }
+        },
+      })
+    );
+  }
+  return disposables;
 }
 
 /** Quick-pick symbol search over the store's lookup(). */
@@ -215,9 +233,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     })
   );
 
-  // After commands: a provider-registration failure must not take the palette
+  // After commands: a tool-registration failure must not take the palette
   // commands down with it (0.4.0 shipped exactly that failure mode).
-  context.subscriptions.push(registerMcpProvider(context.extensionPath));
+  context.subscriptions.push(...registerLmTools(ws));
 
   // Re-check rules when rules.ron is edited (diagnostics follow the config live).
   const rulesWatcher = vscode.workspace.createFileSystemWatcher(
@@ -252,10 +270,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   srcWatcher.onDidDelete((u) => { const r = rel(u); if (r) queue.deleted(r); });
   context.subscriptions.push(srcWatcher);
 
-  // Index on activation so the graph is fresh for the MCP server the moment a
-  // client connects; do it in the background so activation isn't blocked. Rule
+  // Index on activation so the graph is fresh the moment Copilot or a CLI
+  // call needs it; do it in the background so activation isn't blocked. Rule
   // diagnostics follow once the graph exists.
   void reindex(ws).then(() => refreshDiagnostics(ws, diagnostics));
+
+  void writeSkillFiles(ws.root);
 }
 
 export function deactivate(): void {

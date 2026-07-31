@@ -57,7 +57,8 @@
               "analyze",
               "check_rules",
               "list_rules",
-              "explain_rule"
+              "explain_rule",
+              "rename_symbol"
             ]
           },
           "default": [],
@@ -418,6 +419,34 @@
           },
           "required": [
             "rule"
+          ]
+        }
+      },
+      {
+        "name": "gizem_rename_symbol",
+        "displayName": "GIZEM: rename symbol",
+        "toolReferenceName": "gizemRenameSymbol",
+        "modelDescription": "Rename a symbol and every direct reference site (definition + callers/readers/writers/implementers found via the same edges `impact` walks) consistently, in one pass. Aborts without touching any file if a reference site cannot be matched safely (e.g. the indexed line no longer contains the name at a word boundary) — re-index and retry. Revert via your VCS (e.g. `git checkout -- <files>`); this tool does not keep its own undo log.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "Bare or qualified name of the symbol to rename."
+            },
+            "newName": {
+              "type": "string",
+              "description": "New bare identifier."
+            },
+            "path": {
+              "type": "string",
+              "description": "Disambiguation hint: prefer the symbol defined in this file (workspace-relative path or suffix)."
+            }
+          },
+          "required": [
+            "name",
+            "newName"
           ]
         }
       }

@@ -11,19 +11,22 @@
 
 import * as fs from 'node:fs';
 import type { CodeStore } from '../../store/graph/codeStore';
-import type { AmbiguousSymbol, EdgeKind, SymbolRecord } from '../../core/indexer/types';
-import { impact } from '../../core/analyze/impact';
-import { moduleMap } from '../../core/analyze/moduleMap';
-import { parseRuleSet } from '../../core/rules/config';
-import { checkRules } from '../../core/rules/evaluate';
-import { renderViolation, describeRuleKind } from '../../core/rules/render';
-import type { RuleSet } from '../../core/rules/types';
+import type { AmbiguousSymbol, EdgeKind, SymbolRecord } from '../indexer/types';
+import { impact } from '../analyze/impact';
+import { moduleMap } from '../analyze/moduleMap';
+import { parseRuleSet } from '../rules/config';
+import { checkRules } from '../rules/evaluate';
+import { renderViolation, describeRuleKind } from '../rules/render';
+import type { RuleSet } from '../rules/types';
+import { planRename, applyPlan } from './rename';
 import type { CodeToolInput, CodeToolName } from './tools';
 
 export interface ExecutorDeps {
   store: CodeStore;
   /** Path to `.gizem/rules.ron`. Re-read on every rule-tool call so edits apply live. */
   rulesPath?: string;
+  /** Workspace root. Required for rename_symbol/rename_revert (they write source files). */
+  root?: string;
 }
 
 export type Executors = {
@@ -257,6 +260,20 @@ export function createExecutors(deps: ExecutorDeps): Executors {
           return `${rows.length} exported symbol(s) with no test reference:\n` + rows.map((s) => `  - ${cite(s)}`).join('\n');
         }
       }
+    },
+
+    async rename_symbol(input) {
+      if (!deps.root) return 'Renaming is unavailable (server started without a workspace root).';
+      const r = await resolveOne(store, input.name, input.path);
+      if ('message' in r) return r.message;
+      const plan = await planRename(store, deps.root, r.sym, input.newName);
+      if ('message' in plan) return plan.message;
+      const touched = applyPlan(plan);
+      return (
+        `Renamed ${r.sym.qualified || r.sym.name} → ${input.newName} across ${touched.length} file(s):\n` +
+        touched.map((f) => `  - ${f}`).join('\n') +
+        `\nRevert via your VCS (e.g. \`git checkout -- <files>\`) if needed.`
+      );
     },
   };
 }

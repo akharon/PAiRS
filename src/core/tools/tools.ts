@@ -1,9 +1,9 @@
 /**
- * MCP tool contracts for GIZEM's code-graph retrieval surface (plan.md 1.1–1.5).
+ * Tool contracts for GIZEM's code-graph retrieval surface (plan.md 1.1–1.5).
  *
- * One zod schema per tool; the stdio MCP server (server.ts) and — in Phase 1.6
- * — the VS Code Language Model Tools both derive their JSON schema from here, so
- * the contract can't drift between transports.
+ * One zod schema per tool; the VS Code Language Model Tools (Copilot) derive
+ * their JSON schema from here via scripts/sync-lm-tools.mjs, so the contract
+ * can't drift from what's actually registered.
  *
  * Trimmed from vendor/reference-indexer/src/mcp/tools.ts: no memory tools, no
  * embedding-dependent tools (`find_duplicates`, semantic `code_search`). Every
@@ -12,7 +12,7 @@
  */
 
 import { z } from 'zod';
-import { CODE_LANGS, SYMBOL_KINDS } from '../../core/indexer/types';
+import { CODE_LANGS, SYMBOL_KINDS } from '../indexer/types';
 
 const symbolKind = z.enum(SYMBOL_KINDS as [string, ...string[]]);
 const codeLang = z.enum(CODE_LANGS as [string, ...string[]]);
@@ -156,6 +156,21 @@ export const codeToolSchemas = {
     description: 'Full detail of one rule: its kind, configuration, and the explanation shown on violations.',
     input: z.object({
       rule: z.string().min(1).describe('Rule id from list_rules.'),
+    }),
+  },
+
+  rename_symbol: {
+    description:
+      'Rename a symbol and every direct reference site (definition + callers/readers/' +
+      'writers/implementers found via the same edges `impact` walks) consistently, ' +
+      'in one pass. Aborts without touching any file if a reference site cannot be ' +
+      'matched safely (e.g. the indexed line no longer contains the name at a word ' +
+      'boundary) — re-index and retry. Revert via your VCS (e.g. `git checkout -- ' +
+      '<files>`); this tool does not keep its own undo log.',
+    input: z.object({
+      name: z.string().min(1).describe('Bare or qualified name of the symbol to rename.'),
+      newName: z.string().min(1).describe('New bare identifier.'),
+      path: pathHint,
     }),
   },
 } as const;

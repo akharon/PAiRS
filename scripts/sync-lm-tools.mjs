@@ -1,10 +1,10 @@
 // Generates the package.json `languageModelTools` block from the single
-// source of truth in src/mcp/tools.ts (toolSchemas + codeToolSchemas), so
-// the modelDescription/inputSchema strings can't drift between the MCP
-// contract and the VS Code LM registration (docs/OptimizationPlan.md T2).
+// source of truth in src/core/tools/tools.ts (codeToolSchemas), so the
+// modelDescription/inputSchema strings can't drift from the VS Code LM
+// registration (tools.ts invariant: one schema per tool).
 //
-// Run via `npm run sync-lm-tools`; `npm run build` runs it automatically so
-// package.json always reflects the current tools.ts before packaging.
+// Run via `npm run sync-lm-tools`; scripts/build-full.sh runs it before
+// packaging so package.json always reflects the current tools.ts.
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -18,25 +18,18 @@ const root = path.join(scriptsDir, '..');
 // reference name) — kept here rather than in tools.ts so that file stays
 // transport-agnostic (invariant: tools.ts has no VS Code-specific concepts).
 const DISPLAY = {
-  memory_save: { name: 'pairs_save', displayName: 'Save workspace memory', toolReferenceName: 'memorySave' },
-  memory_search: { name: 'pairs_search', displayName: 'Search workspace memory', toolReferenceName: 'memorySearch' },
-  memory_list: { name: 'pairs_list', displayName: 'List workspace memories', toolReferenceName: 'memoryList' },
-  memory_forget: { name: 'pairs_forget', displayName: 'Forget workspace memory', toolReferenceName: 'memoryForget' },
-  memory_context: { name: 'pairs_context', displayName: 'Workspace memory briefing', toolReferenceName: 'memoryContext' },
-  code_search: { name: 'pairs_code_search', displayName: 'Search code index', toolReferenceName: 'codeSearch' },
-  who_calls: { name: 'pairs_who_calls', displayName: 'Who calls (call graph)', toolReferenceName: 'whoCalls' },
-  find_implementations: { name: 'pairs_find_implementations', displayName: 'Find implementations', toolReferenceName: 'findImplementations' },
-  code_outline: { name: 'pairs_code_outline', displayName: 'Code outline', toolReferenceName: 'codeOutline' },
-  find_dead_code: { name: 'pairs_find_dead_code', displayName: 'Find dead code', toolReferenceName: 'findDeadCode' },
-  file_deps: { name: 'pairs_file_deps', displayName: 'File dependencies', toolReferenceName: 'fileDeps' },
-  code_hotspots: { name: 'pairs_code_hotspots', displayName: 'Code complexity hotspots', toolReferenceName: 'codeHotspots' },
-  find_duplicates: { name: 'pairs_find_duplicates', displayName: 'Find similar code', toolReferenceName: 'findDuplicates' },
-  get_declaration: { name: 'pairs_get_declaration', displayName: 'Get full declaration', toolReferenceName: 'getDeclaration' },
-  change_impact: { name: 'pairs_change_impact', displayName: 'Change impact analysis', toolReferenceName: 'changeImpact' },
-  who_tests: { name: 'pairs_who_tests', displayName: 'Find tests exercising a symbol', toolReferenceName: 'whoTests' },
-  find_untested: { name: 'pairs_find_untested', displayName: 'Find untested exported symbols', toolReferenceName: 'findUntested' },
-  dependency_cycle: { name: 'pairs_dependency_cycle', displayName: 'Find circular import dependencies', toolReferenceName: 'dependencyCycle' },
-  index_status: { name: 'pairs_index_status', displayName: 'Code index status', toolReferenceName: 'indexStatus' },
+  find_symbol: { name: 'gizem_find_symbol', displayName: 'GIZEM: find symbol definition', toolReferenceName: 'gizemFindSymbol' },
+  get_symbol: { name: 'gizem_get_symbol', displayName: 'GIZEM: get full declaration', toolReferenceName: 'gizemGetSymbol' },
+  outline: { name: 'gizem_outline', displayName: 'GIZEM: file outline', toolReferenceName: 'gizemOutline' },
+  impact: { name: 'gizem_impact', displayName: 'GIZEM: change impact (blast radius)', toolReferenceName: 'gizemImpact' },
+  who_calls: { name: 'gizem_who_calls', displayName: 'GIZEM: call graph (callers/callees)', toolReferenceName: 'gizemWhoCalls' },
+  file_deps: { name: 'gizem_file_deps', displayName: 'GIZEM: file dependencies', toolReferenceName: 'gizemFileDeps' },
+  module_map: { name: 'gizem_module_map', displayName: 'GIZEM: module map (subsystems)', toolReferenceName: 'gizemModuleMap' },
+  analyze: { name: 'gizem_analyze', displayName: 'GIZEM: analyze (dead code, cycles, hotspots)', toolReferenceName: 'gizemAnalyze' },
+  check_rules: { name: 'gizem_check_rules', displayName: 'GIZEM: check architectural rules', toolReferenceName: 'gizemCheckRules' },
+  list_rules: { name: 'gizem_list_rules', displayName: 'GIZEM: list architectural rules', toolReferenceName: 'gizemListRules' },
+  explain_rule: { name: 'gizem_explain_rule', displayName: 'GIZEM: explain a rule', toolReferenceName: 'gizemExplainRule' },
+  rename_symbol: { name: 'gizem_rename_symbol', displayName: 'GIZEM: rename symbol', toolReferenceName: 'gizemRenameSymbol' },
 };
 
 // Minimal zod -> VS Code inputSchema (JSON Schema subset) converter — only
@@ -57,9 +50,9 @@ function convert(schema) {
         if (desc) properties[key].description = desc;
         if (!optional) required.push(key);
       }
-        const out = { type: 'object', properties };
-        if (required.length) out.required = required;
-        return out;
+      const out = { type: 'object', properties };
+      if (required.length) out.required = required;
+      return out;
     }
     case 'ZodString':
       return { type: 'string' };
@@ -90,7 +83,7 @@ function unwrap(schema) {
   let optional = false;
   while (s._def.typeName === 'ZodOptional' || s._def.typeName === 'ZodDefault') {
     optional = true;
-    s = s._def.typeName === 'ZodOptional' ? s._def.innerType : s._def.innerType;
+    s = s._def.innerType;
   }
   return { schema: s, optional };
 }
@@ -106,7 +99,7 @@ function describeOf(schema) {
 
 async function loadToolsModule() {
   const result = await esbuild.build({
-    entryPoints: [path.join(root, 'src/mcp/tools.ts')],
+    entryPoints: [path.join(root, 'src/core/tools/tools.ts')],
     bundle: true,
     platform: 'node',
     format: 'cjs',
@@ -134,21 +127,22 @@ function buildEntry(toolKey, schema) {
 }
 
 async function main() {
-  const { toolSchemas, codeToolSchemas } = await loadToolsModule();
-  const entries = [
-    ...Object.entries(toolSchemas).map(([k, v]) => buildEntry(k, v)),
-    ...Object.entries(codeToolSchemas).map(([k, v]) => buildEntry(k, v)),
-  ];
+  const { codeToolSchemas } = await loadToolsModule();
+  const toolNames = Object.keys(codeToolSchemas);
+  const missing = toolNames.filter((n) => !DISPLAY[n]);
+  const stale = Object.keys(DISPLAY).filter((n) => !toolNames.includes(n));
+  if (missing.length) throw new Error(`sync-lm-tools: tools.ts added ${missing.join(', ')} — add DISPLAY entries`);
+  if (stale.length) throw new Error(`sync-lm-tools: DISPLAY has stale entries ${stale.join(', ')}`);
+
+  const entries = Object.entries(codeToolSchemas).map(([k, v]) => buildEntry(k, v));
 
   const pkgPath = path.join(root, 'package.json');
   const pkg = JSON.parse(await fs.readFile(pkgPath, 'utf8'));
   pkg.contributes.languageModelTools = entries;
 
-  // Keep the pairs.disabledTools enum in lockstep with the tool contract so it
-  // can't drift when a tool is added/renamed (it lists wire names, not the
-  // pairs_-prefixed display names).
-  const toolNames = [...Object.keys(toolSchemas), ...Object.keys(codeToolSchemas)];
-  const disabledTools = pkg.contributes.configuration?.properties?.['pairs.disabledTools'];
+  // Keep gizem.disabledTools' enum in lockstep with the tool contract so it
+  // can't drift when a tool is added/renamed (wire names, not gizem_-prefixed).
+  const disabledTools = pkg.contributes.configuration?.properties?.['gizem.disabledTools'];
   if (disabledTools?.items) disabledTools.items.enum = toolNames;
 
   await fs.writeFile(pkgPath, JSON.stringify(pkg, null, 2) + '\n', 'utf8');

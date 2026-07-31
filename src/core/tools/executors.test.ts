@@ -1,5 +1,5 @@
 /**
- * MCP executor rendering, against a real Kuzu store (temp dir, never closed —
+ * Tool executor rendering, against a real Kuzu store (temp dir, never closed —
  * kuzu segfaults on close). These pin the agent-facing text: the `file:line`
  * citation, the ambiguity prompt, and that impact/analyze reach the store.
  */
@@ -12,7 +12,7 @@ import { KuzuCodeStore } from '../../store/graph/codeStoreImpl';
 import { nodeKuzuDriver } from '../../store/graph/kuzuDriver';
 import { createExecutors, type Executors } from './executors';
 import type { CodeStore } from '../../store/graph/codeStore';
-import type { FileExtraction, NewSymbol, RawRef } from '../../core/indexer/types';
+import type { FileExtraction, NewSymbol, RawRef } from '../indexer/types';
 
 function sym(name: string, qualified: string, kind: NewSymbol['kind'] = 'function'): NewSymbol {
   return { name, qualified, kind, lang: 'rust', startLine: 10, endLine: 12, signature: '()', doc: null, exported: true, parentIndex: null };
@@ -22,7 +22,7 @@ function ext(p: string, symbols: NewSymbol[], refs: RawRef[] = []): FileExtracti
 }
 const fromFn = (name: string, qualifiedName: string | null): RawRef => ({ fromIndex: 1, name, qualifiedName, kind: 'CALLS', line: 5 });
 
-describe('mcp executors', () => {
+describe('tool executors', () => {
   let x: Executors;
   beforeAll(async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gizem-exec-'));
@@ -73,6 +73,55 @@ describe('mcp executors', () => {
   it('module_map renders subsystems and drift', async () => {
     const out = await x.module_map({ limit: 20 });
     expect(out).toMatch(/subsystem|No inter-module/);
+  });
+});
+
+describe('rename_symbol executor', () => {
+  let x: Executors;
+  let dir: string;
+
+  beforeAll(async () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gizem-rename-'));
+    const store = await KuzuCodeStore.open(path.join(dir, 'g.kz'), nodeKuzuDriver);
+
+    fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
+    // core.rs: line 10 has the def line (module stub occupies lines 1-3, blank
+    // padding brings `core` itself to line 10, matching the `sym` fixture).
+    const coreLines = Array.from({ length: 9 }, () => '').concat('fn core() {}');
+    fs.writeFileSync(path.join(dir, 'src/core.rs'), coreLines.join('\n') + '\n');
+    const midLines = Array.from({ length: 4 }, () => '').concat('    core();').concat(Array.from({ length: 5 }, () => ''));
+    fs.writeFileSync(path.join(dir, 'src/mid.rs'), midLines.join('\n') + '\n');
+
+    await store.applyExtraction(ext('src/core.rs', [sym('core', 'core')]));
+    await store.applyExtraction(ext('src/mid.rs', [sym('mid', 'mid')], [fromFn('core', null)]));
+
+    x = createExecutors({ store, root: dir });
+  });
+
+  it('renames the definition and every direct reference site', async () => {
+    const out = await x.rename_symbol({ name: 'core', newName: 'core_v2', path: undefined });
+    expect(out).toContain('Renamed');
+    expect(out).toContain('core_v2');
+
+    const coreText = fs.readFileSync(path.join(dir, 'src/core.rs'), 'utf8');
+    expect(coreText).toContain('fn core_v2() {}');
+    expect(coreText).not.toContain('fn core()');
+
+    const midText = fs.readFileSync(path.join(dir, 'src/mid.rs'), 'utf8');
+    expect(midText).toContain('core_v2();');
+  });
+
+  it('rejects an invalid new identifier without touching files', async () => {
+    const before = fs.readFileSync(path.join(dir, 'src/core.rs'), 'utf8');
+    const out = await x.rename_symbol({ name: 'core', newName: '123bad', path: undefined });
+    expect(out).toContain('not a valid identifier');
+    expect(fs.readFileSync(path.join(dir, 'src/core.rs'), 'utf8')).toBe(before);
+  });
+
+  it('reports unavailable without a root', async () => {
+    const store = await KuzuCodeStore.open(path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'gizem-rename-noroot-')), 'g.kz'), nodeKuzuDriver);
+    const noRoot = createExecutors({ store });
+    expect(await noRoot.rename_symbol({ name: 'anything', newName: 'x', path: undefined })).toContain('unavailable');
   });
 });
 
@@ -130,7 +179,7 @@ describe('moduleMap clustering', () => {
   }
 
   it('aggregates file deps to directory modules and clusters them', async () => {
-    const { moduleMap } = await import('../../core/analyze/moduleMap');
+    const { moduleMap } = await import('../analyze/moduleMap');
     // Modules a, b, c. a<->b densely coupled (weight 5 total), c hangs off a
     // by a single edge — Louvain should keep {a,b} together and c is a bridge.
     const map = await moduleMap(
@@ -154,7 +203,7 @@ describe('moduleMap clustering', () => {
   });
 
   it('handles an empty graph', async () => {
-    const { moduleMap } = await import('../../core/analyze/moduleMap');
+    const { moduleMap } = await import('../analyze/moduleMap');
     const map = await moduleMap(fakeStore([]));
     expect(map.modules).toEqual([]);
     expect(map.driftRatio).toBe(0);
