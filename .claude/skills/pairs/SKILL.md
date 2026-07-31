@@ -20,6 +20,9 @@ Copilot has direct access to PAiRS tools — use these for navigation and refact
 - **outline** — file structure: all symbols in order.
 - **impact** — blast radius of a symbol (all dependants, transitive). Call BEFORE
   renaming/removing/changing.
+- **hierarchy** — inheritance tree: what a type EXTENDS/IMPLEMENTS (ancestors)
+  and what EXTENDS/IMPLEMENTS it (descendants). Call before changing a base
+  class/interface to see every subclass affected.
 - **who_calls** — direct callers or callees of a function/method.
 - **file_deps** — which files depend on this one, and what it depends on.
 - **module_map** — subsystems detected in the codebase and architectural drift.
@@ -47,6 +50,13 @@ For automation and CI/CD, use `pairs` commands:
 - `pairs stats` — index size and resolution quality.
 - `pairs index` — full re-index (rarely needed; extension keeps it live).
 - `pairs init [--force]` — bootstrap `.pairs/rules.ron` from inferred layers.
+
+## If PAiRS Isn't Available
+
+If the extension isn't running, the index isn't built, or `pairs` commands
+error/return empty (stale or missing `.pairs/` graph), fall back to grep/Read
+directly rather than trusting a stale or absent graph. Try `pairs stats` first
+to check index health before assuming it's usable.
 
 ## When to Use PAiRS
 
