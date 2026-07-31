@@ -22,6 +22,7 @@ const DISPLAY = {
   get_symbol: { name: 'gizem_get_symbol', displayName: 'PAiRS: get full declaration', toolReferenceName: 'gizemGetSymbol' },
   outline: { name: 'gizem_outline', displayName: 'PAiRS: file outline', toolReferenceName: 'gizemOutline' },
   impact: { name: 'gizem_impact', displayName: 'PAiRS: change impact (blast radius)', toolReferenceName: 'gizemImpact' },
+  hierarchy: { name: 'gizem_hierarchy', displayName: 'PAiRS: inheritance hierarchy', toolReferenceName: 'gizemHierarchy' },
   who_calls: { name: 'gizem_who_calls', displayName: 'PAiRS: call graph (callers/callees)', toolReferenceName: 'gizemWhoCalls' },
   file_deps: { name: 'gizem_file_deps', displayName: 'PAiRS: file dependencies', toolReferenceName: 'gizemFileDeps' },
   module_map: { name: 'gizem_module_map', displayName: 'PAiRS: module map (subsystems)', toolReferenceName: 'gizemModuleMap' },

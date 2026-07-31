@@ -32,6 +32,11 @@ describe('tool executors', () => {
     // Two same-named `login` to exercise the ambiguity path.
     await store.applyExtraction(ext('a.rs', [sym('login', 'auth::login')]));
     await store.applyExtraction(ext('b.rs', [sym('login', 'admin::login')]));
+    // Base <- Sub via EXTENDS, for the hierarchy executor.
+    await store.applyExtraction(ext('base.rs', [sym('Base', 'Base', 'class')]));
+    await store.applyExtraction(
+      ext('sub.rs', [sym('Sub', 'Sub', 'class')], [{ fromIndex: 1, name: 'Base', qualifiedName: null, kind: 'EXTENDS', line: 5 }])
+    );
     x = createExecutors({ store });
   });
 
@@ -45,6 +50,18 @@ describe('tool executors', () => {
     const out = await x.impact({ name: 'core', depth: 3, limit: 50 });
     expect(out).toContain('mid');
     expect(out).toContain('d1');
+  });
+
+  it('hierarchy lists descendants from the base and ancestors from the sub', async () => {
+    const fromBase = await x.hierarchy({ name: 'Base', depth: 3, limit: 50 });
+    expect(fromBase).toContain('descendant');
+    expect(fromBase).toContain('Sub');
+    expect(fromBase).toContain('No ancestors');
+
+    const fromSub = await x.hierarchy({ name: 'Sub', depth: 3, limit: 50 });
+    expect(fromSub).toContain('ancestor');
+    expect(fromSub).toContain('Base');
+    expect(fromSub).toContain('No descendants');
   });
 
   it('who_calls lists callers', async () => {

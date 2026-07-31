@@ -79,6 +79,22 @@ export const codeToolSchemas = {
     }),
   },
 
+  hierarchy: {
+    description:
+      'Inheritance/interface tree around a type: what it EXTENDS/IMPLEMENTS ' +
+      '(ancestors) and what EXTENDS/IMPLEMENTS it (descendants), up to `depth` ' +
+      'hops each way. Call on "what does X inherit from", "what implements X", ' +
+      'or before changing a base class/interface to see every subclass affected. ' +
+      'Narrower than `impact` (which also includes CALLS/READS/WRITES); use this ' +
+      'when you specifically want the type hierarchy, not the full dependant set.',
+    input: z.object({
+      name: z.string().min(1).describe('Bare or qualified name of the class/interface/trait to analyze.'),
+      path: pathHint,
+      depth: z.number().int().min(1).max(6).default(3).describe('Transitive hops to walk, each direction.'),
+      limit: z.number().int().min(1).max(200).default(50),
+    }),
+  },
+
   who_calls: {
     description:
       'Direct call sites of a function/method ("callers"), or what it calls ' +

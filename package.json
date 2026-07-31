@@ -51,6 +51,7 @@
               "get_symbol",
               "outline",
               "impact",
+              "hierarchy",
               "who_calls",
               "file_deps",
               "module_map",
@@ -208,6 +209,40 @@
               "minimum": 1,
               "maximum": 6,
               "description": "Transitive hops to walk."
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            }
+          },
+          "required": [
+            "name"
+          ]
+        }
+      },
+      {
+        "name": "gizem_hierarchy",
+        "displayName": "PAiRS: inheritance hierarchy",
+        "toolReferenceName": "gizemHierarchy",
+        "modelDescription": "Inheritance/interface tree around a type: what it EXTENDS/IMPLEMENTS (ancestors) and what EXTENDS/IMPLEMENTS it (descendants), up to `depth` hops each way. Call on \"what does X inherit from\", \"what implements X\", or before changing a base class/interface to see every subclass affected. Narrower than `impact` (which also includes CALLS/READS/WRITES); use this when you specifically want the type hierarchy, not the full dependant set.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "Bare or qualified name of the class/interface/trait to analyze."
+            },
+            "path": {
+              "type": "string",
+              "description": "Disambiguation hint: prefer the symbol defined in this file (workspace-relative path or suffix)."
+            },
+            "depth": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 6,
+              "description": "Transitive hops to walk, each direction."
             },
             "limit": {
               "type": "integer",

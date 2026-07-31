@@ -13,6 +13,7 @@ import * as fs from 'node:fs';
 import type { CodeStore } from '../../store/graph/codeStore';
 import type { AmbiguousSymbol, EdgeKind, SymbolRecord } from '../indexer/types';
 import { impact } from '../analyze/impact';
+import { hierarchy } from '../analyze/hierarchy';
 import { moduleMap } from '../analyze/moduleMap';
 import { parseRuleSet } from '../rules/config';
 import { checkRules } from '../rules/evaluate';
@@ -144,6 +145,36 @@ export function createExecutors(deps: ExecutorDeps): Executors {
         .map((d) => `  - d${d.depth} ${cite(d.symbol)}${d.confidence === 'fuzzy' ? '  [fuzzy]' : ''}`)
         .join('\n');
       return `${res.dependants.length} dependant(s) of ${res.seed.qualified || res.seed.name}${trunc}:\n${body}${note}`;
+    },
+
+    async hierarchy(input) {
+      const r = await resolveOne(store, input.name, input.path);
+      if ('message' in r) return r.message;
+      const res = await hierarchy(store, r.sym.id, input.depth);
+      if (!res) return `No symbol id for "${input.name}".`;
+      if (res.ancestors.length === 0 && res.descendants.length === 0) {
+        return `No EXTENDS/IMPLEMENTS edges for ${cite(res.seed)} within ${input.depth} hop(s).`;
+      }
+      const render = (nodes: typeof res.ancestors) =>
+        paginate(nodes, input.limit);
+      const lines = [`Hierarchy for ${res.seed.qualified || res.seed.name}:`];
+      if (res.ancestors.length > 0) {
+        const { page, note } = render(res.ancestors);
+        const trunc = res.ancestorsTruncated ? ` (walk truncated at depth ${input.depth})` : '';
+        lines.push(`\n${res.ancestors.length} ancestor(s)${trunc}:`);
+        lines.push(page.map((d) => `  - up${d.depth} ${cite(d.symbol)}${d.confidence === 'fuzzy' ? '  [fuzzy]' : ''}`).join('\n') + note);
+      } else {
+        lines.push('\nNo ancestors (extends/implements nothing indexed).');
+      }
+      if (res.descendants.length > 0) {
+        const { page, note } = render(res.descendants);
+        const trunc = res.descendantsTruncated ? ` (walk truncated at depth ${input.depth})` : '';
+        lines.push(`\n${res.descendants.length} descendant(s)${trunc}:`);
+        lines.push(page.map((d) => `  - down${d.depth} ${cite(d.symbol)}${d.confidence === 'fuzzy' ? '  [fuzzy]' : ''}`).join('\n') + note);
+      } else {
+        lines.push('\nNo descendants (nothing extends/implements this).');
+      }
+      return lines.join('\n');
     },
 
     async who_calls(input) {

@@ -34,6 +34,9 @@ Copilot has direct access to PAiRS tools — use these for navigation and refact
 - **outline** — file structure: all symbols in order.
 - **impact** — blast radius of a symbol (all dependants, transitive). Call BEFORE
   renaming/removing/changing.
+- **hierarchy** — inheritance tree: what a type EXTENDS/IMPLEMENTS (ancestors)
+  and what EXTENDS/IMPLEMENTS it (descendants). Call before changing a base
+  class/interface to see every subclass affected.
 - **who_calls** — direct callers or callees of a function/method.
 - **file_deps** — which files depend on this one, and what it depends on.
 - **module_map** — subsystems detected in the codebase and architectural drift.
