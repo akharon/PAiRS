@@ -31,7 +31,7 @@ import * as path from 'node:path';
 import { encode } from 'gpt-tokenizer';
 import type { CodeStore } from '../../store/graph/codeStore';
 import type { SymbolRecord } from '../../core/indexer/types';
-import { createExecutors, type Executors } from '../mcp/executors';
+import { createExecutors, type Executors } from '../../core/tools/executors';
 
 const tok = (s: string): number => encode(s).length;
 
