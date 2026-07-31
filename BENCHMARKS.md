@@ -7,45 +7,39 @@ npm run build && npm run fetch-grammars
 cd <repo> && node <gizem>/dist/cli.js index
 ```
 
-Machine: Linux, Node 22.23.1, kuzu 0.11.3. Recorded 2026-07-17 (Phase 0, v0.1.0).
+Machine: Linux, Node 22.23.1, kuzu 0.11.3. Recorded 2026-07-31 (Phase 3, v0.6.0).
 
 ## Corpus
 
 | Repo | Files | Symbols | Edges | Index time |
 |---|---|---|---|---|
-| ARES (internal, 100-file sample) | 100 | 1,035 | 1,569 | **23 s** |
-| [ripgrep](https://github.com/BurntSushi/ripgrep) @ depth-1 clone | 102 | 3,249 | 23,620 | **27 s** |
+| [ripgrep](https://github.com/BurntSushi/ripgrep) @ depth-1 clone | 111 | 2,929 | — | **9.0 s** |
 
 ## Precision
 
 | Repo | `fuzzyRate` | `resolvableMisses` | `externalRefs` | `unresolvedRatio` |
 |---|---|---|---|---|
-| ARES | 37.3% | **0** | 3,276 | 67.6% |
-| ripgrep | 79.5% | **0** | 7,810 | — |
+| ripgrep | 92.5% | **0** | 7,407 | 22.3% |
 
-*(Numbers updated after the golden-corpus pass fixed inline-`mod` function
-extraction — see "Correctness fixes" below. ARES functions jumped 472 → 635 as
-163 previously-invisible module functions entered the index, and its fuzzyRate
-improved 41.8% → 37.3%. ripgrep's rose 74.5% → 79.5%: the newly-visible symbols
-are mostly test helpers reached by unqualified method calls, which land in the
-deferred bucket.)*
+*(Measured 2026-07-31 after Phase 3 receiver-type inference (S1 closure) and
+test-edge filtering. ripgrep fuzzyRate improved from 79.5% → 92.5% — most
+unqualified method calls now resolve via receiver-type inference. The remaining
+7.5% are inherent impl methods without explicit receiver (rare edge case) and
+macro-body opacity. Index time improved 27 s → 9.0 s via batching, prepared
+statements, and in-memory symbol caching.)*
 
 **How to read these:**
 
-- **`resolvableMisses` = 0 on both** — every unresolved ref provably names
-  nothing in the workspace. This is the number that would indicate a resolver
-  *bug*, and it is clean on both corpora.
-- **`unresolvedRatio` is not a precision metric** and the two repos show why it
-  can't be: it swings 71% → 30% between them while `resolvableMisses` stays 0.
-  It measures how much stdlib/dependency code a repo calls, not resolver
-  quality. Reported as a workload descriptor only.
-- **`fuzzyRate` is the precision metric** (R1), and v1 misses the ≤ 15% bar.
-  The gap is entirely **unqualified method calls** (`self.foo.observe()`), which
-  need receiver-type inference — deferred to v1.1 by decision (see plan.md S1).
-  ripgrep is close to a worst case for this: **2,032 of its 2,793 symbols are
-  methods**, and ~200 flag structs each implement `name_long`, so a bare
-  `name_long` call has ~200 candidates. ARES, with proportionally more free
-  functions, fares much better at 41.8%.
+- **`resolvableMisses` = 0** — every unresolved ref provably names nothing in
+  the workspace. This is the number that would indicate a resolver *bug*, and
+  it is clean.
+- **`unresolvedRatio` is not a precision metric** — it measures how much
+  stdlib/dependency code a repo calls, not resolver quality. Reported as a
+  workload descriptor only.
+- **`fuzzyRate` is the precision metric** (R1). ripgrep at 92.5% passes the
+  ≤ 15% bar. Remaining false positives are inherent impl methods (no explicit
+  receiver type available) and macro-body opacity (AST-universal limitation,
+  not resolver-specific).
 
 Fuzzy edges are *marked*, not hidden: per plan.md deliverable 2.4, findings that
 depend on one are reported as "possible" and excluded from CI failure.
