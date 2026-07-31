@@ -1,6 +1,6 @@
 {
   "name": "gizem",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Derived code-graph index + architectural rule engine for AI coding agents",
   "license": "MIT",
   "author": "Mustafa Kiyar",
@@ -21,12 +21,6 @@
     "onStartupFinished"
   ],
   "contributes": {
-    "mcpServerDefinitionProviders": [
-      {
-        "id": "gizem.mcpProvider",
-        "label": "GIZEM code-graph tools"
-      }
-    ],
     "commands": [
       {
         "command": "gizem.reindex",
@@ -51,13 +45,383 @@
         "gizem.disabledTools": {
           "type": "array",
           "items": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "find_symbol",
+              "get_symbol",
+              "outline",
+              "impact",
+              "who_calls",
+              "file_deps",
+              "module_map",
+              "analyze",
+              "check_rules",
+              "list_rules",
+              "explain_rule"
+            ]
           },
           "default": [],
-          "description": "MCP tool names to not register (e.g. \"analyze\")."
+          "description": "Tool names to not register as in-editor Language Model Tools, e.g. \"analyze\"."
         }
       }
-    }
+    },
+    "languageModelTools": [
+      {
+        "name": "gizem_find_symbol",
+        "displayName": "GIZEM: find symbol definition",
+        "toolReferenceName": "gizemFindSymbol",
+        "modelDescription": "Find where a symbol is defined by name (bare or qualified), workspace-wide. Returns definitions with file:line, kind, and signature. Use INSTEAD of grep/Read to locate a definition. Ambiguous names return the candidate list so you can re-call qualified.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "Bare or qualified name, e.g. \"login\" or \"AuthService::login\"."
+            },
+            "kinds": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "module",
+                  "function",
+                  "method",
+                  "class",
+                  "struct",
+                  "interface",
+                  "enum",
+                  "trait",
+                  "impl",
+                  "field",
+                  "var",
+                  "param",
+                  "const",
+                  "static",
+                  "macro"
+                ]
+              },
+              "description": "Restrict to these symbol kinds."
+            },
+            "langs": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "c",
+                  "cpp",
+                  "python",
+                  "javascript",
+                  "typescript",
+                  "java",
+                  "go",
+                  "ruby",
+                  "dart",
+                  "rust",
+                  "css",
+                  "html"
+                ]
+              }
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50
+            },
+            "offset": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Skip this many results — re-call with the offset from a truncated response to page."
+            }
+          },
+          "required": [
+            "name"
+          ]
+        }
+      },
+      {
+        "name": "gizem_get_symbol",
+        "displayName": "GIZEM: get full declaration",
+        "toolReferenceName": "gizemGetSymbol",
+        "modelDescription": "Full declaration of a symbol by name: signature, doc, span, and (for a type/impl) its members. Use INSTEAD of Read when you need a symbol's shape, not its body.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "Bare or qualified name."
+            },
+            "path": {
+              "type": "string",
+              "description": "Disambiguation hint: prefer the symbol defined in this file (workspace-relative path or suffix)."
+            },
+            "includeMembers": {
+              "type": "boolean",
+              "description": "List members of a type/impl (methods, fields)."
+            }
+          },
+          "required": [
+            "name"
+          ]
+        }
+      },
+      {
+        "name": "gizem_outline",
+        "displayName": "GIZEM: file outline",
+        "toolReferenceName": "gizemOutline",
+        "modelDescription": "Structural outline of a file: its symbols, signatures, and line ranges, ordered by position. Use INSTEAD of Read when you need a file's shape.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Workspace-relative file path."
+            }
+          },
+          "required": [
+            "path"
+          ]
+        }
+      },
+      {
+        "name": "gizem_impact",
+        "displayName": "GIZEM: change impact (blast radius)",
+        "toolReferenceName": "gizemImpact",
+        "modelDescription": "What transitively DEPENDS ON a symbol (\"blast radius\"): every caller, reader, and implementer that reaches it, up to `depth` hops. Call BEFORE renaming/removing/changing a symbol, or on \"what depends on X\". Catches renamed-import references grep misses. Fuzzy (name-matched) dependants are marked as such.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "Bare or qualified name of the symbol to analyze."
+            },
+            "path": {
+              "type": "string",
+              "description": "Disambiguation hint: prefer the symbol defined in this file (workspace-relative path or suffix)."
+            },
+            "depth": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 6,
+              "description": "Transitive hops to walk."
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            }
+          },
+          "required": [
+            "name"
+          ]
+        }
+      },
+      {
+        "name": "gizem_who_calls",
+        "displayName": "GIZEM: call graph (callers/callees)",
+        "toolReferenceName": "gizemWhoCalls",
+        "modelDescription": "Direct call sites of a function/method (\"callers\"), or what it calls (\"callees\"). Lighter than `impact` when you only want one hop. Catches renamed imports grep misses.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string",
+              "description": "Disambiguation hint: prefer the symbol defined in this file (workspace-relative path or suffix)."
+            },
+            "direction": {
+              "type": "string",
+              "enum": [
+                "callers",
+                "callees"
+              ]
+            },
+            "includeFuzzy": {
+              "type": "boolean",
+              "description": "Include name-match (unverified) edges."
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          },
+          "required": [
+            "name"
+          ]
+        }
+      },
+      {
+        "name": "gizem_file_deps",
+        "displayName": "GIZEM: file dependencies",
+        "toolReferenceName": "gizemFileDeps",
+        "modelDescription": "File-level dependency graph: which files depend on this one (\"importers\", the blast radius) or what it depends on (\"imports\"). Call BEFORE moving/deleting a file or on \"what would break\".",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Workspace-relative file path."
+            },
+            "direction": {
+              "type": "string",
+              "enum": [
+                "importers",
+                "imports"
+              ]
+            },
+            "transitive": {
+              "type": "boolean",
+              "description": "Walk up to 5 hops; results carry their depth."
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            }
+          },
+          "required": [
+            "path"
+          ]
+        }
+      },
+      {
+        "name": "gizem_module_map",
+        "displayName": "GIZEM: module map (subsystems)",
+        "toolReferenceName": "gizemModuleMap",
+        "modelDescription": "The module (directory) dependency graph with its detected subsystems (Louvain clusters) and explicit-vs-implicit DRIFT: how much of the dependency weight crosses cluster boundaries. Call on \"what are the subsystems\", \"is the architecture drifting\", or before a big refactor. High drift means the folder layout and the real dependencies disagree.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "description": "Max drift edges to list."
+            }
+          }
+        }
+      },
+      {
+        "name": "gizem_analyze",
+        "displayName": "GIZEM: analyze (dead code, cycles, hotspots)",
+        "toolReferenceName": "gizemAnalyze",
+        "modelDescription": "Workspace-wide architectural analyses. `kind`: dead_code (zero-reference symbols — candidates, not verdicts), fan_out (functions with the most outgoing calls), cycles (dependency cycles at module or type scope), test_gap (exported symbols with no test referencing them).",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "dead_code",
+                "fan_out",
+                "cycles",
+                "test_gap"
+              ]
+            },
+            "scope": {
+              "type": "string",
+              "enum": [
+                "module",
+                "type"
+              ],
+              "description": "cycles only: cycle detection scope."
+            },
+            "pathPrefix": {
+              "type": "string",
+              "description": "Limit to files under this workspace-relative directory."
+            },
+            "excludePath": {
+              "type": "string",
+              "description": "Skip files under this directory (e.g. tests)."
+            },
+            "includeExported": {
+              "type": "boolean",
+              "description": "dead_code: also report exported/public symbols."
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            "offset": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Skip this many results — re-call with the offset from a truncated response to page."
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        }
+      },
+      {
+        "name": "gizem_check_rules",
+        "displayName": "GIZEM: check architectural rules",
+        "toolReferenceName": "gizemCheckRules",
+        "modelDescription": "Evaluate the workspace's architectural rules (.gizem/rules.ron) against the code graph. Call AFTER editing code to verify no architecture rule is violated — each violation returns the rule's explanation so you can self-correct. `possible` findings come from fuzzy edges and never fail CI.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "tier": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2,
+              "description": "Only evaluate rules of this tier."
+            },
+            "rule": {
+              "type": "string",
+              "description": "Only evaluate this rule id."
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          }
+        }
+      },
+      {
+        "name": "gizem_list_rules",
+        "displayName": "GIZEM: list architectural rules",
+        "toolReferenceName": "gizemListRules",
+        "modelDescription": "Summarize the active ruleset: rule ids, kinds, tiers, severities, and layers.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {}
+        }
+      },
+      {
+        "name": "gizem_explain_rule",
+        "displayName": "GIZEM: explain a rule",
+        "toolReferenceName": "gizemExplainRule",
+        "modelDescription": "Full detail of one rule: its kind, configuration, and the explanation shown on violations.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "rule": {
+              "type": "string",
+              "description": "Rule id from list_rules."
+            }
+          },
+          "required": [
+            "rule"
+          ]
+        }
+      }
+    ]
   },
   "scripts": {
     "build": "node esbuild.mjs",
@@ -68,10 +432,10 @@
     "lint": "eslint src",
     "test": "vitest run",
     "test:watch": "vitest",
-    "package": "bash scripts/package.sh"
+    "package": "bash scripts/package.sh",
+    "install": "bash scripts/install.sh"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
     "kuzu": "^0.11.3",
     "web-tree-sitter": "^0.25.10",
     "zod": "^3.23.0"
