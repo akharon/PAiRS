@@ -19,6 +19,7 @@ import { nodeKuzuDriver } from './kuzuDriver';
 import type { CodeStore } from './codeStore';
 import type { EdgeConfidence, FileExtraction, NewSymbol, RawRef, SymbolRecord } from '../../core/indexer/types';
 import { impact } from '../../core/analyze/impact';
+import { moduleMap } from '../../core/analyze/moduleMap';
 
 function sym(name: string, qualified: string, kind: NewSymbol['kind'] = 'method'): NewSymbol {
   return { name, qualified, kind, lang: 'rust', startLine: 1, endLine: 1, signature: null, doc: null, exported: true, parentIndex: null };
@@ -273,6 +274,51 @@ describe('use statements create cross-file DEPENDS_ON edges', () => {
   it('surfaces the dependency through fileEdges (file_deps tool path)', async () => {
     const importers = await store.fileEdges('src/map/loader.rs', 'importers', {});
     expect(importers.map((d) => d.path)).toContain('src/sim/driver.rs');
+  });
+});
+
+describe('path-style imports create cross-file DEPENDS_ON edges', () => {
+  // Regression: the `use` → DEPENDS_ON path split the specifier on `::` and
+  // looked the tail up as a SYMBOL name. TypeScript/JS/Python specifiers are
+  // file paths ('../store/codeStore'), which no symbol is named, so every
+  // import parked in PendingRef forever — module_map reported zero modules on
+  // any non-Rust repo. Path specifiers now resolve to the target file itself.
+  let store: CodeStore;
+  beforeAll(async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pairs-import-path-'));
+    store = await KuzuCodeStore.open(path.join(dir, 'graph.kz'), nodeKuzuDriver);
+    // Importer indexed FIRST: its target does not exist yet, so the edge must
+    // come back through resolvePending (index order is arbitrary in practice).
+    await store.applyExtraction(
+      extraction('src/adapters/vscode/extension.ts', [sym('activate', 'activate', 'function')], [], [
+        use_('../../store/graph/codeStore', 3),
+        use_('vscode', 4), // external package: no workspace file, no edge
+      ])
+    );
+    await store.applyExtraction(extraction('src/store/graph/codeStore.ts', [sym('CodeStore', 'CodeStore', 'class')]));
+    // Directory entry point: './graph' means 'src/store/graph/index.ts'.
+    await store.applyExtraction(extraction('src/store/graph/index.ts', [sym('open', 'open', 'function')]));
+    await store.applyExtraction(
+      extraction('src/core/tools/executors.ts', [sym('createExecutors', 'createExecutors', 'function')], [], [use_('../../store/graph', 1)])
+    );
+    await store.resolvePending();
+  });
+
+  it('links the importing file to the imported file, external packages aside', async () => {
+    const rows = await store.query(
+      `MATCH (a:Symbol)-[e:DEPENDS_ON]->(b:Symbol) WHERE a.file <> b.file RETURN a.file AS af, b.file AS bf, e.line AS line ORDER BY af`
+    );
+    expect(rows.map((r) => `${String(r.af)} -> ${String(r.bf)}`)).toEqual([
+      'src/adapters/vscode/extension.ts -> src/store/graph/codeStore.ts',
+      'src/core/tools/executors.ts -> src/store/graph/index.ts',
+    ]);
+    expect(Number(rows[0]!.line)).toBe(3);
+  });
+
+  it('feeds moduleMap, which is what went empty', async () => {
+    const map = await moduleMap(store);
+    expect(map.modules).toEqual(['src/adapters/vscode', 'src/core/tools', 'src/store/graph']);
+    expect(map.edges).toHaveLength(2);
   });
 });
 

@@ -38,6 +38,7 @@ import type {
 import { isTestPath } from '../../core/indexer/types';
 import type { CodeStore, CodeStoreFactory } from './codeStore';
 import { stripCypherLiterals } from './codeStore';
+import { importCandidatePaths } from './importPath';
 import { REFERENCE_EDGE_TABLES, SCHEMA_DDL, SCHEMA_VERSION, STRUCTURAL_EDGE_TABLES } from './schema';
 
 /** Rust items that are never dead code even with zero incoming edges. */
@@ -147,6 +148,13 @@ interface SymbolIndex {
   qualifiedById: Map<number, string>;
   /** id → declaring file path, for the cross-crate confidence gate. */
   pathById: Map<number, string>;
+  /**
+   * file path → that file's module symbol id. Module symbols are deliberately
+   * absent from the name maps above (they'd pollute every bare-name lookup),
+   * but path-style imports resolve to a *file*, and the file's module symbol is
+   * the edge endpoint. See importPath.ts.
+   */
+  moduleIdByPath: Map<string, number>;
   /** path → this file's index entries, so applyExtraction can patch the
    * mirror in place instead of rebuilding it from Kuzu per file (a full-table
    * rebuild per file made fullIndex O(files × symbols)). */
@@ -199,6 +207,7 @@ export class KuzuCodeStore implements CodeStore {
 
   /** Remove one file's entries from the mirror (inverse of indexAdd). */
   private static indexRemoveFile(idx: SymbolIndex, path: string): void {
+    idx.moduleIdByPath.delete(path);
     const entries = idx.entriesByFile.get(path);
     if (!entries) return;
     idx.entriesByFile.delete(path);
@@ -238,6 +247,7 @@ export class KuzuCodeStore implements CodeStore {
       byNameWithPath: new Map(),
       qualifiedById: new Map(),
       pathById: new Map(),
+      moduleIdByPath: new Map(),
       entriesByFile: new Map(),
     };
     for (const r of rows) {
@@ -247,6 +257,15 @@ export class KuzuCodeStore implements CodeStore {
         qualified: String(r.qualified),
         path: String(r.path),
       });
+    }
+    // Module symbols, kept out of the name maps but needed as the endpoint of
+    // path-style import edges (see moduleIdByPath).
+    // Lowest id per file = the root module symbol the extractor emits first;
+    // inline `mod`s get higher ids and must not displace it.
+    for (const r of await this.rows(
+      `MATCH (f:File)-[:DECLARES]->(s:Symbol) WHERE s.kind = 'module' RETURN f.path AS path, min(s.id) AS id`
+    )) {
+      idx.moduleIdByPath.set(String(r.path), Number(r.id));
     }
     this.symbolIndex = idx;
     return idx;
@@ -555,7 +574,13 @@ export class KuzuCodeStore implements CodeStore {
     if (this.symbolIndex) {
       KuzuCodeStore.indexRemoveFile(this.symbolIndex, extraction.path);
       extraction.symbols.forEach((sym, i) => {
-        if (sym.kind === 'module') return; // mirrors the loadSymbolIndex WHERE clause
+        if (sym.kind === 'module') {
+          // Mirrors the loadSymbolIndex WHERE clause: out of the name maps, but
+          // the file's root module symbol (symbols[0]; inline `mod`s follow) is
+          // recorded by path so path-style imports can target this file.
+          if (i === 0) this.symbolIndex!.moduleIdByPath.set(extraction.path, indexToId[i]!);
+          return;
+        }
         KuzuCodeStore.indexAdd(this.symbolIndex!, {
           id: indexToId[i]!,
           name: sym.name,
@@ -592,6 +617,20 @@ export class KuzuCodeStore implements CodeStore {
       const seenDep = new Set<number>();
       for (const u of extraction.uses) {
         if (u.isGlob) continue;
+
+        // Path-style specifier (TS/JS/Python/Dart/C…): the import names a FILE,
+        // not a symbol, so the name ladder below can never resolve it. Target
+        // the file's module symbol directly. A path import is unambiguous, so
+        // the hit is `resolved`.
+        const viaPath = await this.resolveImportPath(extraction.path, u.specifier);
+        if (viaPath !== null) {
+          if (viaPath !== moduleId && !seenDep.has(viaPath)) {
+            seenDep.add(viaPath);
+            edges.push({ fromId: moduleId, toId: viaPath, kind: 'DEPENDS_ON', line: u.line, confidence: 'resolved', test: u.inTest === true });
+          }
+          continue;
+        }
+
         const tail = u.specifier.split('::').filter(Boolean).pop();
         if (!tail) continue;
         const resolved = await this.resolveOneRef(tail, u.specifier, useSpecifiers);
@@ -661,6 +700,24 @@ export class KuzuCodeStore implements CodeStore {
       await this.exec(`MATCH (f:File {id: ${fileId}})-[:DECLARES]->(s:Symbol) DETACH DELETE s`);
       await this.exec(`MATCH (f:File {id: ${fileId}}) DETACH DELETE f`);
     });
+  }
+
+  /**
+   * Resolve a path-style import specifier to the imported file's module symbol
+   * id, or null when the specifier isn't a file reference (Rust `use` paths) or
+   * names no indexed file (an external package, or a workspace file not indexed
+   * yet — the caller parks those as pending). Match is exact against indexed
+   * paths, so a generous candidate list cannot invent an edge.
+   */
+  private async resolveImportPath(fromPath: string, specifier: string): Promise<number | null> {
+    const candidates = importCandidatePaths(fromPath, specifier);
+    if (candidates.length === 0) return null;
+    const idx = await this.loadSymbolIndex();
+    for (const c of candidates) {
+      const id = idx.moduleIdByPath.get(c);
+      if (id !== undefined) return id;
+    }
+    return null;
   }
 
   /**
@@ -886,7 +943,24 @@ export class KuzuCodeStore implements CodeStore {
       // ref.reference) get the gate like any other ref: `normalize!(…)` in
       // globset must not resolve confirmed onto ignore's `normalize` method.
       const isUseImport = r.kind === 'DEPENDS_ON' && Boolean(String(r.qualifiedName ?? ''));
-      const fromPath = isUseImport ? null : (pathByFileId.get(Number(r.fileId)) ?? null);
+      const declaringPath = pathByFileId.get(Number(r.fileId)) ?? null;
+
+      // A parked path-style import (TS/JS/Python/…): its target file may have
+      // been indexed since. Retry it as a path before the name ladder, which
+      // can never resolve a file path.
+      if (isUseImport && declaringPath !== null) {
+        const viaPath = await this.resolveImportPath(declaringPath, String(r.qualifiedName));
+        if (viaPath !== null) {
+          if (viaPath !== Number(r.fromSymbolId)) {
+            edges.push({ fromId: Number(r.fromSymbolId), toId: viaPath, kind: 'DEPENDS_ON', line: Number(r.line), confidence: 'resolved', test: r.inTest === true });
+            created += 1;
+          }
+          settled.push(Number(r.id));
+          continue;
+        }
+      }
+
+      const fromPath = isUseImport ? null : declaringPath;
       const resolved = await this.resolveOneRef(String(r.name), String(r.qualifiedName ?? '') || null, useSpecifiers, r.methodCall === true, fromPath);
       if (resolved === 'unresolved') continue;
       for (const toId of resolved.ids) {
