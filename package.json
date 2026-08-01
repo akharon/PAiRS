@@ -1,6 +1,6 @@
 {
   "name": "pairs",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Derived code-graph index + architectural rule engine for AI coding agents",
   "license": "MIT",
   "author": "Mustafa Kiyar",
@@ -9,6 +9,7 @@
     "url": "https://github.com/mkyr/pairs"
   },
   "readme": "README.md",
+  "icon": "assets/icon.png",
   "engines": {
     "node": ">=22",
     "vscode": "^1.101.0"
@@ -73,9 +74,9 @@
     },
     "languageModelTools": [
       {
-        "name": "gizem_find_symbol",
+        "name": "pairs_find_symbol",
         "displayName": "PAiRS: find symbol definition",
-        "toolReferenceName": "gizemFindSymbol",
+        "toolReferenceName": "pairsFindSymbol",
         "modelDescription": "Find where a symbol is defined by name (bare or qualified), workspace-wide. Returns definitions with file:line, kind, and signature. Use INSTEAD of grep/Read to locate a definition. Ambiguous names return the candidate list so you can re-call qualified.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
@@ -146,9 +147,9 @@
         }
       },
       {
-        "name": "gizem_get_symbol",
+        "name": "pairs_get_symbol",
         "displayName": "PAiRS: get full declaration",
-        "toolReferenceName": "gizemGetSymbol",
+        "toolReferenceName": "pairsGetSymbol",
         "modelDescription": "Full declaration of a symbol by name: signature, doc, span, and (for a type/impl) its members. Use INSTEAD of Read when you need a symbol's shape, not its body.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
@@ -173,9 +174,9 @@
         }
       },
       {
-        "name": "gizem_outline",
+        "name": "pairs_outline",
         "displayName": "PAiRS: file outline",
-        "toolReferenceName": "gizemOutline",
+        "toolReferenceName": "pairsOutline",
         "modelDescription": "Structural outline of a file: its symbols, signatures, and line ranges, ordered by position. Use INSTEAD of Read when you need a file's shape.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
@@ -192,9 +193,9 @@
         }
       },
       {
-        "name": "gizem_impact",
+        "name": "pairs_impact",
         "displayName": "PAiRS: change impact (blast radius)",
-        "toolReferenceName": "gizemImpact",
+        "toolReferenceName": "pairsImpact",
         "modelDescription": "What transitively DEPENDS ON a symbol (\"blast radius\"): every caller, reader, and implementer that reaches it, up to `depth` hops. Call BEFORE renaming/removing/changing a symbol, or on \"what depends on X\". Catches renamed-import references grep misses. Fuzzy (name-matched) dependants are marked as such.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
@@ -226,9 +227,9 @@
         }
       },
       {
-        "name": "gizem_hierarchy",
+        "name": "pairs_hierarchy",
         "displayName": "PAiRS: inheritance hierarchy",
-        "toolReferenceName": "gizemHierarchy",
+        "toolReferenceName": "pairsHierarchy",
         "modelDescription": "Inheritance/interface tree around a type: what it EXTENDS/IMPLEMENTS (ancestors) and what EXTENDS/IMPLEMENTS it (descendants), up to `depth` hops each way. Call on \"what does X inherit from\", \"what implements X\", or before changing a base class/interface to see every subclass affected. Narrower than `impact` (which also includes CALLS/READS/WRITES); use this when you specifically want the type hierarchy, not the full dependant set.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
@@ -260,9 +261,9 @@
         }
       },
       {
-        "name": "gizem_who_calls",
+        "name": "pairs_who_calls",
         "displayName": "PAiRS: call graph (callers/callees)",
-        "toolReferenceName": "gizemWhoCalls",
+        "toolReferenceName": "pairsWhoCalls",
         "modelDescription": "Direct call sites of a function/method (\"callers\"), or what it calls (\"callees\"). Lighter than `impact` when you only want one hop. Catches renamed imports grep misses.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
@@ -298,9 +299,9 @@
         }
       },
       {
-        "name": "gizem_file_deps",
+        "name": "pairs_file_deps",
         "displayName": "PAiRS: file dependencies",
-        "toolReferenceName": "gizemFileDeps",
+        "toolReferenceName": "pairsFileDeps",
         "modelDescription": "File-level dependency graph: which files depend on this one (\"importers\", the blast radius) or what it depends on (\"imports\"). Call BEFORE moving/deleting a file or on \"what would break\".",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
@@ -333,9 +334,9 @@
         }
       },
       {
-        "name": "gizem_module_map",
+        "name": "pairs_module_map",
         "displayName": "PAiRS: module map (subsystems)",
-        "toolReferenceName": "gizemModuleMap",
+        "toolReferenceName": "pairsModuleMap",
         "modelDescription": "The module (directory) dependency graph with its detected subsystems (Louvain clusters) and explicit-vs-implicit DRIFT: how much of the dependency weight crosses cluster boundaries. Call on \"what are the subsystems\", \"is the architecture drifting\", or before a big refactor. High drift means the folder layout and the real dependencies disagree.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
@@ -351,9 +352,9 @@
         }
       },
       {
-        "name": "gizem_analyze",
+        "name": "pairs_analyze",
         "displayName": "PAiRS: analyze (dead code, cycles, hotspots)",
-        "toolReferenceName": "gizemAnalyze",
+        "toolReferenceName": "pairsAnalyze",
         "modelDescription": "Workspace-wide architectural analyses. `kind`: dead_code (zero-reference symbols — candidates, not verdicts), fan_out (functions with the most outgoing calls), cycles (dependency cycles at module or type scope), test_gap (exported symbols with no test referencing them).",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
@@ -405,9 +406,9 @@
         }
       },
       {
-        "name": "gizem_check_rules",
+        "name": "pairs_check_rules",
         "displayName": "PAiRS: check architectural rules",
-        "toolReferenceName": "gizemCheckRules",
+        "toolReferenceName": "pairsCheckRules",
         "modelDescription": "Evaluate the workspace's architectural rules (.pairs/rules.ron) against the code graph. Call AFTER editing code to verify no architecture rule is violated — each violation returns the rule's explanation so you can self-correct. `possible` findings come from fuzzy edges and never fail CI.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
@@ -432,9 +433,9 @@
         }
       },
       {
-        "name": "gizem_list_rules",
+        "name": "pairs_list_rules",
         "displayName": "PAiRS: list architectural rules",
-        "toolReferenceName": "gizemListRules",
+        "toolReferenceName": "pairsListRules",
         "modelDescription": "Summarize the active ruleset: rule ids, kinds, tiers, severities, and layers.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
@@ -443,9 +444,9 @@
         }
       },
       {
-        "name": "gizem_explain_rule",
+        "name": "pairs_explain_rule",
         "displayName": "PAiRS: explain a rule",
-        "toolReferenceName": "gizemExplainRule",
+        "toolReferenceName": "pairsExplainRule",
         "modelDescription": "Full detail of one rule: its kind, configuration, and the explanation shown on violations.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
@@ -462,9 +463,9 @@
         }
       },
       {
-        "name": "gizem_rename_symbol",
+        "name": "pairs_rename_symbol",
         "displayName": "PAiRS: rename symbol",
-        "toolReferenceName": "gizemRenameSymbol",
+        "toolReferenceName": "pairsRenameSymbol",
         "modelDescription": "Rename a symbol and every direct reference site (definition + callers/readers/writers/implementers found via the same edges `impact` walks) consistently, in one pass. Aborts without touching any file if a reference site cannot be matched safely (e.g. the indexed line no longer contains the name at a word boundary) — re-index and retry. Revert via your VCS (e.g. `git checkout -- <files>`); this tool does not keep its own undo log.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
@@ -515,6 +516,7 @@
     "esbuild": "^0.23.0",
     "eslint": "^9.39.5",
     "gpt-tokenizer": "^3.4.0",
+    "sharp": "^0.35.3",
     "tree-sitter-wasms": "^0.1.0",
     "typescript": "^5.5.0",
     "typescript-eslint": "^8.64.0",

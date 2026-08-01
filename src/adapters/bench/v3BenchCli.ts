@@ -28,14 +28,14 @@ async function main(): Promise<void> {
   console.log(`${pad('#', 3)} ${pad('tool', 11)} ${pad('pairs', 7)} ${pad('baseline', 9)} ${pad('files', 6)} ${pad('ratio', 7)} question`);
   for (const r of res.rows) {
     console.log(
-      `${pad(String(r.id), 3)} ${pad(r.tool, 11)} ${pad(String(r.gizemTokens), 7)} ` +
+      `${pad(String(r.id), 3)} ${pad(r.tool, 11)} ${pad(String(r.pairsTokens), 7)} ` +
         `${pad(String(r.baselineTokens), 9)} ${pad(String(r.baselineFiles), 6)} ` +
         `${pad((r.ratio * 100).toFixed(1) + '%', 7)} ${r.question}`
     );
   }
   const pct = (n: number): string => (n * 100).toFixed(2) + '%';
   console.log(
-    `\nTotals: pairs ${res.totalGizem} tok vs baseline ${res.totalBaseline} tok\n` +
+    `\nTotals: pairs ${res.totalPairs} tok vs baseline ${res.totalBaseline} tok\n` +
       `Aggregate ratio: ${pct(res.ratio)} of baseline (mean per-question ${pct(res.meanRatio)})\n` +
       `Gate (≤10% aggregate): ${res.passed ? 'PASS ✅' : 'FAIL ❌'}`
   );

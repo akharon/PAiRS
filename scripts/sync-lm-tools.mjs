@@ -18,19 +18,19 @@ const root = path.join(scriptsDir, '..');
 // reference name) — kept here rather than in tools.ts so that file stays
 // transport-agnostic (invariant: tools.ts has no VS Code-specific concepts).
 const DISPLAY = {
-  find_symbol: { name: 'gizem_find_symbol', displayName: 'PAiRS: find symbol definition', toolReferenceName: 'gizemFindSymbol' },
-  get_symbol: { name: 'gizem_get_symbol', displayName: 'PAiRS: get full declaration', toolReferenceName: 'gizemGetSymbol' },
-  outline: { name: 'gizem_outline', displayName: 'PAiRS: file outline', toolReferenceName: 'gizemOutline' },
-  impact: { name: 'gizem_impact', displayName: 'PAiRS: change impact (blast radius)', toolReferenceName: 'gizemImpact' },
-  hierarchy: { name: 'gizem_hierarchy', displayName: 'PAiRS: inheritance hierarchy', toolReferenceName: 'gizemHierarchy' },
-  who_calls: { name: 'gizem_who_calls', displayName: 'PAiRS: call graph (callers/callees)', toolReferenceName: 'gizemWhoCalls' },
-  file_deps: { name: 'gizem_file_deps', displayName: 'PAiRS: file dependencies', toolReferenceName: 'gizemFileDeps' },
-  module_map: { name: 'gizem_module_map', displayName: 'PAiRS: module map (subsystems)', toolReferenceName: 'gizemModuleMap' },
-  analyze: { name: 'gizem_analyze', displayName: 'PAiRS: analyze (dead code, cycles, hotspots)', toolReferenceName: 'gizemAnalyze' },
-  check_rules: { name: 'gizem_check_rules', displayName: 'PAiRS: check architectural rules', toolReferenceName: 'gizemCheckRules' },
-  list_rules: { name: 'gizem_list_rules', displayName: 'PAiRS: list architectural rules', toolReferenceName: 'gizemListRules' },
-  explain_rule: { name: 'gizem_explain_rule', displayName: 'PAiRS: explain a rule', toolReferenceName: 'gizemExplainRule' },
-  rename_symbol: { name: 'gizem_rename_symbol', displayName: 'PAiRS: rename symbol', toolReferenceName: 'gizemRenameSymbol' },
+  find_symbol: { name: 'pairs_find_symbol', displayName: 'PAiRS: find symbol definition', toolReferenceName: 'pairsFindSymbol' },
+  get_symbol: { name: 'pairs_get_symbol', displayName: 'PAiRS: get full declaration', toolReferenceName: 'pairsGetSymbol' },
+  outline: { name: 'pairs_outline', displayName: 'PAiRS: file outline', toolReferenceName: 'pairsOutline' },
+  impact: { name: 'pairs_impact', displayName: 'PAiRS: change impact (blast radius)', toolReferenceName: 'pairsImpact' },
+  hierarchy: { name: 'pairs_hierarchy', displayName: 'PAiRS: inheritance hierarchy', toolReferenceName: 'pairsHierarchy' },
+  who_calls: { name: 'pairs_who_calls', displayName: 'PAiRS: call graph (callers/callees)', toolReferenceName: 'pairsWhoCalls' },
+  file_deps: { name: 'pairs_file_deps', displayName: 'PAiRS: file dependencies', toolReferenceName: 'pairsFileDeps' },
+  module_map: { name: 'pairs_module_map', displayName: 'PAiRS: module map (subsystems)', toolReferenceName: 'pairsModuleMap' },
+  analyze: { name: 'pairs_analyze', displayName: 'PAiRS: analyze (dead code, cycles, hotspots)', toolReferenceName: 'pairsAnalyze' },
+  check_rules: { name: 'pairs_check_rules', displayName: 'PAiRS: check architectural rules', toolReferenceName: 'pairsCheckRules' },
+  list_rules: { name: 'pairs_list_rules', displayName: 'PAiRS: list architectural rules', toolReferenceName: 'pairsListRules' },
+  explain_rule: { name: 'pairs_explain_rule', displayName: 'PAiRS: explain a rule', toolReferenceName: 'pairsExplainRule' },
+  rename_symbol: { name: 'pairs_rename_symbol', displayName: 'PAiRS: rename symbol', toolReferenceName: 'pairsRenameSymbol' },
 };
 
 // Minimal zod -> VS Code inputSchema (JSON Schema subset) converter — only
@@ -142,7 +142,7 @@ async function main() {
   pkg.contributes.languageModelTools = entries;
 
   // Keep pairs.disabledTools' enum in lockstep with the tool contract so it
-  // can't drift when a tool is added/renamed (wire names, not gizem_-prefixed).
+  // can't drift when a tool is added/renamed (wire names, not pairs_-prefixed).
   const disabledTools = pkg.contributes.configuration?.properties?.['pairs.disabledTools'];
   if (disabledTools?.items) disabledTools.items.enum = toolNames;
 

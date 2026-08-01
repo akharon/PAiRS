@@ -68,7 +68,7 @@ export interface BenchRow {
   id: number;
   question: string;
   tool: string;
-  gizemTokens: number;
+  pairsTokens: number;
   baselineTokens: number;
   baselineFiles: number;
   ratio: number; // pairs / baseline
@@ -76,7 +76,7 @@ export interface BenchRow {
 
 export interface BenchResult {
   rows: BenchRow[];
-  totalGizem: number;
+  totalPairs: number;
   totalBaseline: number;
   ratio: number; // aggregate pairs / baseline
   meanRatio: number; // mean of per-question ratios
@@ -134,7 +134,7 @@ function buildQuestions(funcs: SymbolRecord[], files: string[]): Q[] {
   // term chosen to reflect the sweep an agent would do: `mod`/`use`/`fn` are the
   // grep an agent runs to reconstruct architecture by hand — capped to a
   // representative sub-sweep so the baseline stays a *lower* bound, not inflated.
-  qs.push({ question: 'What are the architectural subsystems and where does the code drift from them?', tool: 'module_map', term: 'mod', run: (x) => x.module_map({ limit: 40 }) });
+  qs.push({ question: 'What are the architectural subsystems and where does the code drift from them?', tool: 'module_map', term: 'mod', run: (x) => x.module_map({ limit: 40, resolution: 1 }) });
   qs.push({ question: 'Are there dependency cycles between modules?', tool: 'analyze', term: 'use', run: (x) => x.analyze({ kind: 'cycles', scope: 'module', limit: 30, offset: 0, includeExported: false }) });
   qs.push({ question: 'Which exported symbols have no test coverage?', tool: 'analyze', term: 'pub', run: (x) => x.analyze({ kind: 'test_gap', scope: 'module', limit: 40, offset: 0, includeExported: false }) });
 
@@ -150,24 +150,24 @@ export async function runV3Bench(store: CodeStore, repo: string): Promise<BenchR
   for (let i = 0; i < questions.length; i++) {
     const q = questions[i]!;
     const answer = await q.run(x);
-    const gizemTokens = tok(answer);
+    const pairsTokens = tok(answer);
     const { tokens: baselineTokens, files: baselineFiles } = baselineTokensFor(repo, q.term);
     rows.push({
       id: i + 1,
       question: q.question,
       tool: q.tool,
-      gizemTokens,
+      pairsTokens,
       baselineTokens,
       baselineFiles,
-      ratio: baselineTokens > 0 ? gizemTokens / baselineTokens : 0,
+      ratio: baselineTokens > 0 ? pairsTokens / baselineTokens : 0,
     });
   }
 
-  const totalGizem = rows.reduce((a, r) => a + r.gizemTokens, 0);
+  const totalPairs = rows.reduce((a, r) => a + r.pairsTokens, 0);
   const totalBaseline = rows.reduce((a, r) => a + r.baselineTokens, 0);
-  const ratio = totalBaseline > 0 ? totalGizem / totalBaseline : 0;
+  const ratio = totalBaseline > 0 ? totalPairs / totalBaseline : 0;
   const meanRatio = rows.reduce((a, r) => a + r.ratio, 0) / Math.max(rows.length, 1);
-  return { rows, totalGizem, totalBaseline, ratio, meanRatio, passed: ratio <= 0.1 };
+  return { rows, totalPairs, totalBaseline, ratio, meanRatio, passed: ratio <= 0.1 };
 }
 
 // Local alias so the exported fn name reads clearly above.

@@ -283,8 +283,8 @@ describe('code indexer pipeline', () => {
 
     it('threads the crate property through', async () => {
       const loaded = await registry.load('rust');
-      const extraction = extractor.extract(loaded, 'greeter.rs', FIXTURES.rust, { mtimeMs: 1, size: FIXTURES.rust.length }, 'gizem_core');
-      expect(extraction.crate).toBe('gizem_core');
+      const extraction = extractor.extract(loaded, 'greeter.rs', FIXTURES.rust, { mtimeMs: 1, size: FIXTURES.rust.length }, 'pairs_core');
+      expect(extraction.crate).toBe('pairs_core');
     });
   });
 });

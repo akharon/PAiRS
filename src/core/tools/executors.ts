@@ -205,16 +205,18 @@ export function createExecutors(deps: ExecutorDeps): Executors {
     },
 
     async module_map(input) {
-      const map = await moduleMap(store);
+      const map = await moduleMap(store, { depth: input.depth, resolution: input.resolution });
       if (map.modules.length === 0) return 'No inter-module dependencies indexed (single module, or no DEPENDS_ON edges).';
       const clusters = map.clusters
         .map((c, i) => `  subsystem ${i + 1} (${c.modules.length}): ${c.modules.join(', ')}`)
         .join('\n');
       const drift = map.drift.slice(0, input.limit).map((e) => `  - ${e.from} → ${e.to}  (×${e.weight})`).join('\n');
       const pct = (map.driftRatio * 100).toFixed(0);
+      const layoutPct = (map.layoutDrift * 100).toFixed(0);
       return (
         `${map.modules.length} modules in ${map.clusters.length} subsystem(s); ` +
-        `drift ${pct}% of dependency weight crosses subsystem boundaries.\n\n` +
+        `drift ${pct}% of dependency weight crosses subsystem boundaries; ` +
+        `layout agreement ${layoutPct}% (how well detected subsystems match the folder layout).\n\n` +
         `Subsystems:\n${clusters}` +
         (map.drift.length ? `\n\nCross-subsystem edges (drift, heaviest first):\n${drift}` : '\n\nNo cross-subsystem drift.')
       );

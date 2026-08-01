@@ -131,6 +131,8 @@ export const codeToolSchemas = {
       'High drift means the folder layout and the real dependencies disagree.',
     input: z.object({
       limit: z.number().int().min(1).max(100).default(20).describe('Max drift edges to list.'),
+      depth: z.number().int().min(1).max(20).optional().describe('Collapse modules to this many leading path segments — use on large monorepos to keep the map legible.'),
+      resolution: z.number().min(0.1).max(10).default(1).describe('Louvain resolution: >1 finds more/smaller subsystems, <1 fewer/larger ones.'),
     }),
   },
 

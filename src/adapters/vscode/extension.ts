@@ -122,7 +122,7 @@ function registerLmTools(ws: Workspace): vscode.Disposable[] {
     if (disabled.has(name)) continue;
     const toolName = name as CodeToolName;
     disposables.push(
-      vscode.lm.registerTool(`gizem_${name}`, {
+      vscode.lm.registerTool(`pairs_${name}`, {
         invoke: async (options) => {
           try {
             const input = schema.input.parse(options.input) as CodeToolInput<CodeToolName>;
@@ -249,10 +249,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('pairs.checkRules', () => refreshDiagnostics(ws, diagnostics)),
     vscode.commands.registerCommand('pairs.moduleMap', async () => {
       // Read-only module-graph webview (plan.md 3.5): Louvain subsystems as
-      // columns, drift edges red. Self-contained HTML — webview CSP-safe.
+      // columns, drift edges red. Self-contained HTML, inline script only
+      // (CSP forbids remote scripts) — the script only filters/collapses the
+      // view and asks the extension to reveal a module, it never mutates the graph.
       const map = await moduleMap(ws.store);
-      const panel = vscode.window.createWebviewPanel('gizemModuleMap', 'PAiRS Module Map', vscode.ViewColumn.Active, { enableScripts: false });
+      const panel = vscode.window.createWebviewPanel('pairsModuleMap', 'PAiRS Module Map', vscode.ViewColumn.Active, { enableScripts: true });
       panel.webview.html = moduleMapHtml(map);
+      panel.webview.onDidReceiveMessage(async (msg: { type?: string; module?: string }) => {
+        if (msg?.type !== 'reveal' || !msg.module) return;
+        const uri = vscode.Uri.file(path.join(ws.root, msg.module));
+        try {
+          await vscode.commands.executeCommand('revealInExplorer', uri);
+        } catch {
+          // Module path may not exist as-is (e.g. depth-collapsed key) — ignore.
+        }
+      });
     })
   );
 

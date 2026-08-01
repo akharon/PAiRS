@@ -1247,7 +1247,7 @@ export class KuzuCodeStore implements CodeStore {
    * Deliberately does NOT call `db.close()`: kuzu 0.11.3's native addon
    * segfaults (SIGSEGV, exit 139) during teardown on any explicit close —
    * both `conn.close(); db.close()` and a bare `db.close()`. Reproduced by
-   * spikes/s2-kuzu-concurrency.mjs (GIZEM_S2_VARIANT=1 and =2); letting the
+   * spikes/s2-kuzu-concurrency.mjs (PAIRS_S2_VARIANT=1 and =2); letting the
    * process exit without closing (variant 3) is clean.
    *
    * Leaving the handle to process exit is safe for PAiRS's usage: the CLI is

@@ -88,7 +88,7 @@ describe('tool executors', () => {
   });
 
   it('module_map renders subsystems and drift', async () => {
-    const out = await x.module_map({ limit: 20 });
+    const out = await x.module_map({ limit: 20, resolution: 1 });
     expect(out).toMatch(/subsystem|No inter-module/);
   });
 });
@@ -190,8 +190,10 @@ describe('moduleMap clustering', () => {
   // drift logic deterministically without depending on edge-creation internals
   // (real DEPENDS_ON edges come from `use` statements, exercised on ripgrep in
   // the integration smoke test — here we isolate the graph algorithm).
-  function fakeStore(fileDeps: Array<[string, string]>): CodeStore {
-    const rows = fileDeps.map(([af, bf]) => ({ af, bf }));
+  // moduleMap's query now aggregates in Cypher (`count(*) AS n`, grouped by
+  // confidence), so the fake rows already carry the grouped shape.
+  function fakeStore(fileDeps: Array<[string, string, number] | [string, string, number, string]>): CodeStore {
+    const rows = fileDeps.map(([af, bf, n, conf]) => ({ af, bf, n, conf: conf ?? 'resolved' }));
     return { query: async () => rows } as unknown as CodeStore;
   }
 
@@ -201,9 +203,9 @@ describe('moduleMap clustering', () => {
     // by a single edge — Louvain should keep {a,b} together and c is a bridge.
     const map = await moduleMap(
       fakeStore([
-        ['a/1.rs', 'b/1.rs'], ['a/2.rs', 'b/2.rs'], ['a/3.rs', 'b/3.rs'],
-        ['b/1.rs', 'a/1.rs'], ['b/2.rs', 'a/2.rs'],
-        ['a/1.rs', 'c/1.rs'],
+        ['a/1.rs', 'b/1.rs', 3],
+        ['b/1.rs', 'a/1.rs', 2],
+        ['a/1.rs', 'c/1.rs', 1],
       ])
     );
     expect(map.modules).toEqual(['a', 'b', 'c']);

@@ -2,11 +2,9 @@
 **/*.test.js
 .git
 .gitignore
-.gizem/**
 .pairs/**
 scripts/
 spikes/
-vendor/
 # kuzu is a native addon (esbuild external) — its runtime files must ship.
 # Everything else in node_modules is bundled into dist/ and excluded.
 node_modules/**
