@@ -168,15 +168,26 @@ async function findSymbol(ws: Workspace): Promise<void> {
  * rendered as squiggles. `confirmed` maps to the rule's severity, `possible`
  * to Hint — visible in the hover, never alarming (R1). Read-only: no code
  * actions that mutate source.
+ *
+ * Returns what happened so the `pairs.checkRules` command can report it — the
+ * background callers (watchers, post-index) stay silent and ignore it.
  */
-async function refreshDiagnostics(ws: Workspace, collection: vscode.DiagnosticCollection): Promise<void> {
+type CheckOutcome =
+  | { kind: 'no-ruleset'; rulesPath: string }
+  | { kind: 'parse-error'; rulesPath: string; message: string }
+  | { kind: 'checked'; violations: number; files: number };
+
+async function refreshDiagnostics(
+  ws: Workspace,
+  collection: vscode.DiagnosticCollection
+): Promise<CheckOutcome> {
   const rulesPath = path.join(ws.root, '.pairs', 'rules.ron');
   let src: string;
   try {
     src = await fs.readFile(rulesPath, 'utf8');
   } catch {
     collection.clear(); // no ruleset — no diagnostics
-    return;
+    return { kind: 'no-ruleset', rulesPath };
   }
   let violations: Violation[];
   try {
@@ -188,7 +199,7 @@ async function refreshDiagnostics(ws: Workspace, collection: vscode.DiagnosticCo
     collection.set(vscode.Uri.file(rulesPath), [
       new vscode.Diagnostic(new vscode.Range(0, 0, 0, 1), String((err as Error).message), vscode.DiagnosticSeverity.Error),
     ]);
-    return;
+    return { kind: 'parse-error', rulesPath, message: String((err as Error).message) };
   }
   const byFile = new Map<string, vscode.Diagnostic[]>();
   for (const v of violations) {
@@ -220,6 +231,56 @@ async function refreshDiagnostics(ws: Workspace, collection: vscode.DiagnosticCo
   }
   collection.clear();
   for (const [file, diags] of byFile) collection.set(vscode.Uri.file(path.join(ws.root, file)), diags);
+  return { kind: 'checked', violations: violations.length, files: byFile.size };
+}
+
+/**
+ * `pairs.checkRules`: the palette entry point. Diagnostics alone are silent
+ * feedback — a workspace with no rules.ron, or a clean run, would look
+ * identical to the command doing nothing — so this always reports.
+ */
+async function checkRulesCommand(ws: Workspace, collection: vscode.DiagnosticCollection): Promise<void> {
+  const outcome = await refreshDiagnostics(ws, collection);
+  if (outcome.kind === 'no-ruleset') {
+    const create = 'Create rules.ron';
+    const pick = await vscode.window.showWarningMessage(
+      'PAiRS: no .pairs/rules.ron in this workspace — nothing to check.',
+      create
+    );
+    if (pick === create) {
+      // Same bootstrap as `pairs init`: infer layers from the graph, write a
+      // starter ruleset, open it for review. `wx` so a ruleset created since
+      // the check is never clobbered. Findings go with it — the proposal is a
+      // draft, not an authority (R5).
+      const { proposeInit } = await import('../../core/analyze/initProposal');
+      const proposal = await proposeInit(ws.store);
+      await fs.writeFile(outcome.rulesPath, proposal.rulesRon, { flag: 'wx' });
+      await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(outcome.rulesPath));
+      if (proposal.findings.length) {
+        void vscode.window.showInformationMessage(
+          `PAiRS: review before trusting the proposal — ${proposal.findings.join('; ')}`
+        );
+      }
+      await refreshDiagnostics(ws, collection);
+    }
+    return;
+  }
+  if (outcome.kind === 'parse-error') {
+    const open = 'Open rules.ron';
+    const pick = await vscode.window.showErrorMessage(`PAiRS: rules.ron failed to parse — ${outcome.message}`, open);
+    if (pick === open) await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(outcome.rulesPath));
+    return;
+  }
+  if (outcome.violations === 0) {
+    void vscode.window.showInformationMessage('PAiRS: rules checked — no violations.');
+    return;
+  }
+  const show = 'Show Problems';
+  const pick = await vscode.window.showWarningMessage(
+    `PAiRS: ${outcome.violations} violation${outcome.violations === 1 ? '' : 's'} in ${outcome.files} file${outcome.files === 1 ? '' : 's'}.`,
+    show
+  );
+  if (pick === show) await vscode.commands.executeCommand('workbench.action.problems.focus');
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
@@ -246,7 +307,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('pairs.reindex', () => reindex(ws).then(() => refreshDiagnostics(ws, diagnostics))),
     vscode.commands.registerCommand('pairs.rebuildIndex', () => rebuildIndex(ws).then(() => refreshDiagnostics(ws, diagnostics))),
     vscode.commands.registerCommand('pairs.findSymbol', () => findSymbol(ws)),
-    vscode.commands.registerCommand('pairs.checkRules', () => refreshDiagnostics(ws, diagnostics)),
+    vscode.commands.registerCommand('pairs.checkRules', () => checkRulesCommand(ws, diagnostics)),
     vscode.commands.registerCommand('pairs.moduleMap', async () => {
       // Read-only module-graph webview (plan.md 3.5): Louvain subsystems as
       // columns, drift edges red. Self-contained HTML, inline script only

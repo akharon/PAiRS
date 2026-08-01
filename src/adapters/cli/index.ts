@@ -76,7 +76,10 @@ async function main(): Promise<void> {
           'Another process (likely the VS Code extension, or another `pairs` command) has this index open. ' +
           'Kuzu allows only one process to hold the database at a time — close that workspace/process, or wait for it to finish, then retry.\n'
       );
-      process.exitCode = 1;
+      // Exit 2, not 1: 1 means "new confirmed error-severity violations" (R1).
+      // Reusing it here would make `check --ci` failing to *open* the index
+      // indistinguishable in CI from the ruleset actually failing.
+      process.exitCode = 2;
       return;
     }
     process.stderr.write('Index is locked by another process — reading from a snapshot copy (may be slightly stale).\n');

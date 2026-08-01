@@ -13,6 +13,7 @@
  */
 
 import type { CodeStore } from '../../store/graph/codeStore';
+import { DEFAULT_RULE_ENTRIES } from '../rules/defaults';
 import { moduleMap, moduleMapFromEdges } from './moduleMap';
 import type { ModuleMap } from './moduleMap';
 
@@ -194,12 +195,10 @@ function starterRules(layers: Record<string, number>, moduleLayers: Record<strin
        .map(([n]) => n)
        .join(' <- ')}."),\n`
       : '';
+  // The inferred Layering rule is the only workspace-specific rule; the rest
+  // are the shipped defaults, which need no layer configuration.
   return `${header}
 ( ${layerLines ? `layers: { ${layerLines} },\n  module_layers: { ${modLines} },\n` : ''}  rules: [
-${layering}    (id: "no-module-cycles", tier: 1, kind: NoCycles(edge: "DEPENDS_ON", scope: Module),
-     explain: "Module dependency graph must stay a DAG."),
-    (id: "fanout-40", tier: 2, severity: warning, kind: MaxFanOut(max: 40),
-     explain: "Functions calling 40+ targets are doing too much."),
-  ] )
+${layering}${DEFAULT_RULE_ENTRIES}  ] )
 `;
 }

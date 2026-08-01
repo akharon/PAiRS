@@ -16,6 +16,7 @@ import { parseRon } from './ron';
 import { ConfigError, parseRuleSet, assertReadOnlyCypher } from './config';
 import { checkRules, globToRegExp, layerOfModule } from './evaluate';
 import { createBaseline, diffAgainstBaseline, ciFailures, parseBaseline } from './baseline';
+import { DEFAULT_RULES_RON, DEFAULT_RULE_COUNT } from './defaults';
 import { violationKey } from './types';
 import type { RuleSet } from './types';
 
@@ -102,6 +103,43 @@ describe('parseRuleSet', () => {
     expect(() => assertReadOnlyCypher(`MATCH (s) WHERE s.doc CONTAINS 'create table' RETURN s`, 'r')).not.toThrow();
     expect(() => assertReadOnlyCypher(`MATCH (s) // delete me later\nRETURN s`, 'r')).not.toThrow();
     expect(() => assertReadOnlyCypher(`MATCH (s) WHERE s.name = 'x' SET s.name = 'y'`, 'r')).toThrowError(/read-only/);
+  });
+});
+
+// -- Shipped defaults -------------------------------------------------------------
+
+describe('DEFAULT_RULES_RON', () => {
+  it('parses, and every rule is well-formed', () => {
+    const rs = parseRuleSet(DEFAULT_RULES_RON);
+    expect(rs.rules).toHaveLength(DEFAULT_RULE_COUNT);
+    for (const r of rs.rules) {
+      // explain is the self-correction payload — a terse one is useless to an agent.
+      expect(r.explain.length, `rule ${r.id} explain`).toBeGreaterThan(40);
+    }
+    expect(new Set(rs.rules.map((r) => r.id)).size).toBe(DEFAULT_RULE_COUNT);
+  });
+
+  it('needs no layer configuration', () => {
+    // A default that required layers/module_layers would throw here, and would
+    // silently never fire in a workspace that has none.
+    const rs = parseRuleSet(DEFAULT_RULES_RON);
+    expect(rs.layers).toEqual({});
+    expect(rs.rules.some((r) => r.kind.kind === 'Layering')).toBe(false);
+  });
+
+  it('reserves error severity for tier-1 defects, so a fresh install passes CI', () => {
+    const rs = parseRuleSet(DEFAULT_RULES_RON);
+    for (const r of rs.rules) {
+      if (r.severity === 'error') expect(r.tier, `rule ${r.id}`).toBe(1);
+    }
+  });
+
+  it('avoids edge kinds that only the Rust extractor emits', () => {
+    // PARAM/RETURNS/OF_TYPE/READS/WRITES are unpopulated outside Rust; a
+    // default built on them would be dead weight in every other language.
+    for (const dead of ['PARAM', 'RETURNS', 'OF_TYPE', 'READS', 'WRITES']) {
+      expect(DEFAULT_RULES_RON, `edge ${dead}`).not.toContain(`:${dead}]`);
+    }
   });
 });
 
