@@ -90,6 +90,23 @@ async function reindex(ws: Workspace): Promise<void> {
 }
 
 /**
+ * `pairs.rebuildIndex`: a plain reindex short-circuits unchanged files (mtime/
+ * size/hash) and often writes nothing at all, so it can't recover from a
+ * corrupted or stale-shaped store. This drops every table and reparses the
+ * whole workspace from scratch.
+ */
+async function rebuildIndex(ws: Workspace): Promise<void> {
+  await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Window, title: 'PAiRS: rebuilding index…' },
+    async () => {
+      await ws.store.reset();
+      await ws.indexer.fullIndex(ws.root);
+    }
+  );
+  await refreshStatus(ws);
+}
+
+/**
  * In-process Language Model Tools (plan.md 1.6) for Copilot agent mode,
  * registered via vscode.lm.registerTool against the extension's already-open
  * store — Kuzu is single-process (one lock holder, even for read-only opens),
@@ -210,7 +227,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   if (!folder) return; // no workspace → nothing to index
 
   const ws = await openWorkspace(folder.uri.fsPath, context.extensionPath);
-  context.subscriptions.push({ dispose: () => ws.store.dispose() });
+  context.subscriptions.push({
+    // Checkpoint rather than close: kuzu 0.11.3 segfaults on db.close() (see
+    // dispose()'s doc comment), so this is the only way to merge the WAL on
+    // shutdown. Best-effort — the process may already be exiting.
+    dispose: () => void ws.store.checkpoint().finally(() => ws.store.dispose()),
+  });
   context.subscriptions.push({ dispose: () => ws.parsers.dispose() });
 
   statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
@@ -222,6 +244,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   context.subscriptions.push(
     vscode.commands.registerCommand('pairs.reindex', () => reindex(ws).then(() => refreshDiagnostics(ws, diagnostics))),
+    vscode.commands.registerCommand('pairs.rebuildIndex', () => rebuildIndex(ws).then(() => refreshDiagnostics(ws, diagnostics))),
     vscode.commands.registerCommand('pairs.findSymbol', () => findSymbol(ws)),
     vscode.commands.registerCommand('pairs.checkRules', () => refreshDiagnostics(ws, diagnostics)),
     vscode.commands.registerCommand('pairs.moduleMap', async () => {
@@ -255,6 +278,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     indexFile: (p) => ws.indexer.indexFile(p),
     removeFile: (p) => ws.indexer.removeFile(p),
     onFlushed: async () => {
+      await ws.store.checkpoint();
       await refreshDiagnostics(ws, diagnostics);
       await refreshStatus(ws);
     },

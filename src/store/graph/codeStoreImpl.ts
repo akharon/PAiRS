@@ -1260,6 +1260,11 @@ export class KuzuCodeStore implements CodeStore {
   dispose(): void {
     // intentionally empty — see comment above
   }
+
+  /** See CodeStore.checkpoint doc. */
+  async checkpoint(): Promise<void> {
+    await this.exec('CHECKPOINT');
+  }
 }
 
 /** Tarjan's strongly-connected-components algorithm — cycles of length ≥ 2 only. */

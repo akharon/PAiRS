@@ -27,6 +27,10 @@
         "title": "PAiRS: Re-index Workspace"
       },
       {
+        "command": "pairs.rebuildIndex",
+        "title": "PAiRS: Rebuild Index From Scratch"
+      },
+      {
         "command": "pairs.findSymbol",
         "title": "PAiRS: Find Symbol"
       },

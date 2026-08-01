@@ -66,6 +66,7 @@ function fakeStore(initialFiles: FileRecord[] = []): CodeStore & { applied: stri
     async stats(): Promise<IndexStats> {
       return { ...EMPTY_STATS, files: files.size };
     },
+    async checkpoint(): Promise<void> {},
   } as unknown as CodeStore & { applied: string[]; removed: string[]; resolveCalls: number };
   return store;
 }

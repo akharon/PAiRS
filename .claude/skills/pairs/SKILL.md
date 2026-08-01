@@ -51,13 +51,6 @@ For automation and CI/CD, use `pairs` commands:
 - `pairs index` — full re-index (rarely needed; extension keeps it live).
 - `pairs init [--force]` — bootstrap `.pairs/rules.ron` from inferred layers.
 
-## If PAiRS Isn't Available
-
-If the extension isn't running, the index isn't built, or `pairs` commands
-error/return empty (stale or missing `.pairs/` graph), fall back to grep/Read
-directly rather than trusting a stale or absent graph. Try `pairs stats` first
-to check index health before assuming it's usable.
-
 ## When to Use PAiRS
 
 - **Finding definitions** — `find_symbol` / `outline` instead of grep/Read.

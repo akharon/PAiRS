@@ -71,6 +71,7 @@ export class IndexerImpl implements Indexer {
     // Full pass over every pending ref only after all files have declared —
     // forward references resolve here, not per-file.
     await this.deps.store.resolvePending();
+    await this.deps.store.checkpoint();
 
     const stats = await this.deps.store.stats();
     const kindCount = (...kinds: SymbolKind[]): number =>

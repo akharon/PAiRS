@@ -160,6 +160,14 @@ export interface CodeStore {
   stats(): Promise<IndexStats>;
   /** Drop and recreate all tables (`pairs index --rebuild`). */
   reset(): Promise<void>;
+  /**
+   * Force-merge the WAL into the main index file. Kuzu's autoCheckpoint only
+   * fires once the WAL crosses its threshold, and the store is never
+   * explicitly closed (dispose() is a no-op — see dispose() below), so
+   * without an explicit checkpoint the WAL can only ever grow across a
+   * session. Cheap to call when there's nothing to merge.
+   */
+  checkpoint(): Promise<void>;
   dispose(): void;
 }
 
