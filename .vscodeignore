@@ -5,14 +5,8 @@
 .pairs/**
 scripts/
 spikes/
-# kuzu is a native addon (esbuild external) — its runtime files must ship.
 # Everything else in node_modules is bundled into dist/ and excluded.
 node_modules/**
-!node_modules/kuzu/*.js
-!node_modules/kuzu/*.mjs
-!node_modules/kuzu/*.node
-!node_modules/kuzu/package.json
-!node_modules/kuzu/LICENSE
 *.md
 esbuild.mjs
 eslint.config.mjs

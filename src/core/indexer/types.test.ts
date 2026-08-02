@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isTestPath, TEST_PATH_REGEX, TEST_PATH_REGEX_CYPHER } from './types';
+import { isTestPath, TEST_PATH_REGEX, TEST_PATH_REGEX_SQL } from './types';
 
 /**
  * Adapted from vendor/reference-indexer/src/index/types.test.ts. The predicate
@@ -54,11 +54,25 @@ describe('isTestPath', () => {
   });
 });
 
-describe('TEST_PATH_REGEX_CYPHER', () => {
-  it('is the same pattern with backslashes doubled for a Cypher literal', () => {
-    // Kuzu unescapes `\\` to `\` inside a single-quoted literal, so the two
-    // forms must stay in lockstep or the rules match a different regex than
-    // isTestPath does.
-    expect(TEST_PATH_REGEX_CYPHER.replace(/\\\\/g, '\\')).toBe(TEST_PATH_REGEX);
+describe('TEST_PATH_REGEX_SQL', () => {
+  it('is the pattern verbatim — SQLite does not unescape string literals', () => {
+    // Kuzu unescaped `\\` to `\` inside a single-quoted literal, so the rules
+    // had to double every backslash. SQLite passes the bytes through, so any
+    // doubling here would make the shipped rules match nothing at all while
+    // still parsing cleanly — a silent failure this pins.
+    expect(TEST_PATH_REGEX_SQL).toBe(TEST_PATH_REGEX);
+    expect(TEST_PATH_REGEX_SQL).not.toContain('\\\\');
+  });
+
+  it('matches the same paths isTestPath does', () => {
+    const re = new RegExp(TEST_PATH_REGEX_SQL);
+    for (const p of ['src/a.test.ts', 'tests/x.rs', 'pkg/foo_test.go', 'src/__tests__/b.ts']) {
+      expect(re.test(p)).toBe(isTestPath(p));
+      expect(re.test(p)).toBe(true);
+    }
+    for (const p of ['src/latest.ts', 'src/contest/a.ts']) {
+      expect(re.test(p)).toBe(isTestPath(p));
+      expect(re.test(p)).toBe(false);
+    }
   });
 });

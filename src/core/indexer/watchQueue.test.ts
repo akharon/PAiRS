@@ -13,8 +13,8 @@ import { IndexerImpl } from './codeIndexerImpl';
 import { ExtractorImpl } from './extractorImpl';
 import { ParserRegistryImpl, fileQuerySource } from './parserRegistryImpl';
 import { nodeListWorkspaceFiles, nodeReadFile } from './nodeFsDeps';
-import { KuzuCodeStore } from '../../store/graph/codeStoreImpl';
-import { nodeKuzuDriver } from '../../store/graph/kuzuDriver';
+import { SqliteCodeStore } from '../../store/graph/sqliteCodeStore';
+import { nodeSqlDriver } from '../../store/graph/sqliteDriver';
 import type { CodeStore } from '../../store/graph/codeStore';
 
 const wait = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -85,11 +85,14 @@ describe('WatchQueue', () => {
 /** Canonical graph fingerprint: sorted symbols + sorted edges by stable keys. */
 async function fingerprint(store: CodeStore): Promise<string> {
   const syms = await store.query(
-    `MATCH (s:Symbol) RETURN s.file AS f, s.qualified AS q, s.kind AS k, s.startLine AS l ORDER BY f, q, k, l`
+    `SELECT file AS f, qualified AS q, kind AS k, startLine AS l FROM Symbol ORDER BY f, q, k, l`
   );
   const edges = await store.query(
-    `MATCH (a:Symbol)-[e:CALLS|READS|WRITES|DEPENDS_ON|IMPLEMENTS|EXTENDS|REFERENCES]->(b:Symbol)
-     RETURN label(e) AS t, a.qualified AS aq, a.file AS af, b.qualified AS bq, b.file AS bf, e.confidence AS c, e.test AS tt
+    `SELECT e.kind AS t, a.qualified AS aq, a.file AS af, b.qualified AS bq, b.file AS bf, e.confidence AS c, e.test AS tt
+     FROM Edge e
+     JOIN Symbol a ON a.id = e.src
+     JOIN Symbol b ON b.id = e.dst
+     WHERE e.kind IN ('CALLS','READS','WRITES','DEPENDS_ON','IMPLEMENTS','EXTENDS','REFERENCES')
      ORDER BY t, af, aq, bf, bq, c`
   );
   return JSON.stringify({ syms, edges });
@@ -104,7 +107,7 @@ function makeWorkspace(dir: string, files: Record<string, string>): void {
 }
 
 async function openIndexer(root: string): Promise<{ store: CodeStore; indexer: IndexerImpl; dispose(): void }> {
-  const store = await KuzuCodeStore.open(path.join(root, '.pairs', 'index'), nodeKuzuDriver);
+  const store = await SqliteCodeStore.open(path.join(root, '.pairs', 'index.db'), nodeSqlDriver);
   const parsers = new ParserRegistryImpl(
     path.join(__dirname, '../../../dist/grammars'),
     fileQuerySource(path.join(__dirname, '../../../dist/queries'))
@@ -129,7 +132,7 @@ describe('re-park on target change (R7)', () => {
     });
     const w = await openIndexer(root);
     await w.indexer.fullIndex(root);
-    const before = await w.store.query(`MATCH (:Symbol)-[e:CALLS]->(s:Symbol {name:'target'}) RETURN count(e) AS c`);
+    const before = await w.store.query(`SELECT COUNT(*) AS c FROM Edge e JOIN Symbol s ON s.id = e.dst WHERE e.kind = 'CALLS' AND s.name = 'target'`);
     expect(Number(before[0]!.c)).toBe(1);
 
     // Edit lib.rs WITHOUT touching user.rs: the old `target` symbol is
@@ -137,7 +140,7 @@ describe('re-park on target change (R7)', () => {
     // new symbol, not silently vanish.
     fs.writeFileSync(path.join(root, 'src/lib.rs'), `pub fn target() { let _x = 1; }\npub fn extra() {}\n`);
     await w.indexer.indexFile('src/lib.rs');
-    const after = await w.store.query(`MATCH (:Symbol)-[e:CALLS]->(s:Symbol {name:'target'}) RETURN count(e) AS c`);
+    const after = await w.store.query(`SELECT COUNT(*) AS c FROM Edge e JOIN Symbol s ON s.id = e.dst WHERE e.kind = 'CALLS' AND s.name = 'target'`);
     expect(Number(after[0]!.c)).toBe(1);
 
     // Delete lib.rs entirely: the edge is gone but the claim survives as a
@@ -146,7 +149,7 @@ describe('re-park on target change (R7)', () => {
     await w.indexer.removeFile('src/lib.rs');
     fs.writeFileSync(path.join(root, 'src/lib.rs'), `pub fn target() {}\n`);
     await w.indexer.indexFile('src/lib.rs');
-    const restored = await w.store.query(`MATCH (:Symbol)-[e:CALLS]->(s:Symbol {name:'target'}) RETURN count(e) AS c`);
+    const restored = await w.store.query(`SELECT COUNT(*) AS c FROM Edge e JOIN Symbol s ON s.id = e.dst WHERE e.kind = 'CALLS' AND s.name = 'target'`);
     expect(Number(restored[0]!.c)).toBe(1);
     w.dispose();
   }, 60_000);

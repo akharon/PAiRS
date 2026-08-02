@@ -1,15 +1,13 @@
 // Two bundles: the VS Code extension (vscode external) and the standalone
 // MCP server / CLI. External modules marked below are not bundled:
 // - vscode: provided by VS Code extension host
-// - kuzu: native addon (R4) — must be bundled as a platform-specific binary
-//   per .vsix by scripts/package.sh, not inlined by esbuild
 // web-tree-sitter itself is bundled fine (pure JS); its grammar/runtime .wasm
 // assets are copied into dist/grammars by scripts/fetch-grammars.mjs and
 // located at runtime via an explicit path, not import.meta.url resolution.
 //
-// Adapted from vendor/reference-indexer/esbuild.mjs: dropped the
-// @huggingface/transformers and node:sqlite externals (no embeddings, no
-// memory subsystem); added kuzu.
+// The store runs on `node:sqlite`, a Node 22+ builtin — no native addon, so
+// nothing platform-specific to ship and one .vsix covers every platform.
+// (This replaced KuzuDB, which needed a per-platform prebuilt binary.)
 import * as esbuild from 'esbuild';
 import { existsSync } from 'node:fs';
 import { copyGrammarsAndQueries } from './scripts/fetch-grammars.mjs';
@@ -24,7 +22,7 @@ const common = {
   target: 'node22',
   format: 'cjs',
   sourcemap: true,
-  external: ['vscode', 'kuzu'],
+  external: ['vscode', 'node:sqlite'],
   // web-tree-sitter's emscripten glue calls createRequire(import.meta.url);
   // esbuild's CJS output rewrites import.meta to {}, so shim the url.
   define: { 'import.meta.url': '__importMetaUrl' },

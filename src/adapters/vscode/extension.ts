@@ -4,7 +4,7 @@
  * touches below the adapter boundary is the same editor-agnostic core the CLI
  * uses, so the extension host and headless CLI share one store and indexer.
  *
- * On activation it: opens the workspace's `.pairs/index` Kuzu store, indexes
+ * On activation it: opens the workspace's `.pairs/index.db` SQLite store, indexes
  * the workspace, registers the code tools as VS Code Language Model Tools
  * (Copilot agent mode calls them in-process against the open store), writes
  * Claude Code skill files into the workspace so Claude drives the `pairs` CLI
@@ -24,8 +24,8 @@ import { IndexerImpl } from '../../core/indexer/codeIndexerImpl';
 import { isSkippedPath, nodeListWorkspaceFiles, nodeReadFile } from '../../core/indexer/nodeFsDeps';
 import { langForPath } from '../../core/indexer/parserRegistry';
 import { WatchQueue } from '../../core/indexer/watchQueue';
-import { KuzuCodeStore } from '../../store/graph/codeStoreImpl';
-import { nodeKuzuDriver } from '../../store/graph/kuzuDriver';
+import { SqliteCodeStore } from '../../store/graph/sqliteCodeStore';
+import { nodeSqlDriver } from '../../store/graph/sqliteDriver';
 import type { CodeStore } from '../../store/graph/codeStore';
 import type { Indexer } from '../../core/indexer/codeIndexer';
 import { moduleMap } from '../../core/analyze/moduleMap';
@@ -48,12 +48,12 @@ interface Workspace {
 let statusBar: vscode.StatusBarItem | undefined;
 
 async function openWorkspace(root: string, extensionPath: string): Promise<Workspace> {
-  const dbPath = path.join(root, '.pairs', 'index');
+  const dbPath = path.join(root, '.pairs', 'index.db');
   await fs.mkdir(path.dirname(dbPath), { recursive: true });
   // Bundled next to dist/extension.js by scripts/fetch-grammars.mjs.
   const grammarsDir = path.join(extensionPath, 'dist', 'grammars');
   const queriesDir = path.join(extensionPath, 'dist', 'queries');
-  const store = await KuzuCodeStore.open(dbPath, nodeKuzuDriver);
+  const store = await SqliteCodeStore.open(dbPath, nodeSqlDriver);
   const parsers = new ParserRegistryImpl(grammarsDir, fileQuerySource(queriesDir));
   const indexer = new IndexerImpl({
     store,
@@ -109,8 +109,7 @@ async function rebuildIndex(ws: Workspace): Promise<void> {
 /**
  * In-process Language Model Tools (plan.md 1.6) for Copilot agent mode,
  * registered via vscode.lm.registerTool against the extension's already-open
- * store — Kuzu is single-process (one lock holder, even for read-only opens),
- * so a separately spawned process could never share the db. Names/schemas
+ * store. Names/schemas
  * come from package.json's languageModelTools block, generated from
  * core/tools/tools.ts by scripts/sync-lm-tools.mjs.
  */
@@ -289,9 +288,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   const ws = await openWorkspace(folder.uri.fsPath, context.extensionPath);
   context.subscriptions.push({
-    // Checkpoint rather than close: kuzu 0.11.3 segfaults on db.close() (see
-    // dispose()'s doc comment), so this is the only way to merge the WAL on
-    // shutdown. Best-effort — the process may already be exiting.
+    // Merge the WAL, then close. Best-effort — the process may already be
+    // exiting.
     dispose: () => void ws.store.checkpoint().finally(() => ws.store.dispose()),
   });
   context.subscriptions.push({ dispose: () => ws.parsers.dispose() });
@@ -310,9 +308,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('pairs.checkRules', () => checkRulesCommand(ws, diagnostics)),
     vscode.commands.registerCommand('pairs.moduleMap', async () => {
       // Read-only module-graph webview (plan.md 3.5): Louvain subsystems as
-      // columns, drift edges red. Self-contained HTML, inline script only
-      // (CSP forbids remote scripts) — the script only filters/collapses the
-      // view and asks the extension to reveal a module, it never mutates the graph.
+      // columns ordered by dependency layer, drift edges red, cycle edges
+      // amber. Self-contained HTML, inline script only (CSP forbids remote
+      // scripts) — the script filters/focuses/pans the view and asks the
+      // extension to reveal a module (Enter or double-click on a node), it
+      // never mutates the graph.
       const map = await moduleMap(ws.store);
       const panel = vscode.window.createWebviewPanel('pairsModuleMap', 'PAiRS Module Map', vscode.ViewColumn.Active, { enableScripts: true });
       panel.webview.html = moduleMapHtml(map);
@@ -375,6 +375,5 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 }
 
 export function deactivate(): void {
-  // Stores intentionally not closed here (kuzu segfaults on close; dispose() is
-  // a no-op) — subscriptions handle disposal of parsers/status bar.
+  // Subscriptions handle disposal of the store, parsers and status bar.
 }

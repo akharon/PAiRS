@@ -124,15 +124,27 @@ export const codeToolSchemas = {
 
   module_map: {
     description:
-      'The module (directory) dependency graph with its detected subsystems ' +
-      '(Louvain clusters) and explicit-vs-implicit DRIFT: how much of the ' +
-      'dependency weight crosses cluster boundaries. Call on "what are the ' +
-      'subsystems", "is the architecture drifting", or before a big refactor. ' +
-      'High drift means the folder layout and the real dependencies disagree.',
+      'The module (directory) dependency graph: detected subsystems (Louvain ' +
+      'clusters), module CYCLES, each module\'s dependency LAYER and fan-in/' +
+      'fan-out, the most depended-on modules, and explicit-vs-implicit DRIFT ' +
+      '(how much dependency weight crosses cluster boundaries). Call on "what ' +
+      'are the subsystems", "where does this belong", "what is safe to change", ' +
+      '"is the architecture drifting", or before a big refactor. High drift ' +
+      'means the folder layout and the real dependencies disagree; cycles mean ' +
+      'no layering holds at all.',
     input: z.object({
       limit: z.number().int().min(1).max(100).default(20).describe('Max drift edges to list.'),
       depth: z.number().int().min(1).max(20).optional().describe('Collapse modules to this many leading path segments — use on large monorepos to keep the map legible.'),
       resolution: z.number().min(0.1).max(10).default(1).describe('Louvain resolution: >1 finds more/smaller subsystems, <1 fewer/larger ones.'),
+      boundary: z
+        .string()
+        .optional()
+        .describe(
+          'Drill into one edge instead of the whole map: "<from module> -> <to module>" ' +
+            '(module keys as printed by a plain module_map call). Returns the symbols of ' +
+            'the target module that the source actually uses, with reference sites — i.e. ' +
+            'exactly what breaking that dependency would require.'
+        ),
     }),
   },
 

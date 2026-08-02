@@ -1,6 +1,6 @@
 /**
- * Tool executor rendering, against a real Kuzu store (temp dir, never closed —
- * kuzu segfaults on close). These pin the agent-facing text: the `file:line`
+ * Tool executor rendering, against a real SQLite store in a temp dir. These
+ * pin the agent-facing text: the `file:line`
  * citation, the ambiguity prompt, and that impact/analyze reach the store.
  */
 
@@ -8,8 +8,8 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { KuzuCodeStore } from '../../store/graph/codeStoreImpl';
-import { nodeKuzuDriver } from '../../store/graph/kuzuDriver';
+import { SqliteCodeStore } from '../../store/graph/sqliteCodeStore';
+import { nodeSqlDriver } from '../../store/graph/sqliteDriver';
 import { createExecutors, type Executors } from './executors';
 import type { CodeStore } from '../../store/graph/codeStore';
 import type { FileExtraction, NewSymbol, RawRef } from '../indexer/types';
@@ -26,7 +26,7 @@ describe('tool executors', () => {
   let x: Executors;
   beforeAll(async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pairs-exec-'));
-    const store = await KuzuCodeStore.open(path.join(dir, 'g.kz'), nodeKuzuDriver);
+    const store = await SqliteCodeStore.open(path.join(dir, 'g.db'), nodeSqlDriver);
     await store.applyExtraction(ext('core.rs', [sym('core', 'core')]));
     await store.applyExtraction(ext('mid.rs', [sym('mid', 'mid')], [fromFn('core', null)]));
     // Two same-named `login` to exercise the ambiguity path.
@@ -99,7 +99,7 @@ describe('rename_symbol executor', () => {
 
   beforeAll(async () => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pairs-rename-'));
-    const store = await KuzuCodeStore.open(path.join(dir, 'g.kz'), nodeKuzuDriver);
+    const store = await SqliteCodeStore.open(path.join(dir, 'g.db'), nodeSqlDriver);
 
     fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
     // core.rs: line 10 has the def line (module stub occupies lines 1-3, blank
@@ -136,7 +136,7 @@ describe('rename_symbol executor', () => {
   });
 
   it('reports unavailable without a root', async () => {
-    const store = await KuzuCodeStore.open(path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pairs-rename-noroot-')), 'g.kz'), nodeKuzuDriver);
+    const store = await SqliteCodeStore.open(path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pairs-rename-noroot-')), 'g.db'), nodeSqlDriver);
     const noRoot = createExecutors({ store });
     expect(await noRoot.rename_symbol({ name: 'anything', newName: 'x', path: undefined })).toContain('unavailable');
   });
@@ -147,7 +147,7 @@ describe('rule tool executors', () => {
   let rulesPath: string;
   beforeAll(async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pairs-ruletool-'));
-    const store = await KuzuCodeStore.open(path.join(dir, 'g.kz'), nodeKuzuDriver);
+    const store = await SqliteCodeStore.open(path.join(dir, 'g.db'), nodeSqlDriver);
     // busy() calls two targets; MaxFanOut(max: 1) flags it.
     await store.applyExtraction(ext('u/t.rs', [sym('t1', 't1'), sym('t2', 't2')]));
     await store.applyExtraction(ext('u/busy.rs', [sym('busy', 'busy')], [fromFn('t1', null), fromFn('t2', null)]));
@@ -192,9 +192,14 @@ describe('moduleMap clustering', () => {
   // the integration smoke test — here we isolate the graph algorithm).
   // moduleMap's query now aggregates in Cypher (`count(*) AS n`, grouped by
   // confidence), so the fake rows already carry the grouped shape.
+  // Two queries now: the dep aggregation, and the per-file symbol counts that
+  // size the map's nodes — dispatch on the Cypher so each gets its own shape.
   function fakeStore(fileDeps: Array<[string, string, number] | [string, string, number, string]>): CodeStore {
     const rows = fileDeps.map(([af, bf, n, conf]) => ({ af, bf, n, conf: conf ?? 'resolved' }));
-    return { query: async () => rows } as unknown as CodeStore;
+    const files = [...new Set(fileDeps.flatMap(([af, bf]) => [af, bf]))].map((f) => ({ f, n: 1 }));
+    return {
+      query: async (cypher: string) => (cypher.includes('DEPENDS_ON') ? rows : files),
+    } as unknown as CodeStore;
   }
 
   it('aggregates file deps to directory modules and clusters them', async () => {

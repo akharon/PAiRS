@@ -18,8 +18,8 @@
  * documented v1 limitations.
  *
  * All 12 language fixtures are indexed into ONE shared store (one namespace
- * dir per language) rather than one Kuzu database per language: each open
- * Database reserves a large mmap region and is never closed (kuzu segfaults
+ * dir per language) rather than one database per language: each open
+ * Database holds an OS file handle (historically never closed — kuzu segfaulted
  * on close, the convention every other *.test.ts here follows), so opening a
  * dozen in one process exhausts the buffer manager ("Mmap ... failed"). A
  * side effect: every fixture's called function must have a name unique
@@ -31,7 +31,7 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { moduleMap } from '../core/analyze/moduleMap';
 import type { CodeLang } from '../core/indexer/types';
-import type { KuzuCodeStore } from '../store/graph/codeStoreImpl';
+import type { SqliteCodeStore } from '../store/graph/sqliteCodeStore';
 import { indexProject } from './indexProject';
 
 interface LangCase {
@@ -172,7 +172,7 @@ const CASES: Record<CodeLang, LangCase> = {
 };
 
 describe('polyglot cross-file contract', () => {
-  let store: KuzuCodeStore;
+  let store: SqliteCodeStore;
 
   beforeAll(async () => {
     const files: Record<string, string> = {};
@@ -189,7 +189,7 @@ describe('polyglot cross-file contract', () => {
       expect(filePaths).toContain(c.bPath);
 
       const dependsRows = await store.query(
-        `MATCH (a:Symbol)-[e:DEPENDS_ON]->(b:Symbol) WHERE a.file = '${c.bPath}' AND b.file = '${c.aPath}' RETURN count(*) AS n`
+        `SELECT COUNT(*) AS n FROM Edge e JOIN Symbol a ON a.id = e.src JOIN Symbol b ON b.id = e.dst WHERE e.kind = 'DEPENDS_ON' AND a.file = '${c.bPath}' AND b.file = '${c.aPath}'`
       );
       const dependsCount = Number(dependsRows[0]?.n ?? 0);
       if (c.knownGap?.DEPENDS_ON) {
@@ -199,7 +199,7 @@ describe('polyglot cross-file contract', () => {
       }
 
       const callRows = await store.query(
-        `MATCH (a:Symbol)-[e:CALLS]->(b:Symbol) WHERE a.file = '${c.bPath}' AND b.file = '${c.aPath}' RETURN count(*) AS n`
+        `SELECT COUNT(*) AS n FROM Edge e JOIN Symbol a ON a.id = e.src JOIN Symbol b ON b.id = e.dst WHERE e.kind = 'CALLS' AND a.file = '${c.bPath}' AND b.file = '${c.aPath}'`
       );
       const callCount = Number(callRows[0]?.n ?? 0);
       if (c.knownGap?.CALLS) {
@@ -233,7 +233,7 @@ describe('polyglot cross-file contract', () => {
     // './x', '/root/util') that never resolves and sits in PendingRef forever
     // because it was fed to the name ladder instead of importPath.ts.
     const rows = await store.query(
-      `MATCH (p:PendingRef) WHERE p.qualifiedName STARTS WITH '.' OR p.qualifiedName STARTS WITH '/' RETURN p.qualifiedName AS q`
+      `SELECT qualifiedName AS q FROM PendingRef WHERE qualifiedName LIKE '.%' OR qualifiedName LIKE '/%'`
     );
     expect(rows.map((r) => r.q)).toEqual([]);
   });

@@ -38,7 +38,7 @@ coverage/
 .DS_Store
 
 # PAiRS derived index — disposable, rebuildable from source, never committed
-# (holds the KuzuDB code graph, cache, and build-state sidecar)
+# (holds the SQLite code graph, cache, and build-state sidecar)
 .pairs/
 
 # rules.ron and baseline.json ARE committed (team-owned policy) — they live

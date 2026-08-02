@@ -1,6 +1,6 @@
 /**
  * Rule engine: RON parsing, config validation, and evaluation against a real
- * Kuzu store (same fixture style as resolver.test.ts — the rules are Cypher,
+ * SQLite store (same fixture style as resolver.test.ts — the rules are SQL,
  * so a fake store would only test the fake).
  */
 
@@ -8,16 +8,16 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { KuzuCodeStore } from '../../store/graph/codeStoreImpl';
-import { nodeKuzuDriver } from '../../store/graph/kuzuDriver';
+import { SqliteCodeStore } from '../../store/graph/sqliteCodeStore';
+import { nodeSqlDriver } from '../../store/graph/sqliteDriver';
 import type { CodeStore } from '../../store/graph/codeStore';
 import type { FileExtraction, NewSymbol, RawRef } from '../indexer/types';
 import { parseRon } from './ron';
-import { ConfigError, parseRuleSet, assertReadOnlyCypher } from './config';
+import { ConfigError, parseRuleSet, assertReadOnlySqlRule } from './config';
 import { checkRules, globToRegExp, layerOfModule } from './evaluate';
 import { createBaseline, diffAgainstBaseline, ciFailures, parseBaseline } from './baseline';
 import { DEFAULT_RULES_RON, DEFAULT_RULE_COUNT } from './defaults';
-import { TEST_PATH_REGEX_CYPHER } from '../indexer/types';
+import { TEST_PATH_REGEX_SQL } from '../indexer/types';
 import { violationKey } from './types';
 import type { RuleSet } from './types';
 
@@ -31,14 +31,14 @@ describe('parseRon', () => {
         rules: [
           (id: "no-skip", tier: 1, kind: Layering(direction: DownOnly, max_skip: 0),
            explain: "See docs."),
-          (id: "custom", tier: 2, kind: Cypher("MATCH (s:Symbol) RETURN s.*"), explain: "x"),
+          (id: "custom", tier: 2, kind: Sql("SELECT * FROM Symbol s"), explain: "x"),
         ] )
     `) as Record<string, unknown>;
     expect((doc.layers as Record<string, number>).core).toBe(1);
     const rules = doc.rules as Array<Record<string, unknown>>;
     expect(rules).toHaveLength(2);
     expect((rules[0]!.kind as { variant: string }).variant).toBe('Layering');
-    expect((rules[1]!.kind as { args: unknown[] }).args[0]).toBe('MATCH (s:Symbol) RETURN s.*');
+    expect((rules[1]!.kind as { args: unknown[] }).args[0]).toBe('SELECT * FROM Symbol s');
   });
 
   it('handles escapes, Some/None, bools, trailing commas, block comments', () => {
@@ -94,16 +94,16 @@ describe('parseRuleSet', () => {
     expect(() => parseRuleSet('( rules: [ (id: "x", kind: Bogus(), explain: "e") ] )')).toThrowError(/unknown rule kind/);
   });
 
-  it('rejects Layering without layers, and mutating Cypher', () => {
+  it('rejects Layering without layers, and mutating SQL', () => {
     expect(() => parseRuleSet('( rules: [ (id: "l", kind: Layering(), explain: "e") ] )')).toThrowError(/non-empty layers/);
     expect(() =>
-      parseRuleSet('( rules: [ (id: "c", kind: Cypher("MATCH (s) DELETE s"), explain: "e") ] )')
+      parseRuleSet('( rules: [ (id: "c", kind: Sql("DELETE FROM Symbol"), explain: "e") ] )')
     ).toThrowError(ConfigError);
-    expect(() => assertReadOnlyCypher('CREATE (n)', 'r')).toThrowError(/read-only/);
+    expect(() => assertReadOnlySqlRule('INSERT INTO Symbol VALUES(1)', 'r')).toThrowError(/read-only/);
     // Keywords inside string literals or comments are data, not mutation.
-    expect(() => assertReadOnlyCypher(`MATCH (s) WHERE s.doc CONTAINS 'create table' RETURN s`, 'r')).not.toThrow();
-    expect(() => assertReadOnlyCypher(`MATCH (s) // delete me later\nRETURN s`, 'r')).not.toThrow();
-    expect(() => assertReadOnlyCypher(`MATCH (s) WHERE s.name = 'x' SET s.name = 'y'`, 'r')).toThrowError(/read-only/);
+    expect(() => assertReadOnlySqlRule(`SELECT * FROM Symbol s WHERE s.doc LIKE '%create table%'`, 'r')).not.toThrow();
+    expect(() => assertReadOnlySqlRule(`SELECT * FROM Symbol -- delete me later\n`, 'r')).not.toThrow();
+    expect(() => assertReadOnlySqlRule(`UPDATE Symbol SET name = 'y'`, 'r')).toThrowError(/read-only/);
   });
 });
 
@@ -135,14 +135,15 @@ describe('DEFAULT_RULES_RON', () => {
     }
   });
 
-  it('survives RON unescaping with a Cypher-ready test-path regex', () => {
-    // The pattern crosses two unescaping layers (RON, then Kuzu). If either
-    // doubling is off the rules still parse, they just silently match nothing.
+  it('survives RON unescaping with a SQL-ready test-path regex', () => {
+    // The pattern crosses one unescaping layer (RON); SQLite then takes it
+    // verbatim. If the doubling is off the rules still parse, they just
+    // silently match nothing.
     const rs = parseRuleSet(DEFAULT_RULES_RON);
-    const queries = rs.rules.flatMap((r) => (r.kind.kind === 'Cypher' ? [r.kind.query] : []));
+    const queries = rs.rules.flatMap((r) => (r.kind.kind === 'Sql' ? [r.kind.query] : []));
     const withTestPath = queries.filter((q) => q.includes('regexp_matches'));
     expect(withTestPath.length).toBeGreaterThan(0);
-    for (const q of withTestPath) expect(q).toContain(TEST_PATH_REGEX_CYPHER);
+    for (const q of withTestPath) expect(q).toContain(TEST_PATH_REGEX_SQL);
   });
 
   it('identifies test files by path shape, never by substring', () => {
@@ -197,11 +198,11 @@ const use_ = (specifier: string, line = 1): FileExtraction['uses'][number] =>
 const callFrom = (name: string, qualifiedName: string | null = null): RawRef =>
   ({ fromIndex: 1, name, qualifiedName, kind: 'CALLS', line: 5 });
 
-describe('checkRules over a real Kuzu store', () => {
+describe('checkRules over a real SQLite store', () => {
   let store: CodeStore;
   beforeAll(async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pairs-rules-'));
-    store = await KuzuCodeStore.open(path.join(dir, 'graph.kz'), nodeKuzuDriver);
+    store = await SqliteCodeStore.open(path.join(dir, 'graph.db'), nodeSqlDriver);
     // Layers: src/core(1) <- src/services(2) <- src/ui(3).
     await store.applyExtraction(extraction('src/core/kernel.rs', [sym('boot', 'crate::core::kernel::boot'), sym('secret', 'crate::core::kernel::secret', 'function', false)]));
     await store.applyExtraction(
@@ -289,9 +290,9 @@ describe('checkRules over a real Kuzu store', () => {
     expect(vb[0]!.nodes[1]!.qualified).toBe('crate::core::kernel::secret');
   });
 
-  it('Cypher rule returns citable rows and rejects mutation at parse', async () => {
+  it('Sql rule returns citable rows and rejects mutation at parse', async () => {
     const rs = parseRuleSet(
-      `( rules: [ (id: "raw", tier: 2, kind: Cypher("MATCH (s:Symbol) WHERE s.name = 'busy' RETURN s.*"), explain: "raw") ] )`
+      `( rules: [ (id: "raw", tier: 2, kind: Sql("SELECT s.qualified AS qualified, s.file AS file, s.startLine AS line FROM Symbol s WHERE s.name = 'busy'"), explain: "raw") ] )`
     );
     const { violations } = await checkRules(store, rs);
     expect(violations).toHaveLength(1);
@@ -299,12 +300,12 @@ describe('checkRules over a real Kuzu store', () => {
     expect(violations[0]!.nodes[0]!.file).toBe('src/util/busy.rs');
   });
 
-  it('Cypher rule honors an exposed confidence column (fuzzy → possible)', async () => {
+  it('Sql rule honors an exposed confidence column (fuzzy → possible)', async () => {
     // A query that exposes e.confidence: rows derived through fuzzy edges must
     // report `possible` (R1 — only confirmed findings fail CI), while a query
     // exposing no confidence column stays confirmed.
     const rs = parseRuleSet(
-      `( rules: [ (id: "raw-conf", tier: 2, kind: Cypher("MATCH (a:Symbol)-[e:CALLS]->(s:Symbol) RETURN s.qualified AS qualified, s.file AS file, s.startLine AS line, e.confidence AS confidence"), explain: "conf") ] )`
+      `( rules: [ (id: "raw-conf", tier: 2, kind: Sql("SELECT s.qualified AS qualified, s.file AS file, s.startLine AS line, e.confidence AS confidence FROM Edge e JOIN Symbol s ON s.id = e.dst WHERE e.kind = 'CALLS'"), explain: "conf") ] )`
     );
     const { violations } = await checkRules(store, rs);
     expect(violations.length).toBeGreaterThan(0);
@@ -316,7 +317,7 @@ describe('checkRules over a real Kuzu store', () => {
     }
     // And a fuzzy edge, when present, must not surface as confirmed:
     const edgeRows = await store.query(
-      `MATCH (a:Symbol)-[e:CALLS]->(s:Symbol) RETURN s.qualified AS q, e.confidence AS conf`
+      `SELECT s.qualified AS q, e.confidence AS conf FROM Edge e JOIN Symbol s ON s.id = e.dst WHERE e.kind = 'CALLS'`
     );
     const fuzzyTargets = new Set(edgeRows.filter((r) => String(r.conf) === 'fuzzy').map((r) => String(r.q)));
     for (const v of violations) {

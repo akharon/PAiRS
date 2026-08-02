@@ -7,7 +7,7 @@
  * S1 receiver-inference deferral rides on — its recall against grep ground truth
  * is the Phase 1 gate (V2 ≥ 95%).
  *
- * Pure core: no vscode, no Kuzu specifics — walks the CodeStore interface only
+ * Pure core: no vscode, no storage-engine specifics — walks the CodeStore interface only
  * (R10). Fuzzy edges are included but marked, matching plan.md 2.4's "possible"
  * class: a caller reached only through a fuzzy edge is still a caller worth
  * surfacing, just lower-confidence.

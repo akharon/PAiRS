@@ -23,7 +23,10 @@ function ownTsFiles(): Record<string, string> {
     .filter(Boolean);
   const files: Record<string, string> = {};
   for (const rel of relPaths) {
-    files[rel] = fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8');
+    // git ls-files reports staged deletions too; skip anything already gone.
+    const abs = path.join(REPO_ROOT, rel);
+    if (!fs.existsSync(abs)) continue;
+    files[rel] = fs.readFileSync(abs, 'utf8');
   }
   return files;
 }

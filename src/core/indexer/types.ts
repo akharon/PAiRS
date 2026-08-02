@@ -248,7 +248,7 @@ export interface IndexStats {
 
 /**
  * Test-path predicate as regex *source*, so the same definition can be handed
- * to Cypher's `regexp_matches` (default rules, untested()) and to JS. Substring
+ * to SQL's `regexp_matches` (default rules, untested()) and to JS. Substring
  * tests like `contains(file, 'test')` are not usable here: they also match
  * `latest.ts`, `contest/`, `testimonials/`, and they miss `.spec.ts` entirely —
  * both directions produced default-rule false positives.
@@ -257,10 +257,15 @@ export const TEST_PATH_REGEX =
   '(^|/)(tests?|__tests__)/|\\.(test|spec)\\.[a-zA-Z]+$|_test\\.(rs|go|py)$|(^|/)tests\\.rs$|(^|/)(test_[^/]+|conftest)\\.py$';
 
 /**
- * {@link TEST_PATH_REGEX} with every backslash doubled, ready to paste inside a
- * Cypher single-quoted literal — Kuzu unescapes `\\` to `\` when parsing one.
+ * {@link TEST_PATH_REGEX} as it must appear inside a SQL single-quoted literal.
+ *
+ * Identical to the source: unlike Kuzu (which unescaped `\\` to `\` when
+ * parsing a literal, so rules had to double every backslash), SQLite passes
+ * the bytes through untouched. Doubling them here would make every shipped
+ * rule silently match nothing. Kept as a named export so the intent is
+ * explicit at each use site rather than implied.
  */
-export const TEST_PATH_REGEX_CYPHER = TEST_PATH_REGEX.replace(/\\/g, '\\\\');
+export const TEST_PATH_REGEX_SQL = TEST_PATH_REGEX;
 
 const TEST_PATH_RE = new RegExp(TEST_PATH_REGEX);
 

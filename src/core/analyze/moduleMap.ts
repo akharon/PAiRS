@@ -14,7 +14,13 @@
  * signal: how much the *detected* clusters disagree with the *directory tree*
  * partition (top-level segment) — see layoutDrift() below.
  *
- * Pure core: walks the CodeStore query() escape hatch only, no vscode/Kuzu
+ * On top of the clustering the map carries the objective structure too:
+ * per-module fan-in/fan-out + Martin instability, the dependency layer
+ * (longest path over the cycle-condensed graph), and the module cycles
+ * themselves (SCCs). Clustering is a judgement call; cycles and layers are
+ * not, and they are what a refactor actually has to respect.
+ *
+ * Pure core: walks the CodeStore query() escape hatch only, no vscode/store
  * specifics. Louvain is self-contained (no graph library) — a multi-level
  * modularity-gain pass, deterministic given a stable node order.
  */
@@ -25,6 +31,53 @@ export interface ModuleCluster {
   id: number;
   modules: string[];
 }
+
+/** Per-module structural facts, derived from the module edge list (+ store sizes when available). */
+export interface ModuleMetric {
+  module: string;
+  /** Louvain subsystem the module belongs to. */
+  cluster: number;
+  /** Distinct modules that depend on this one. */
+  fanIn: number;
+  /** Distinct modules this one depends on. */
+  fanOut: number;
+  /** Inbound / outbound edge weight (confidence-weighted file deps). */
+  weightIn: number;
+  weightOut: number;
+  /**
+   * Martin instability, fanOut / (fanIn + fanOut): 0 = pure foundation (only
+   * depended on), 1 = pure leaf (only depends). 0.5 for an isolated module.
+   */
+  instability: number;
+  /**
+   * Dependency depth over the cycle-condensed graph: 0 = depends on no other
+   * module, N = longest chain of N modules below it. Modules inside one cycle
+   * share a layer (a cycle has no internal ordering).
+   */
+  layer: number;
+  /** Files / symbols in the module; 0 when the store didn't report sizes. */
+  files: number;
+  symbols: number;
+  /**
+   * Share of the module's dependency traffic that stays inside it:
+   * internal / (internal + inbound + outbound). 1 = self-contained, 0 = every
+   * dependency it has crosses a boundary (a pass-through or a junk drawer).
+   * `null` for single-file modules, where the measure is meaningless — the
+   * map is built from file→file edges, so a one-file module can never show
+   * internal traffic.
+   */
+  cohesion: number | null;
+}
+
+/** Per-module facts that don't come from the module edge list itself. */
+export interface ModuleFacts {
+  files: number;
+  symbols: number;
+  /** Weight of file→file deps that stay within the module. */
+  internalWeight: number;
+}
+
+export type ModuleFactsMap = ReadonlyMap<string, ModuleFacts>;
 
 export interface ModuleMapOptions {
   /**
@@ -56,6 +109,21 @@ export interface ModuleMap {
    * layout match the implicit dependency structure" signal.
    */
   layoutDrift: number;
+  /** Per-module fan-in/out, instability and dependency layer, sorted by module. */
+  metrics: ModuleMetric[];
+  /**
+   * Module dependency cycles: strongly-connected components of size ≥ 2,
+   * largest first. Unlike drift (a clustering judgement) these are objective —
+   * no layering can be valid while they exist.
+   */
+  cycles: string[][];
+  /**
+   * Edges whose removal makes the module graph acyclic — the concrete answer
+   * to "how do I break these cycles", cheapest-first. Greedy, so not provably
+   * minimal, but it is a real cut set: remove all of them and no cycle
+   * remains. Empty when there are no cycles.
+   */
+  cycleCuts: Array<{ from: string; to: string; weight: number }>;
 }
 
 const SCAFFOLD_SEGMENTS = new Set(['src', 'crates', 'packages', 'libs', 'apps', 'lib']);
@@ -91,21 +159,31 @@ export async function moduleMap(store: CodeStore, opts: ModuleMapOptions = {}): 
   // during the V7 self-review. Down-weighting instead of dropping keeps that
   // signal while not letting ambiguous edges dominate the drift calculation.
   const rows = await store.query(
-    `MATCH (a:Symbol)-[e:DEPENDS_ON]->(b:Symbol)
-     WHERE a.file <> b.file AND coalesce(e.test, false) = false
-     RETURN a.file AS af, b.file AS bf, e.confidence AS conf, count(*) AS n`
+    `SELECT a.file AS af, b.file AS bf, e.confidence AS conf, COUNT(*) AS n
+     FROM Edge e
+     JOIN Symbol a ON a.id = e.src
+     JOIN Symbol b ON b.id = e.dst
+     WHERE e.kind = 'DEPENDS_ON' AND a.file <> b.file AND COALESCE(e.test, 0) = 0
+     GROUP BY a.file, b.file, e.confidence`
   );
 
   const weight = new Map<string, number>(); // "from to" -> weight
   const moduleSet = new Set<string>();
+  const internal = new Map<string, number>();
   for (const r of rows) {
     const from = moduleKeyOf(String(r.af), opts);
     const to = moduleKeyOf(String(r.bf), opts);
-    if (from === to) continue;
-    moduleSet.add(from);
-    moduleSet.add(to);
     const n = Number(r.n);
     const w = r.conf === 'fuzzy' ? n * 0.5 : n;
+    // Same-module file deps don't belong on the graph, but they are exactly
+    // the cohesion signal: a module whose files never reference each other is
+    // a folder, not a module.
+    if (from === to) {
+      internal.set(from, (internal.get(from) ?? 0) + w);
+      continue;
+    }
+    moduleSet.add(from);
+    moduleSet.add(to);
     const key = `${from} ${to}`;
     weight.set(key, (weight.get(key) ?? 0) + w);
   }
@@ -116,14 +194,50 @@ export async function moduleMap(store: CodeStore, opts: ModuleMapOptions = {}): 
     return { from: from!, to: to!, weight: w };
   });
 
-  return moduleMapFromEdges(modules, edges, opts);
+  return moduleMapFromEdges(modules, edges, opts, await moduleFacts(store, opts, internal));
+}
+
+/**
+ * Files + symbols per module (so the view can weight a node by how much code
+ * it actually holds — a 40-file module and a 1-file module are not the same
+ * architectural object), joined with the internal dependency weight collected
+ * above. Best-effort: a store that can't answer the size query still gets its
+ * internal weights, and the size-derived fields stay at 0.
+ */
+async function moduleFacts(
+  store: CodeStore,
+  opts: ModuleMapOptions,
+  internal: ReadonlyMap<string, number>
+): Promise<ModuleFactsMap> {
+  const facts = new Map<string, ModuleFacts>();
+  const factsFor = (key: string): ModuleFacts => {
+    const cur = facts.get(key) ?? { files: 0, symbols: 0, internalWeight: internal.get(key) ?? 0 };
+    facts.set(key, cur);
+    return cur;
+  };
+  for (const key of internal.keys()) factsFor(key);
+
+  let rows: Array<Record<string, unknown>>;
+  try {
+    rows = await store.query(`SELECT file AS f, COUNT(*) AS n FROM Symbol GROUP BY file`);
+  } catch {
+    return facts;
+  }
+  for (const r of rows) {
+    if (typeof r.f !== 'string') continue; // defensive: unexpected row shape → no sizes, not garbage
+    const cur = factsFor(moduleKeyOf(r.f, opts));
+    cur.files += 1;
+    cur.symbols += Number(r.n) || 0;
+  }
+  return facts;
 }
 
 /** Cluster + drift over an already-built module edge list (initProposal re-clusters at crate granularity). */
 export function moduleMapFromEdges(
   modules: string[],
   edges: Array<{ from: string; to: string; weight: number }>,
-  opts: ModuleMapOptions = {}
+  opts: ModuleMapOptions = {},
+  facts: ModuleFactsMap = new Map()
 ): ModuleMap {
   const clusters = louvain(modules, edges, opts.resolution ?? 1);
   const clusterOf = new Map<string, number>();
@@ -141,6 +255,12 @@ export function moduleMapFromEdges(
   }
   drift.sort((a, b) => b.weight - a.weight);
 
+  const { components, layerOf } = condense(modules, edges);
+  const cycles = components
+    .filter((c) => c.length > 1)
+    .map((c) => [...c].sort())
+    .sort((a, b) => b.length - a.length || a[0]!.localeCompare(b[0]!));
+
   return {
     modules,
     edges,
@@ -148,7 +268,176 @@ export function moduleMapFromEdges(
     driftRatio: totalWeight > 0 ? crossWeight / totalWeight : 0,
     drift,
     layoutDrift: layoutAgreement(modules, clusters),
+    metrics: moduleMetrics(modules, edges, clusterOf, layerOf, facts),
+    cycles,
+    cycleCuts: cycles.length === 0 ? [] : greedyCutSet(modules, edges),
   };
+}
+
+/**
+ * Cheapest-first feedback edge set: keep removing the lightest edge that still
+ * sits inside a cycle until none is left. Greedy (a true minimum feedback arc
+ * set is NP-hard) but the result is always a valid cut, and "delete these two
+ * light edges" is the only form of cycle report anyone can act on.
+ *
+ * Cost is one SCC pass per removal, over the module graph only — tens to a few
+ * hundred nodes. Cycles are rare enough that this never runs on a clean repo.
+ */
+function greedyCutSet(
+  modules: string[],
+  edges: Array<{ from: string; to: string; weight: number }>
+): Array<{ from: string; to: string; weight: number }> {
+  const cut: Array<{ from: string; to: string; weight: number }> = [];
+  let remaining = [...edges];
+  for (;;) {
+    const comps = condense(modules, remaining).components.filter((c) => c.length > 1);
+    if (comps.length === 0) return cut;
+    const inCycle = new Map<string, number>();
+    comps.forEach((c, i) => c.forEach((m) => inCycle.set(m, i)));
+    // Only edges whose endpoints share an SCC can be part of a cycle.
+    const candidates = remaining.filter((e) => inCycle.has(e.from) && inCycle.get(e.from) === inCycle.get(e.to));
+    if (candidates.length === 0) return cut; // defensive: an SCC with no internal edge can't happen
+    const victim = candidates.reduce((best, e) =>
+      e.weight < best.weight || (e.weight === best.weight && `${e.from} ${e.to}` < `${best.from} ${best.to}`) ? e : best
+    );
+    cut.push(victim);
+    remaining = remaining.filter((e) => e !== victim);
+  }
+}
+
+function moduleMetrics(
+  modules: string[],
+  edges: Array<{ from: string; to: string; weight: number }>,
+  clusterOf: Map<string, number>,
+  layerOf: Map<string, number>,
+  facts: ModuleFactsMap
+): ModuleMetric[] {
+  const inn = new Map<string, { n: number; w: number }>();
+  const out = new Map<string, { n: number; w: number }>();
+  for (const e of edges) {
+    if (e.from === e.to) continue;
+    const o = out.get(e.from) ?? { n: 0, w: 0 };
+    o.n += 1;
+    o.w += e.weight;
+    out.set(e.from, o);
+    const i = inn.get(e.to) ?? { n: 0, w: 0 };
+    i.n += 1;
+    i.w += e.weight;
+    inn.set(e.to, i);
+  }
+  return modules.map((m) => {
+    const i = inn.get(m) ?? { n: 0, w: 0 };
+    const o = out.get(m) ?? { n: 0, w: 0 };
+    const f = facts.get(m) ?? { files: 0, symbols: 0, internalWeight: 0 };
+    const traffic = f.internalWeight + i.w + o.w;
+    return {
+      module: m,
+      cluster: clusterOf.get(m) ?? -1,
+      fanIn: i.n,
+      fanOut: o.n,
+      weightIn: i.w,
+      weightOut: o.w,
+      instability: i.n + o.n === 0 ? 0.5 : o.n / (i.n + o.n),
+      layer: layerOf.get(m) ?? 0,
+      files: f.files,
+      symbols: f.symbols,
+      cohesion: f.files < 2 || traffic === 0 ? null : f.internalWeight / traffic,
+    };
+  });
+}
+
+/**
+ * Tarjan SCC + condensation depth. Two outputs in one pass because they need
+ * the same structure: the components are the module cycles, and the longest
+ * path over the condensed (necessarily acyclic) graph is the dependency layer
+ * — the only depth that is well-defined when cycles exist, since a cycle's
+ * members cannot be ordered relative to each other.
+ *
+ * Iterative, not recursive: a deep monorepo dependency chain would blow the
+ * call stack on a recursive Tarjan.
+ */
+function condense(
+  modules: string[],
+  edges: Array<{ from: string; to: string; weight: number }>
+): { components: string[][]; layerOf: Map<string, number> } {
+  const idx = new Map(modules.map((m, i) => [m, i]));
+  const n = modules.length;
+  const succ: number[][] = modules.map(() => []);
+  for (const e of edges) {
+    const u = idx.get(e.from);
+    const v = idx.get(e.to);
+    if (u === undefined || v === undefined || u === v) continue;
+    succ[u]!.push(v);
+  }
+
+  const index = new Int32Array(n).fill(-1);
+  const low = new Int32Array(n);
+  const onStack = new Uint8Array(n);
+  const compOf = new Int32Array(n).fill(-1);
+  const stack: number[] = [];
+  const components: number[][] = [];
+  let counter = 0;
+
+  for (let root = 0; root < n; root++) {
+    if (index[root] !== -1) continue;
+    const work: Array<{ v: number; next: number }> = [{ v: root, next: 0 }];
+    index[root] = low[root] = counter++;
+    stack.push(root);
+    onStack[root] = 1;
+
+    while (work.length > 0) {
+      const frame = work[work.length - 1]!;
+      const v = frame.v;
+      let descended = false;
+      while (frame.next < succ[v]!.length) {
+        const w = succ[v]![frame.next++]!;
+        if (index[w] === -1) {
+          index[w] = low[w] = counter++;
+          stack.push(w);
+          onStack[w] = 1;
+          work.push({ v: w, next: 0 });
+          descended = true;
+          break;
+        }
+        if (onStack[w]) low[v] = Math.min(low[v]!, index[w]!);
+      }
+      if (descended) continue;
+
+      if (low[v] === index[v]) {
+        const comp: number[] = [];
+        for (;;) {
+          const w = stack.pop()!;
+          onStack[w] = 0;
+          compOf[w] = components.length;
+          comp.push(w);
+          if (w === v) break;
+        }
+        components.push(comp);
+      }
+      work.pop();
+      const parent = work[work.length - 1];
+      if (parent) low[parent.v] = Math.min(low[parent.v]!, low[v]!);
+    }
+  }
+
+  // Tarjan emits components in reverse topological order, so every successor
+  // component is already scored when a component is visited — one linear pass
+  // gives the longest-path depth without a second traversal.
+  const compLayer = new Int32Array(components.length);
+  components.forEach((comp, c) => {
+    let depth = 0;
+    for (const v of comp) {
+      for (const w of succ[v]!) {
+        const cw = compOf[w]!;
+        if (cw !== c) depth = Math.max(depth, compLayer[cw]! + 1);
+      }
+    }
+    compLayer[c] = depth;
+  });
+
+  const layerOf = new Map<string, number>();
+  modules.forEach((m, i) => layerOf.set(m, compLayer[compOf[i]!]!));
+  return { components: components.map((c) => c.map((i) => modules[i]!)), layerOf };
 }
 
 /** Directory-tree partition: group modules by their top-level path segment. */

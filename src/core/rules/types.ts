@@ -51,13 +51,18 @@ export interface VisibilityBoundaryRule {
   module: string;
 }
 
-export interface CypherRule {
-  kind: 'Cypher';
-  /** Read-only Cypher; must RETURN a symbol node aliased `s` (or columns s.*). */
+export interface SqlRule {
+  kind: 'Sql';
+  /**
+   * Read-only SQL over the index schema (File/Symbol/Edge/PendingRef). Should
+   * SELECT columns aliased `qualified`, `file` and `line` — those name the
+   * violation site. `regexp_matches(value, pattern)` is registered for
+   * path predicates.
+   */
   query: string;
 }
 
-export type RuleKind = LayeringRule | NoCyclesRule | ForbiddenDepRule | MaxFanOutRule | VisibilityBoundaryRule | CypherRule;
+export type RuleKind = LayeringRule | NoCyclesRule | ForbiddenDepRule | MaxFanOutRule | VisibilityBoundaryRule | SqlRule;
 
 export interface Rule {
   id: string;

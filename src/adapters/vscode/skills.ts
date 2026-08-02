@@ -39,7 +39,11 @@ Copilot has direct access to PAiRS tools — use these for navigation and refact
   class/interface to see every subclass affected.
 - **who_calls** — direct callers or callees of a function/method.
 - **file_deps** — which files depend on this one, and what it depends on.
-- **module_map** — subsystems detected in the codebase and architectural drift.
+- **module_map** — detected subsystems, module cycles, each module's dependency
+  layer and fan-in/fan-out, and architectural drift. Pass
+  \`boundary: "src/a -> src/b"\` to drill into one edge: the symbols of the
+  target that the source actually uses, with reference sites — what breaking
+  that dependency would require.
 - **analyze** — dead code, cycles, hotspots, untested exports.
 - **check_rules** — verify \`.pairs/rules.ron\` against the graph (call AFTER
   editing to catch rule violations early).
@@ -60,7 +64,7 @@ For automation and CI/CD, use \`pairs\` commands:
 - \`pairs rules [path]\` — summarize the ruleset.
 - \`pairs baseline update\` — snapshot current violations so \`check\` only flags
   new ones going forward.
-- \`pairs query '<cypher>'\` — raw Cypher for anything not covered above.
+- \`pairs query '<sql>'\` — raw read-only SQL for anything not covered above.
 - \`pairs stats\` — index size and resolution quality.
 - \`pairs index\` — full re-index (rarely needed; extension keeps it live).
 - \`pairs init [--force]\` — bootstrap \`.pairs/rules.ron\` from inferred layers.
@@ -72,7 +76,9 @@ For automation and CI/CD, use \`pairs\` commands:
   references, etc. that might break.
 - **Refactoring safely** — \`rename_symbol\` renames definition + all reference
   sites together; \`check_rules\` catches architecture violations.
-- **Understanding module structure** — \`module_map\` shows subsystems and drift.
+- **Understanding module structure** — \`module_map\` shows subsystems, cycles,
+  layers and drift; \`module_map\` with \`boundary\` shows why one module depends
+  on another. Ask it "where does this code belong" before adding a new file.
 - **Enforcing architecture** — \`check_rules\` in CI ensures no layering,
   circular, or visibility rule violations.
 `;

@@ -7,15 +7,15 @@
  */
 
 import * as path from 'node:path';
-import { KuzuCodeStore } from '../../store/graph/codeStoreImpl';
-import { nodeKuzuDriver } from '../../store/graph/kuzuDriver';
+import { SqliteCodeStore } from '../../store/graph/sqliteCodeStore';
+import { nodeSqlDriver } from '../../store/graph/sqliteDriver';
 import { runV3Bench } from './v3Bench';
 
 async function main(): Promise<void> {
   const repo = path.resolve(process.argv[2] ?? '.');
   const asJson = process.argv.includes('--json');
   const dbPath = path.join(repo, '.pairs', 'index');
-  const store = await KuzuCodeStore.open(dbPath, nodeKuzuDriver);
+  const store = await SqliteCodeStore.open(dbPath, nodeSqlDriver);
   const res = await runV3Bench(store, repo);
 
   if (asJson) {

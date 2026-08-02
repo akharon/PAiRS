@@ -24,8 +24,8 @@ export function describeRuleKind(k: RuleKind): string {
       return `MaxFanOut(max: ${k.max}${k.pathPrefix ? `, path_prefix: ${k.pathPrefix}` : ''})`;
     case 'VisibilityBoundary':
       return `VisibilityBoundary(module: ${k.module})`;
-    case 'Cypher':
-      return `Cypher(${k.query.length > 60 ? k.query.slice(0, 57) + '…' : k.query})`;
+    case 'Sql':
+      return `Sql(${k.query.length > 60 ? k.query.slice(0, 57) + '…' : k.query})`;
   }
 }
 

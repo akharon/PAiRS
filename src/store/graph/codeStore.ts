@@ -1,7 +1,7 @@
 /**
- * Code graph store contract. Backed by KuzuDB (Cypher) under `.pairs/index/`
- * (ADR-009) — the index is derived data: rebuildable, disposable, no write
- * guards (subsystem_graph_store_spec.md §4).
+ * Code graph store contract. Backed by SQLite under `.pairs/index.db` — the
+ * index is derived data: rebuildable, disposable, no write guards
+ * (subsystem_graph_store_spec.md §4).
  *
  * Interface shape adapted from vendor/reference-indexer/src/index/codeStore.ts
  * (its `CodeStoreImpl` over SQLite is the algorithmic reference for
@@ -12,7 +12,7 @@
  * DEPENDS_ON graph at Module or Type scope (subsystem_mcp_rules_spec.md's
  * `NoCycles` rule kind), not just file imports.
  *
- * Schema (nodes/edges — see subsystem_graph_store_spec.md for the Kuzu DDL):
+ * Schema (see store/graph/sqlSchema.ts for the DDL):
  *
  *   File(id, path UNIQUE, lang, mtimeMs, size, hash, indexedAt, crate, parseError)
  *   Symbol(id, fileId, name, qualified, kind, lang, startLine, endLine,
@@ -37,36 +37,36 @@
 import type { DeadCodeCandidate, DeadCodeFilter, EdgeKind, EdgeRecord, FileDep, FileRecord, FileExtraction, HotspotQuery, IndexStats, SymbolRecord, AmbiguousSymbol } from '../../core/indexer/types';
 
 /**
- * Blank out Cypher string literals and comments so keyword scans (`query()`'s
- * read-only guard, config.ts's assertReadOnlyCypher) don't false-positive on
- * words like "delete" appearing inside quoted data (`WHERE s.doc CONTAINS
- * 'create'`). Replacement preserves length/newlines so any reported positions
- * still line up. Handles single/double-quoted strings with backslash escapes,
- * `//` line comments, and `/* *\/` block comments.
+ * Blank out SQL string literals and comments so keyword scans (`query()`'s
+ * read-only guard, config.ts's assertReadOnlySql) don't false-positive on
+ * words like "delete" appearing inside quoted data (`WHERE s.doc LIKE
+ * '%create%'`). Replacement preserves length/newlines so any reported
+ * positions still line up. Handles single/double-quoted strings with
+ * backslash escapes, `--` and `//` line comments, and block comments.
  */
-export function stripCypherLiterals(cypher: string): string {
+export function stripSqlLiterals(sql: string): string {
   let out = '';
   let i = 0;
-  const n = cypher.length;
+  const n = sql.length;
   while (i < n) {
-    const c = cypher[i]!;
+    const c = sql[i]!;
     if (c === "'" || c === '"') {
       const quote = c;
       out += ' ';
       i++;
       while (i < n) {
-        if (cypher[i] === '\\') { out += '  '; i += 2; continue; }
-        if (cypher[i] === quote) { out += ' '; i++; break; }
-        out += cypher[i] === '\n' ? '\n' : ' ';
+        if (sql[i] === '\\') { out += '  '; i += 2; continue; }
+        if (sql[i] === quote) { out += ' '; i++; break; }
+        out += sql[i] === '\n' ? '\n' : ' ';
         i++;
       }
-    } else if (c === '/' && cypher[i + 1] === '/') {
-      while (i < n && cypher[i] !== '\n') { out += ' '; i++; }
-    } else if (c === '/' && cypher[i + 1] === '*') {
+    } else if ((c === '/' && sql[i + 1] === '/') || (c === '-' && sql[i + 1] === '-')) {
+      while (i < n && sql[i] !== '\n') { out += ' '; i++; }
+    } else if (c === '/' && sql[i + 1] === '*') {
       out += '  ';
       i += 2;
-      while (i < n && !(cypher[i] === '*' && cypher[i + 1] === '/')) {
-        out += cypher[i] === '\n' ? '\n' : ' ';
+      while (i < n && !(sql[i] === '*' && sql[i + 1] === '/')) {
+        out += sql[i] === '\n' ? '\n' : ' ';
         i++;
       }
       if (i < n) { out += '  '; i += 2; }
@@ -76,6 +76,25 @@ export function stripCypherLiterals(cypher: string): string {
     }
   }
   return out;
+}
+
+/**
+ * Reject anything that could mutate the index. The store is derived data with
+ * a single writer (the indexer); `query()` and rules' `Sql(...)` escape hatch
+ * are read paths, and a stray `DELETE` there would silently corrupt the graph
+ * until the next full re-index.
+ *
+ * Literals and comments are blanked first so `WHERE doc LIKE '%drop%'` stays
+ * legal — see stripSqlLiterals.
+ */
+const MUTATING_SQL = /\b(insert|update|delete|drop|create|alter|replace|attach|detach|vacuum|reindex|pragma|begin|commit|rollback)\b/i;
+
+export function assertReadOnlySql(sql: string, ruleId?: string): void {
+  const m = MUTATING_SQL.exec(stripSqlLiterals(sql));
+  if (m) {
+    const where = ruleId ? ` in rule '${ruleId}'` : '';
+    throw new Error(`Query${where} must be read-only, found '${m[1]!.toUpperCase()}': ${sql.slice(0, 120)}`);
+  }
 }
 
 export interface CodeStore {
@@ -98,7 +117,17 @@ export interface CodeStore {
    * @param namesHint retry only refs whose name is in the hint (cheap
    *        incremental call after one file indexed); omit for a full pass.
    */
-  resolvePending(namesHint?: string[]): Promise<number>;
+  /**
+   * Retry parked references. `namesHint` scopes the retry to refs whose name
+   * just became declarable (the incremental path).
+   *
+   * `opts.retireUnresolved` is for the full-index pass only: after every file
+   * has declared, a ref that still misses names something outside the
+   * workspace (npm/stdlib/test globals) and cannot resolve later, so it is
+   * deleted rather than parked forever. Never pass it on an incremental
+   * re-index — mid-pass, a miss only means "not indexed *yet*".
+   */
+  resolvePending(namesHint?: string[], opts?: { retireUnresolved?: boolean }): Promise<number>;
   /** Known files with their hash/mtime — the indexer diffs against disk on startup. */
   listFiles(): Promise<FileRecord[]>;
 
@@ -120,8 +149,11 @@ export interface CodeStore {
   edgesTo(ids: number[], kinds: EdgeKind[]): Promise<EdgeRecord[]>;
   /** Edges leaving these symbols (direction='callees'). */
   edgesFrom(ids: number[], kinds: EdgeKind[]): Promise<EdgeRecord[]>;
-  /** Arbitrary read-only Cypher (the rule engine's escape hatch — must RETURN nodes). */
-  /** Raw read-only Cypher. Rows come back untyped — Kuzu cannot verify a caller-supplied row type. */
+  /**
+   * Raw read-only SQL (the rule engine's escape hatch). Rows come back
+   * untyped — the store cannot verify a caller-supplied row type. Mutating
+   * statements are rejected; see assertReadOnlySql.
+   */
   query(cypher: string, params?: Record<string, unknown>): Promise<Record<string, unknown>[]>;
 
   // -- Analysis (core/analyze, subsystem_mcp_rules_spec.md §5) -----------------
@@ -161,18 +193,16 @@ export interface CodeStore {
   /** Drop and recreate all tables (`pairs index --rebuild`). */
   reset(): Promise<void>;
   /**
-   * Force-merge the WAL into the main index file. Kuzu's autoCheckpoint only
-   * fires once the WAL crosses its threshold, and the store is never
-   * explicitly closed (dispose() is a no-op — see dispose() below), so
-   * without an explicit checkpoint the WAL can only ever grow across a
-   * session. Cheap to call when there's nothing to merge.
+   * Merge the WAL back into the main index file. Cheap to call when there is
+   * nothing to merge; keeps `.pairs/index.db-wal` from lingering at its
+   * high-water mark between sessions.
    */
   checkpoint(): Promise<void>;
   dispose(): void;
 }
 
-/** Factory — the only place that knows Kuzu specifics. */
+/** Factory — the only place that knows storage-engine specifics. */
 export interface CodeStoreFactory {
-  /** @param dbPath absolute path to `.pairs/index/` (Kuzu database directory) */
+  /** @param dbPath absolute path to `.pairs/index.db` */
   open(dbPath: string): Promise<CodeStore>;
 }

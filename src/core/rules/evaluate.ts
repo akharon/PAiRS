@@ -12,7 +12,7 @@
 
 import { ENTRY_POINT_NAMES, isTestPath } from '../indexer/types';
 import type { CodeStore } from '../../store/graph/codeStore';
-import type { CheckResult, LayeringRule, MaxFanOutRule, Rule, RuleSet, Violation, ViolationNode, ForbiddenDepRule, VisibilityBoundaryRule, NoCyclesRule, CypherRule } from './types';
+import type { CheckResult, LayeringRule, MaxFanOutRule, Rule, RuleSet, Violation, ViolationNode, ForbiddenDepRule, VisibilityBoundaryRule, NoCyclesRule, SqlRule } from './types';
 
 /** Directory of a workspace-relative file path ('.' for a root file). */
 function moduleOf(file: string): string {
@@ -62,10 +62,12 @@ async function crossModuleEdges(store: CodeStore): Promise<CrossModuleEdge[]> {
     // e.test <> true excludes edges originating in test code (#[cfg(test)]
     // mods / #[test] fns): a core unit test driving the real sim integrator is
     // deliberate, not a layering breach (R1 — Tier-1 FP class seen on ARES).
-    `MATCH (a:Symbol)-[e:DEPENDS_ON|CALLS]->(b:Symbol)
-     WHERE a.file <> b.file AND coalesce(e.test, false) = false
-     RETURN a.qualified AS aq, a.name AS an, a.file AS af, e.line AS line, e.confidence AS conf,
-            b.qualified AS bq, b.name AS bn, b.file AS bf, b.startLine AS bl`
+    `SELECT a.qualified AS aq, a.name AS an, a.file AS af, e.line AS line, e.confidence AS conf,
+            b.qualified AS bq, b.name AS bn, b.file AS bf, b.startLine AS bl
+     FROM Edge e
+     JOIN Symbol a ON a.id = e.src
+     JOIN Symbol b ON b.id = e.dst
+     WHERE e.kind IN ('DEPENDS_ON','CALLS') AND a.file <> b.file AND COALESCE(e.test, 0) = 0`
   );
   const out: CrossModuleEdge[] = [];
   for (const r of rows) {
@@ -155,10 +157,12 @@ async function evalMaxFanOut(rule: Rule, kind: MaxFanOutRule, store: CodeStore):
   // Out-degree of CALLS per function/method, with fuzzy counted separately so
   // a ceiling crossed only via fuzzy edges is a `possible` finding.
   const rows = await store.query(
-    `MATCH (a:Symbol)-[e:CALLS]->(:Symbol)
-     WHERE (a.kind = 'function' OR a.kind = 'method') AND coalesce(e.test, false) = false
-     RETURN a.qualified AS q, a.name AS n, a.file AS f, a.startLine AS l,
-            count(e) AS total, sum(CASE WHEN e.confidence = 'fuzzy' THEN 1 ELSE 0 END) AS fuzzy`
+    `SELECT a.qualified AS q, a.name AS n, a.file AS f, a.startLine AS l,
+            COUNT(*) AS total, SUM(CASE WHEN e.confidence = 'fuzzy' THEN 1 ELSE 0 END) AS fuzzy
+     FROM Edge e
+     JOIN Symbol a ON a.id = e.src
+     WHERE e.kind = 'CALLS' AND a.kind IN ('function','method') AND COALESCE(e.test, 0) = 0
+     GROUP BY a.id`
   );
   const out: Violation[] = [];
   for (const r of rows) {
@@ -181,11 +185,14 @@ async function evalMaxFanOut(rule: Rule, kind: MaxFanOutRule, store: CodeStore):
 async function evalVisibilityBoundary(rule: Rule, kind: VisibilityBoundaryRule, store: CodeStore): Promise<Violation[]> {
   // Any reference edge from outside `module` into a non-exported symbol of it.
   const rows = await store.query(
-    `MATCH (a:Symbol)-[e:CALLS|READS|WRITES|DEPENDS_ON|IMPLEMENTS|EXTENDS|REFERENCES]->(b:Symbol)
-     WHERE a.file <> b.file AND b.exported = false AND b.kind <> 'module'
-       AND coalesce(e.test, false) = false
-     RETURN a.qualified AS aq, a.name AS an, a.file AS af, e.line AS line, e.confidence AS conf,
-            b.qualified AS bq, b.name AS bn, b.file AS bf, b.startLine AS bl`
+    `SELECT a.qualified AS aq, a.name AS an, a.file AS af, e.line AS line, e.confidence AS conf,
+            b.qualified AS bq, b.name AS bn, b.file AS bf, b.startLine AS bl
+     FROM Edge e
+     JOIN Symbol a ON a.id = e.src
+     JOIN Symbol b ON b.id = e.dst
+     WHERE e.kind IN ('CALLS','READS','WRITES','DEPENDS_ON','IMPLEMENTS','EXTENDS','REFERENCES')
+       AND a.file <> b.file AND b.exported = 0 AND b.kind <> 'module'
+       AND COALESCE(e.test, 0) = 0`
   );
   const bound = kind.module.replace(/\/+$/, '');
   const inModule = (file: string): boolean => moduleOf(file) === bound || moduleOf(file).startsWith(bound + '/');
@@ -232,7 +239,7 @@ async function evalNoCycles(rule: Rule, kind: NoCyclesRule, store: CodeStore): P
   );
 }
 
-async function evalCypher(rule: Rule, kind: CypherRule, store: CodeStore): Promise<Violation[]> {
+async function evalSql(rule: Rule, kind: SqlRule, store: CodeStore): Promise<Violation[]> {
   const rows = await store.query(kind.query);
   const out: Violation[] = [];
   for (const r of rows) {
@@ -281,8 +288,8 @@ export async function checkRules(store: CodeStore, ruleset: RuleSet): Promise<Ch
       case 'NoCycles':
         violations.push(...(await evalNoCycles(rule, k, store)));
         break;
-      case 'Cypher':
-        violations.push(...(await evalCypher(rule, k, store)));
+      case 'Sql':
+        violations.push(...(await evalSql(rule, k, store)));
         break;
     }
   }

@@ -70,7 +70,10 @@ export class IndexerImpl implements Indexer {
 
     // Full pass over every pending ref only after all files have declared —
     // forward references resolve here, not per-file.
-    await this.deps.store.resolvePending();
+    // retireUnresolved: safe only here. Every file has declared by this point,
+    // so a still-unresolved ref is external (npm/stdlib/test globals) and will
+    // never resolve — parking it just grows the index on every re-index.
+    await this.deps.store.resolvePending(undefined, { retireUnresolved: true });
     await this.deps.store.checkpoint();
 
     const stats = await this.deps.store.stats();

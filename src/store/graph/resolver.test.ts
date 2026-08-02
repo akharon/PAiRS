@@ -1,21 +1,20 @@
 /**
- * Resolver-ladder contract, against a real Kuzu database in a temp dir.
+ * Resolver-ladder contract, against a real SQLite database in a temp dir.
  *
  * These assertions are the S1 precision fix (plan.md): they encode *which*
  * confidence a ref earns, which is the difference between a graph an agent can
  * trust and one it can't. A fake store would only test the fake, since the
- * ladder is Cypher.
+ * ladder is SQL.
  *
- * Stores are never closed — kuzu 0.11.3 segfaults on db.close()
- * (spikes/s2-kuzu-concurrency.mjs). Temp dirs are left to the OS.
+ * Temp dirs are left to the OS.
  */
 
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { KuzuCodeStore } from './codeStoreImpl';
-import { nodeKuzuDriver } from './kuzuDriver';
+import { SqliteCodeStore } from './sqliteCodeStore';
+import { nodeSqlDriver } from './sqliteDriver';
 import type { CodeStore } from './codeStore';
 import type { EdgeConfidence, FileExtraction, NewSymbol, RawRef, SymbolRecord } from '../../core/indexer/types';
 import { impact } from '../../core/analyze/impact';
@@ -54,7 +53,7 @@ describe('resolveOneRef ladder', () => {
 
   beforeAll(async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pairs-resolver-'));
-    store = await KuzuCodeStore.open(path.join(dir, 'graph.kz'), nodeKuzuDriver);
+    store = await SqliteCodeStore.open(path.join(dir, 'graph.db'), nodeSqlDriver);
 
     // Two workspace types with a same-named `new`, plus a uniquely-named free fn.
     await store.applyExtraction(
@@ -67,7 +66,7 @@ describe('resolveOneRef ladder', () => {
   async function confidenceOf(file: string, ref: RawRef): Promise<EdgeConfidence | 'unresolved'> {
     await store.applyExtraction(extraction(file, [], [ref]));
     const rows = await store.query(
-      `MATCH (a:Symbol)-[e:CALLS]->(b:Symbol) WHERE a.qualified = '${file}' RETURN e.confidence AS conf`
+      `SELECT e.confidence AS conf FROM Edge e JOIN Symbol a ON a.id = e.src WHERE e.kind = 'CALLS' AND a.qualified = '${file}'`
     );
     return rows.length === 0 ? 'unresolved' : (String(rows[0]!.conf) as EdgeConfidence);
   }
@@ -113,7 +112,7 @@ describe('resolveOneRef ladder', () => {
     // Caller in a DIFFERENT crate, no `use` naming Widget → fuzzy.
     await store.applyExtraction(extraction('crates/alpha/src/main.rs', [], [call('spawn', 'Widget::spawn')]));
     const noUse = await store.query(
-      `MATCH (a:Symbol)-[e:CALLS]->(b:Symbol) WHERE a.qualified = 'crates/alpha/src/main.rs' RETURN e.confidence AS conf`
+      `SELECT e.confidence AS conf FROM Edge e JOIN Symbol a ON a.id = e.src WHERE e.kind = 'CALLS' AND a.qualified = 'crates/alpha/src/main.rs'`
     );
     expect(String(noUse[0]!.conf)).toBe('fuzzy');
     // Same call WITH `use beta::Widget` → corroborated, stays resolved.
@@ -121,7 +120,7 @@ describe('resolveOneRef ladder', () => {
       extraction('crates/alpha/src/other.rs', [], [call('spawn', 'Widget::spawn')], [use_('beta::Widget')])
     );
     const withUse = await store.query(
-      `MATCH (a:Symbol)-[e:CALLS]->(b:Symbol) WHERE a.qualified = 'crates/alpha/src/other.rs' RETURN e.confidence AS conf`
+      `SELECT e.confidence AS conf FROM Edge e JOIN Symbol a ON a.id = e.src WHERE e.kind = 'CALLS' AND a.qualified = 'crates/alpha/src/other.rs'`
     );
     expect(String(withUse[0]!.conf)).toBe('resolved');
   });
@@ -149,7 +148,7 @@ describe('resolveOneRef ladder', () => {
 describe('stats precision buckets', () => {
   it('counts a qualified external call as external, not a resolvable miss', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pairs-stats-'));
-    const store = await KuzuCodeStore.open(path.join(dir, 'graph.kz'), nodeKuzuDriver);
+    const store = await SqliteCodeStore.open(path.join(dir, 'graph.db'), nodeSqlDriver);
     await store.applyExtraction(extraction('shapes.rs', [sym('Circle', 'Circle', 'struct'), sym('new', 'Circle::new')]));
     // `Vec::new` is glam/std. The workspace having *a* `new` must not make it
     // look like a miss the resolver should have caught.
@@ -171,7 +170,7 @@ describe('row mappers read node-prefixed columns', () => {
   let store: CodeStore;
   beforeAll(async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pairs-readers-'));
-    store = await KuzuCodeStore.open(path.join(dir, 'graph.kz'), nodeKuzuDriver);
+    store = await SqliteCodeStore.open(path.join(dir, 'graph.db'), nodeSqlDriver);
     await store.applyExtraction(extraction('svc.rs', [sym('login', 'auth::login', 'function')]));
   });
 
@@ -209,7 +208,7 @@ describe('impact() transitive dependants', () => {
   let coreId: number;
   beforeAll(async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pairs-impact-'));
-    store = await KuzuCodeStore.open(path.join(dir, 'graph.kz'), nodeKuzuDriver);
+    store = await SqliteCodeStore.open(path.join(dir, 'graph.db'), nodeSqlDriver);
     // core <- mid <- top  (top calls mid, mid calls core); free functions.
     // The ref must originate from the *function* (symbols[1]), not the module
     // (symbols[0]), so the CALLS edge chains function→function like real code.
@@ -249,7 +248,7 @@ describe('use statements create cross-file DEPENDS_ON edges', () => {
   let store: CodeStore;
   beforeAll(async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pairs-depends-'));
-    store = await KuzuCodeStore.open(path.join(dir, 'graph.kz'), nodeKuzuDriver);
+    store = await SqliteCodeStore.open(path.join(dir, 'graph.db'), nodeSqlDriver);
     await store.applyExtraction(extraction('src/map/loader.rs', [sym('load_map', 'crate::map::loader::load_map', 'function')]));
     // consumer.rs imports load_map — a cross-file dependency.
     await store.applyExtraction(
@@ -263,7 +262,7 @@ describe('use statements create cross-file DEPENDS_ON edges', () => {
 
   it('links importer module → imported symbol at the use line', async () => {
     const rows = await store.query(
-      `MATCH (a:Symbol)-[e:DEPENDS_ON]->(b:Symbol) WHERE a.file <> b.file RETURN a.file AS af, b.file AS bf, e.line AS line`
+      `SELECT a.file AS af, b.file AS bf, e.line AS line FROM Edge e JOIN Symbol a ON a.id = e.src JOIN Symbol b ON b.id = e.dst WHERE e.kind = 'DEPENDS_ON' AND a.file <> b.file`
     );
     expect(rows).toHaveLength(1);
     expect(rows[0]!.af).toBe('src/sim/driver.rs');
@@ -286,7 +285,7 @@ describe('path-style imports create cross-file DEPENDS_ON edges', () => {
   let store: CodeStore;
   beforeAll(async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pairs-import-path-'));
-    store = await KuzuCodeStore.open(path.join(dir, 'graph.kz'), nodeKuzuDriver);
+    store = await SqliteCodeStore.open(path.join(dir, 'graph.db'), nodeSqlDriver);
     // Importer indexed FIRST: its target does not exist yet, so the edge must
     // come back through resolvePending (index order is arbitrary in practice).
     await store.applyExtraction(
@@ -306,7 +305,7 @@ describe('path-style imports create cross-file DEPENDS_ON edges', () => {
 
   it('links the importing file to the imported file, external packages aside', async () => {
     const rows = await store.query(
-      `MATCH (a:Symbol)-[e:DEPENDS_ON]->(b:Symbol) WHERE a.file <> b.file RETURN a.file AS af, b.file AS bf, e.line AS line ORDER BY af`
+      `SELECT a.file AS af, b.file AS bf, e.line AS line FROM Edge e JOIN Symbol a ON a.id = e.src JOIN Symbol b ON b.id = e.dst WHERE e.kind = 'DEPENDS_ON' AND a.file <> b.file ORDER BY af`
     );
     expect(rows.map((r) => `${String(r.af)} -> ${String(r.bf)}`)).toEqual([
       'src/adapters/vscode/extension.ts -> src/store/graph/codeStore.ts',
@@ -324,12 +323,12 @@ describe('path-style imports create cross-file DEPENDS_ON edges', () => {
 
 describe('in-memory symbol mirror stays consistent across re-apply and remove', () => {
   // applyExtraction patches the loaded mirror in place instead of rebuilding
-  // it from Kuzu per file (the rebuild made fullIndex O(files × symbols)).
+  // it from the database per file (the rebuild made fullIndex O(files × symbols)).
   // These pin that the patched mirror resolves identically to a fresh one.
   let store: CodeStore;
   beforeAll(async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pairs-mirror-'));
-    store = await KuzuCodeStore.open(path.join(dir, 'graph.kz'), nodeKuzuDriver);
+    store = await SqliteCodeStore.open(path.join(dir, 'graph.db'), nodeSqlDriver);
     await store.applyExtraction(extraction('a.rs', [sym('alpha', 'alpha', 'function')]));
     // Force the mirror to load by resolving through it.
     await store.applyExtraction(extraction('caller.rs', [sym('c', 'c', 'function')], [call('alpha', null)]));
@@ -341,20 +340,20 @@ describe('in-memory symbol mirror stays consistent across re-apply and remove', 
     await store.applyExtraction(extraction('a.rs', [sym('beta', 'beta', 'function')]));
     await store.applyExtraction(extraction('caller2.rs', [sym('c2', 'c2', 'function')], [call('alpha', null), call('beta', null)]));
     const edges = await store.query(
-      `MATCH (:Symbol {name: 'caller2.rs'})-[:CALLS]->(b:Symbol) RETURN b.name AS name`
+      `SELECT b.name AS name FROM Edge e JOIN Symbol a ON a.id = e.src JOIN Symbol b ON b.id = e.dst WHERE e.kind = 'CALLS' AND a.name = 'caller2.rs'`
     );
     expect(edges.map((r) => r.name)).toEqual(['beta']);
     // Two claims on the vanished alpha: caller.rs's old edge re-parked when
     // a.rs was re-applied (R7 — referrers keep their claim), plus caller2's
     // fresh unresolved ref.
-    const pend = await store.query(`MATCH (p:PendingRef {name: 'alpha'}) RETURN p.name AS name`);
+    const pend = await store.query(`SELECT name FROM PendingRef WHERE name = 'alpha'`);
     expect(pend).toHaveLength(2);
   });
 
   it('removeFile drops the file from the mirror', async () => {
     await store.removeFile('a.rs');
     await store.applyExtraction(extraction('caller3.rs', [sym('c3', 'c3', 'function')], [call('beta', null)]));
-    const edges = await store.query(`MATCH (:Symbol {name: 'caller3.rs'})-[:CALLS]->(b:Symbol) RETURN b.name AS name`);
+    const edges = await store.query(`SELECT b.name AS name FROM Edge e JOIN Symbol a ON a.id = e.src JOIN Symbol b ON b.id = e.dst WHERE e.kind = 'CALLS' AND a.name = 'caller3.rs'`);
     expect(edges).toHaveLength(0); // beta gone → parked as pending, not resolved via stale mirror
   });
 });

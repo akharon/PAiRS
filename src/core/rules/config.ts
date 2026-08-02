@@ -8,7 +8,7 @@
 
 import { REFERENCE_EDGE_KINDS, STRUCTURAL_EDGE_KINDS } from '../indexer/types';
 import type { EdgeKind } from '../indexer/types';
-import { stripCypherLiterals } from '../../store/graph/codeStore';
+import { stripSqlLiterals } from '../../store/graph/codeStore';
 import { isVariant, parseRon } from './ron';
 import type { RonValue, RonVariant } from './ron';
 import type { Rule, RuleKind, RuleSet, RuleTier, Severity } from './types';
@@ -75,24 +75,24 @@ function parseKind(v: RonValue, ruleId: string): RuleKind {
     case 'VisibilityBoundary': {
       return { kind: 'VisibilityBoundary', module: asString(v.named['module'], `${ctx}: module`) };
     }
-    case 'Cypher': {
+    case 'Sql': {
       const q = v.args[0] ?? v.named['query'];
       const query = asString(q, `${ctx}: query`);
-      assertReadOnlyCypher(query, ruleId);
-      return { kind: 'Cypher', query };
+      assertReadOnlySqlRule(query, ruleId);
+      return { kind: 'Sql', query };
     }
     default:
       fail(`rule "${ruleId}": unknown rule kind "${(v as RonVariant).variant}"`);
   }
 }
 
-/** Reject mutating Cypher at parse time (spec §3.2: read-snapshot only). */
-export function assertReadOnlyCypher(query: string, ruleId: string): void {
-  const banned = /\b(CREATE|MERGE|DELETE|DETACH|SET|DROP|ALTER|COPY|LOAD|CALL|INSTALL|ATTACH|EXPORT|IMPORT)\b/i;
+/** Reject mutating SQL at parse time (spec §3.2: read-snapshot only). */
+export function assertReadOnlySqlRule(query: string, ruleId: string): void {
+  const banned = /\b(INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|REPLACE|ATTACH|DETACH|VACUUM|REINDEX|PRAGMA|BEGIN|COMMIT|ROLLBACK)\b/i;
   // Scan with string literals/comments blanked: a quoted word like
-  // "… WHERE s.doc CONTAINS 'create'" is data, not a mutation.
-  const m = banned.exec(stripCypherLiterals(query));
-  if (m) fail(`rule "${ruleId}": Cypher rules are read-only — "${m[0].toUpperCase()}" is not allowed`);
+  // "… WHERE s.doc LIKE '%create%'" is data, not a mutation.
+  const m = banned.exec(stripSqlLiterals(query));
+  if (m) fail(`rule "${ruleId}": Sql rules are read-only — "${m[0].toUpperCase()}" is not allowed`);
 }
 
 export function parseRuleSet(source: string): RuleSet {

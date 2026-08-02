@@ -13,79 +13,34 @@ import { ExtractorImpl } from '../../core/indexer/extractorImpl';
 import { IndexerImpl } from '../../core/indexer/codeIndexerImpl';
 import { nodeListWorkspaceFiles, nodeReadFile, nodeWatchWorkspace } from '../../core/indexer/nodeFsDeps';
 import { WatchQueue } from '../../core/indexer/watchQueue';
-import { KuzuCodeStore } from '../../store/graph/codeStoreImpl';
-import { nodeKuzuDriver, nodeKuzuReadOnlyDriver } from '../../store/graph/kuzuDriver';
+import { SqliteCodeStore } from '../../store/graph/sqliteCodeStore';
+import { nodeSqlDriver } from '../../store/graph/sqliteDriver';
 import { impact } from '../../core/analyze/impact';
 import { parseRuleSet } from '../../core/rules/config';
 import { checkRules } from '../../core/rules/evaluate';
 import { renderViolation, summarizeRule } from '../../core/rules/render';
 import { toSarif } from '../../core/rules/sarif';
 import { ciFailures, createBaseline, diffAgainstBaseline, parseBaseline } from '../../core/rules/baseline';
-import * as os from 'node:os';
 
 /** Commands that only ever read the graph — safe to serve from a snapshot copy. */
-const READ_ONLY_COMMANDS = new Set(['query', 'stats', 'impact', 'rules']);
-
-/**
- * kuzu 0.11.3 takes an exclusive file lock even for `readOnly` opens, so a
- * second process can't share a live db at all. For read-only commands, copy
- * the index + WAL to a scratch dir and open the copy instead — stale by
- * however old the copy is, but usable while the extension has the workspace
- * open. Returns null if there's nothing to copy (no index yet).
- */
-async function openSnapshotCopy(dbPath: string): Promise<KuzuCodeStore | null> {
-  const walPath = `${dbPath}.wal`;
-  const exists = await fs.access(dbPath).then(() => true, () => false);
-  if (!exists) return null;
-  const scratchDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pairs-snapshot-'));
-  const scratchDb = path.join(scratchDir, 'index');
-  await fs.copyFile(dbPath, scratchDb);
-  if (await fs.access(walPath).then(() => true, () => false)) {
-    await fs.copyFile(walPath, `${scratchDb}.wal`);
-  }
-  return KuzuCodeStore.open(scratchDb, nodeKuzuReadOnlyDriver);
-}
 
 async function main(): Promise<void> {
   const [, , command, ...rest] = process.argv;
   const root = process.cwd();
-  const dbPath = path.join(root, '.pairs', 'index');
+  const dbPath = path.join(root, '.pairs', 'index.db');
   // This file ships bundled as dist/cli.js, so grammars/queries sit alongside
   // it in dist/ — resolve from __dirname, not from the src/ tree layout.
   const grammarsDir = path.join(__dirname, 'grammars');
   const queriesDir = path.join(__dirname, 'queries');
 
-  // Kuzu creates the database file itself but not its parent directory.
+  // SQLite creates the database file itself but not its parent directory.
   await fs.mkdir(path.dirname(dbPath), { recursive: true });
 
-  let store: KuzuCodeStore;
-  let isSnapshot = false;
-  try {
-    store = await KuzuCodeStore.open(dbPath, nodeKuzuDriver);
-  } catch (err) {
-    const msg = (err as Error).message ?? String(err);
-    if (!/lock/i.test(msg)) throw err;
-    // Kuzu 0.11.3 takes an exclusive file lock regardless of read-only intent —
-    // a second process (this CLI) cannot open the DB at all while the VS Code
-    // extension (or another `pairs` invocation) holds it open.
-    const canUseSnapshot = READ_ONLY_COMMANDS.has(command) || (command === 'check' && !rest.includes('--ci'));
-    const snapshot = canUseSnapshot ? await openSnapshotCopy(dbPath).catch(() => null) : null;
-    if (!snapshot) {
-      process.stderr.write(
-        `Could not open ${dbPath}: ${msg}\n` +
-          'Another process (likely the VS Code extension, or another `pairs` command) has this index open. ' +
-          'Kuzu allows only one process to hold the database at a time — close that workspace/process, or wait for it to finish, then retry.\n'
-      );
-      // Exit 2, not 1: 1 means "new confirmed error-severity violations" (R1).
-      // Reusing it here would make `check --ci` failing to *open* the index
-      // indistinguishable in CI from the ruleset actually failing.
-      process.exitCode = 2;
-      return;
-    }
-    process.stderr.write('Index is locked by another process — reading from a snapshot copy (may be slightly stale).\n');
-    store = snapshot;
-    isSnapshot = true;
-  }
+  // No lock dance here: SQLite in WAL mode allows concurrent readers, so the
+  // CLI can read an index the VS Code extension has open. (Kuzu took an
+  // exclusive lock even for read-only opens, which forced a snapshot-copy
+  // fallback — deleted along with it.)
+  const store: SqliteCodeStore = await SqliteCodeStore.open(dbPath, nodeSqlDriver);
   const parsers = new ParserRegistryImpl(grammarsDir, fileQuerySource(queriesDir));
   const extractor = new ExtractorImpl();
   const indexer = new IndexerImpl({
@@ -108,13 +63,13 @@ async function main(): Promise<void> {
         break;
       }
       case 'query': {
-        const cypher = rest.join(' ');
-        if (!cypher) {
-          process.stderr.write("Usage: pairs query '<cypher>'\n");
+        const sql = rest.join(' ');
+        if (!sql) {
+          process.stderr.write("Usage: pairs query '<sql>'\n");
           process.exitCode = 1;
           break;
         }
-        const rows = await store.query(cypher);
+        const rows = await store.query(sql);
         process.stdout.write(`${JSON.stringify(rows, null, 2)}\n`);
         break;
       }
@@ -306,10 +261,9 @@ async function main(): Promise<void> {
   } finally {
     // Checkpoint before exit so a one-shot invocation (e.g. `pairs index`)
     // leaves the WAL merged rather than growing it every run — dispose()
-    // can't do this itself (kuzu segfaults on db.close(), see codeStoreImpl).
     // Skipped for a read-only snapshot copy: nothing writes to it, and its
     // scratch dir is discarded on process exit anyway.
-    if (!isSnapshot) await store.checkpoint();
+    await store.checkpoint();
     store.dispose();
     parsers.dispose();
   }

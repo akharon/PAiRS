@@ -49,14 +49,15 @@
  * `contest/`, and misses `.spec.ts` entirely.
  */
 
-import { TEST_PATH_REGEX_CYPHER } from '../indexer/types';
+import { TEST_PATH_REGEX_SQL } from '../indexer/types';
 
 /**
- * Test-path regex escaped for a Cypher literal *inside a RON string*: RON
- * unescapes `\\`→`\` when parsing, then Kuzu does it again, so each backslash
- * has to survive two rounds.
+ * Test-path regex escaped for a SQL literal *inside a RON string*. Only ONE
+ * unescaping round now: RON turns `\\`→`\` when parsing, and SQLite then
+ * takes the pattern verbatim. (Kuzu unescaped a second time, so this used to
+ * double twice — doing that here would make every rule below match nothing.)
  */
-const TP = TEST_PATH_REGEX_CYPHER.replace(/\\/g, '\\\\');
+const TP = TEST_PATH_REGEX_SQL.replace(/\\/g, '\\\\');
 
 /** Rule entries only — no wrapping parens, so callers can prepend their own. */
 export const DEFAULT_RULE_ENTRIES = `    // ---- Code safety ------------------------------------------------------
@@ -70,15 +71,15 @@ export const DEFAULT_RULE_ENTRIES = `    // ---- Code safety -------------------
      explain: "Modules call each other in a loop. Even when each individual call looks reasonable, the pair cannot be reasoned about or unit-tested independently. Extract the shared step, or make one side take a callback/port."),
 
     (id: "prod-depends-on-test", tier: 1, severity: error,
-     kind: Cypher("MATCH (a:Symbol)-[e:CALLS|DEPENDS_ON|IMPORTS|REFERENCES]->(b:Symbol) WHERE NOT regexp_matches(a.file, '${TP}') AND regexp_matches(b.file, '${TP}') AND coalesce(e.confidence, 'resolved') <> 'fuzzy' RETURN a.qualified AS qualified, a.file AS file, e.line AS line"),
+     kind: Sql("SELECT a.qualified AS qualified, a.file AS file, e.line AS line FROM Edge e JOIN Symbol a ON a.id = e.src JOIN Symbol b ON b.id = e.dst WHERE e.kind IN ('CALLS','DEPENDS_ON','IMPORTS','REFERENCES') AND NOT regexp_matches(a.file, '${TP}') AND regexp_matches(b.file, '${TP}') AND COALESCE(e.confidence, 'resolved') <> 'fuzzy'"),
      explain: "Production code references a test file. Tests are not shipped, so this either breaks the build outside the test runner or drags fixtures into the release. Move the shared helper into a normal module that both sides import."),
 
     (id: "huge-function", tier: 1, severity: error,
-     kind: Cypher("MATCH (s:Symbol) WHERE s.kind IN ['function','method'] AND s.endLine - s.startLine > 300 AND NOT regexp_matches(s.file, '${TP}') RETURN s.qualified AS qualified, s.file AS file, s.startLine AS line"),
+     kind: Sql("SELECT s.qualified AS qualified, s.file AS file, s.startLine AS line FROM Symbol s WHERE s.kind IN ('function','method') AND s.endLine - s.startLine > 300 AND NOT regexp_matches(s.file, '${TP}')"),
      explain: "A function over 300 lines cannot be reviewed or tested as a unit, and is where defects concentrate. Split it along its internal phases — each block with its own comment is usually a function waiting to be named."),
 
     (id: "dead-production-symbol", tier: 2, severity: warning,
-     kind: Cypher("MATCH (s:Symbol) WHERE s.exported = true AND NOT regexp_matches(s.file, '${TP}') AND s.kind IN ['function','method','class','struct'] AND EXISTS { MATCH (t:Symbol)-[:CALLS|REFERENCES|DEPENDS_ON]->(s) WHERE regexp_matches(t.file, '${TP}') } AND NOT EXISTS { MATCH (p:Symbol)-[:CALLS|REFERENCES|DEPENDS_ON|IMPORTS]->(s) WHERE NOT regexp_matches(p.file, '${TP}') } RETURN s.qualified AS qualified, s.file AS file, s.startLine AS line"),
+     kind: Sql("SELECT s.qualified AS qualified, s.file AS file, s.startLine AS line FROM Symbol s WHERE s.exported = 1 AND NOT regexp_matches(s.file, '${TP}') AND s.kind IN ('function','method','class','struct') AND EXISTS (SELECT 1 FROM Edge e JOIN Symbol t ON t.id = e.src WHERE e.dst = s.id AND e.kind IN ('CALLS','REFERENCES','DEPENDS_ON') AND regexp_matches(t.file, '${TP}')) AND NOT EXISTS (SELECT 1 FROM Edge e2 JOIN Symbol p ON p.id = e2.src WHERE e2.dst = s.id AND e2.kind IN ('CALLS','REFERENCES','DEPENDS_ON','IMPORTS') AND NOT regexp_matches(p.file, '${TP}'))"),
      explain: "This exported symbol is reached from tests and from nowhere else — no production caller anywhere, including its own module. It is dead code kept alive by its own test, or a test helper living in the production tree. Delete both, or move it to the test tree."),
 
     // ---- Architecture -----------------------------------------------------
@@ -87,17 +88,17 @@ export const DEFAULT_RULE_ENTRIES = `    // ---- Code safety -------------------
      explain: "This function calls 40+ distinct targets, so it is orchestrating rather than doing one thing. Group the calls into named steps and delegate — the current shape makes every downstream change land here."),
 
     (id: "oversized-file", tier: 2, severity: warning,
-     kind: Cypher("MATCH (f:File)-[:DECLARES]->(s:Symbol) WHERE NOT regexp_matches(f.path, '${TP}') WITH f, count(s) AS n WHERE n > 60 RETURN f.path AS qualified, f.path AS file, 1 AS line"),
+     kind: Sql("SELECT f.path AS qualified, f.path AS file, 1 AS line FROM File f JOIN Symbol s ON s.fileId = f.id WHERE NOT regexp_matches(f.path, '${TP}') GROUP BY f.id HAVING COUNT(s.id) > 60"),
      explain: "A file declaring 60+ symbols has outgrown one responsibility, and it serialises everyone editing that area. Split along the natural grouping already visible in the symbol names."),
 
     (id: "god-type", tier: 2, severity: warning,
-     kind: Cypher("MATCH (t:Symbol)-[:OWNS]->(m:Symbol) WHERE t.kind IN ['class','struct','interface','trait','impl'] AND NOT regexp_matches(t.file, '${TP}') WITH t, count(m) AS n WHERE n > 30 RETURN t.qualified AS qualified, t.file AS file, t.startLine AS line"),
+     kind: Sql("SELECT t.qualified AS qualified, t.file AS file, t.startLine AS line FROM Symbol t JOIN Edge e ON e.src = t.id AND e.kind = 'OWNS' WHERE t.kind IN ('class','struct','interface','trait','impl') AND NOT regexp_matches(t.file, '${TP}') GROUP BY t.id HAVING COUNT(e.dst) > 30"),
      explain: "A type with 30+ members is accumulating unrelated responsibilities, and its callers each use a different slice of it. Extract the cohesive subsets into their own types."),
 
     // ---- Design -----------------------------------------------------------
 
     (id: "long-function", tier: 2, severity: warning,
-     kind: Cypher("MATCH (s:Symbol) WHERE s.kind IN ['function','method'] AND s.endLine - s.startLine > 120 AND NOT regexp_matches(s.file, '${TP}') RETURN s.qualified AS qualified, s.file AS file, s.startLine AS line"),
+     kind: Sql("SELECT s.qualified AS qualified, s.file AS file, s.startLine AS line FROM Symbol s WHERE s.kind IN ('function','method') AND s.endLine - s.startLine > 120 AND NOT regexp_matches(s.file, '${TP}')"),
      explain: "A function over 120 lines is doing several things at once and forces readers to hold all of it in mind. Extract the internal phases into named helpers; the comments inside usually name them already."),
 `;
 

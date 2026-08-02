@@ -8,7 +8,7 @@
  * EXTENDS/IMPLEMENTS into a broader dependant walk (CALLS/READS/WRITES/...)
  * and doesn't separate ancestors from descendants.
  *
- * Pure core: no vscode, no Kuzu specifics — walks the CodeStore interface only.
+ * Pure core: no vscode, no storage-engine specifics — walks the CodeStore interface only.
  */
 
 import type { CodeStore } from '../../store/graph/codeStore';
