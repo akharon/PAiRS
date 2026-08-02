@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { importCandidatePaths, parentDir } from './importPath';
+import { importCandidatePaths } from './importPath';
 
 describe('importCandidatePaths', () => {
   it('resolves a relative TS specifier against the importing file', () => {
@@ -44,11 +44,8 @@ describe('importCandidatePaths', () => {
   it('never escapes the repo root', () => {
     expect(importCandidatePaths('a.ts', '../../outside')).toEqual([]);
   });
-});
 
-describe('parentDir', () => {
-  it('returns the empty string for a repo-root file', () => {
-    expect(parentDir('esbuild.mjs')).toBe('');
-    expect(parentDir('src/a/b.ts')).toBe('src/a');
+  it('resolves a sibling import from a repo-root file', () => {
+    expect(importCandidatePaths('esbuild.mjs', './util')).toContain('util.mjs');
   });
 });

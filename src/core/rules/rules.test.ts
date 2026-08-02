@@ -17,6 +17,7 @@ import { ConfigError, parseRuleSet, assertReadOnlyCypher } from './config';
 import { checkRules, globToRegExp, layerOfModule } from './evaluate';
 import { createBaseline, diffAgainstBaseline, ciFailures, parseBaseline } from './baseline';
 import { DEFAULT_RULES_RON, DEFAULT_RULE_COUNT } from './defaults';
+import { TEST_PATH_REGEX_CYPHER } from '../indexer/types';
 import { violationKey } from './types';
 import type { RuleSet } from './types';
 
@@ -132,6 +133,21 @@ describe('DEFAULT_RULES_RON', () => {
     for (const r of rs.rules) {
       if (r.severity === 'error') expect(r.tier, `rule ${r.id}`).toBe(1);
     }
+  });
+
+  it('survives RON unescaping with a Cypher-ready test-path regex', () => {
+    // The pattern crosses two unescaping layers (RON, then Kuzu). If either
+    // doubling is off the rules still parse, they just silently match nothing.
+    const rs = parseRuleSet(DEFAULT_RULES_RON);
+    const queries = rs.rules.flatMap((r) => (r.kind.kind === 'Cypher' ? [r.kind.query] : []));
+    const withTestPath = queries.filter((q) => q.includes('regexp_matches'));
+    expect(withTestPath.length).toBeGreaterThan(0);
+    for (const q of withTestPath) expect(q).toContain(TEST_PATH_REGEX_CYPHER);
+  });
+
+  it('identifies test files by path shape, never by substring', () => {
+    // `contains(file, 'test')` also matches `latest.ts` and misses `.spec.ts`.
+    expect(DEFAULT_RULES_RON).not.toContain(`contains(`);
   });
 
   it('avoids edge kinds that only the Rust extractor emits', () => {

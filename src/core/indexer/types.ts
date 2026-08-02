@@ -246,11 +246,33 @@ export interface IndexStats {
 // Rust `#[cfg(test)]` in-file test modules are invisible to this v1 pass.
 // ---------------------------------------------------------------------------
 
-export const TEST_PATH_PATTERNS: readonly RegExp[] = [/\btests\//, /\btests\.rs$/, /_test\.rs$/];
+/**
+ * Test-path predicate as regex *source*, so the same definition can be handed
+ * to Cypher's `regexp_matches` (default rules, untested()) and to JS. Substring
+ * tests like `contains(file, 'test')` are not usable here: they also match
+ * `latest.ts`, `contest/`, `testimonials/`, and they miss `.spec.ts` entirely —
+ * both directions produced default-rule false positives.
+ */
+export const TEST_PATH_REGEX =
+  '(^|/)(tests?|__tests__)/|\\.(test|spec)\\.[a-zA-Z]+$|_test\\.(rs|go|py)$|(^|/)tests\\.rs$|(^|/)(test_[^/]+|conftest)\\.py$';
+
+/**
+ * {@link TEST_PATH_REGEX} with every backslash doubled, ready to paste inside a
+ * Cypher single-quoted literal — Kuzu unescapes `\\` to `\` when parsing one.
+ */
+export const TEST_PATH_REGEX_CYPHER = TEST_PATH_REGEX.replace(/\\/g, '\\\\');
+
+const TEST_PATH_RE = new RegExp(TEST_PATH_REGEX);
 
 export function isTestPath(path: string): boolean {
-  return TEST_PATH_PATTERNS.some((re) => re.test(path));
+  return TEST_PATH_RE.test(path);
 }
+
+/**
+ * Functions the host calls, not the workspace: they have no in-workspace
+ * caller by design, so fan-out and dead-code passes must not flag them.
+ */
+export const ENTRY_POINT_NAMES: ReadonlySet<string> = new Set(['main', 'activate', 'deactivate']);
 
 /** Returned when a tool's `symbol` argument matches more than one symbol. */
 export interface AmbiguousSymbol {

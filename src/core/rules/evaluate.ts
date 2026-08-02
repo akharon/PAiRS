@@ -10,7 +10,7 @@
  * themselves track the weakest confidence seen.
  */
 
-import { isTestPath } from '../indexer/types';
+import { ENTRY_POINT_NAMES, isTestPath } from '../indexer/types';
 import type { CodeStore } from '../../store/graph/codeStore';
 import type { CheckResult, LayeringRule, MaxFanOutRule, Rule, RuleSet, Violation, ViolationNode, ForbiddenDepRule, VisibilityBoundaryRule, NoCyclesRule, CypherRule } from './types';
 
@@ -165,6 +165,9 @@ async function evalMaxFanOut(rule: Rule, kind: MaxFanOutRule, store: CodeStore):
     const file = String(r.f);
     if (kind.pathPrefix && !file.startsWith(kind.pathPrefix)) continue;
     if (isTestPath(file)) continue; // a test harness fanning out is not an architecture smell
+    // CLI dispatch and extension activation exist to wire up everything else;
+    // high fan-out is their shape, not a smell they can refactor away.
+    if (ENTRY_POINT_NAMES.has(String(r.n))) continue;
     const total = Number(r.total);
     const fuzzyN = Number(r.fuzzy);
     if (total <= kind.max) continue;

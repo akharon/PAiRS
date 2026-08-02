@@ -35,14 +35,13 @@ import type {
   SymbolKind,
   SymbolRecord,
 } from '../../core/indexer/types';
-import { isTestPath } from '../../core/indexer/types';
+import { ENTRY_POINT_NAMES, isTestPath, TEST_PATH_REGEX_CYPHER } from '../../core/indexer/types';
 import type { CodeStore, CodeStoreFactory } from './codeStore';
 import { stripCypherLiterals } from './codeStore';
 import { importCandidatePaths } from './importPath';
 import { REFERENCE_EDGE_TABLES, SCHEMA_DDL, SCHEMA_VERSION, STRUCTURAL_EDGE_TABLES } from './schema';
 
 /** Rust items that are never dead code even with zero incoming edges. */
-const ENTRY_POINT_NAMES: ReadonlySet<string> = new Set(['main']);
 
 /**
  * Kuzu always hands back untyped `Record<string, KuzuValue>` rows, so these
@@ -1179,7 +1178,7 @@ export class KuzuCodeStore implements CodeStore {
     // symbol (same round-trip amplification as unreferenced(), see above).
     const testCalled = new Set<number>();
     const testerRes = await this.q(
-      `MATCH (t:Symbol)-[:CALLS]->(s:Symbol) WHERE t.file =~ '.*(tests?/|__tests__/|\\\\.test\\\\.rs$|_test\\\\.rs$)' RETURN DISTINCT s.id AS id`
+      `MATCH (t:Symbol)-[:CALLS]->(s:Symbol) WHERE regexp_matches(t.file, '${TEST_PATH_REGEX_CYPHER}') RETURN DISTINCT s.id AS id`
     );
     for (const r of await testerRes.getAll()) testCalled.add(Number(r.id));
     testerRes.close();
@@ -1223,9 +1222,14 @@ export class KuzuCodeStore implements CodeStore {
       adj = new Map();
       for (const r of rows) {
         const fromFile = String(r.fromFile);
+        const toFile = String(r.toFile);
         if (opts.pathPrefix && !fromFile.startsWith(opts.pathPrefix)) continue;
+        // `e.test` only marks Rust `#[cfg(test)]` edges. A `.test.ts` file is an
+        // ordinary file whose fuzzy CALLS edges stitch its subject into a cycle
+        // that does not exist in shipped code — drop test files outright.
+        if (opts.excludeTest && (isTestPath(fromFile) || isTestPath(toFile))) continue;
         if (!adj.has(fromFile)) adj.set(fromFile, new Set());
-        adj.get(fromFile)!.add(String(r.toFile));
+        adj.get(fromFile)!.add(toFile);
       }
     } else {
       const res = await this.q(

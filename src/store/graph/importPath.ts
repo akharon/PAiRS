@@ -68,7 +68,7 @@ function joinPath(dir: string, rel: string): string {
 }
 
 /** The importing file's directory ('' for a repo-root file). */
-export function parentDir(file: string): string {
+function parentDir(file: string): string {
   const i = file.lastIndexOf('/');
   return i < 0 ? '' : file.slice(0, i);
 }
@@ -143,7 +143,7 @@ export function importCandidatePaths(fromPath: string, specifier: string): strin
 }
 
 /** True when the specifier points inside the workspace, so a miss is worth retrying later. */
-export function isWorkspaceRelative(specifier: string): boolean {
+function isWorkspaceRelative(specifier: string): boolean {
   const spec = specifier.trim().replace(/^["'<]+/, '').replace(/[">']+$/, '');
   return spec.startsWith('.') || spec.startsWith('/');
 }
