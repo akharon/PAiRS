@@ -143,6 +143,44 @@ describe('resolveOneRef ladder', () => {
     // `crate::video::reset` names no workspace module declaring `reset`.
     expect(await confidenceOf('g.rs', call('reset', 'crate::video::reset'))).toBe('unresolved');
   });
+
+  // Same-file shadowing: a bare ref in a file that declares `name` binds to
+  // that local declaration. Lexical scope beats any workspace namesake, so the
+  // global ladder must not run at all.
+  //
+  // Before this rung, a file-local `main()` fanned out to EVERY workspace
+  // `main` — in this repo v3BenchCli.ts:44 got three CALLS edges (scripts/,
+  // adapters/cli, and its own), and `pairs check` reported the cross-module
+  // phantoms as layering violations. Same shape for a callback parameter
+  // named `pick` in analyze/hierarchy.ts.
+  it('binds a bare call to the calling file’s own declaration, not a namesake', async () => {
+    await store.applyExtraction(extraction('scripts/tool.rs', [sym('main', 'main', 'function')]));
+    await store.applyExtraction(
+      extraction('src/bench/cli.rs', [sym('main', 'main', 'function')], [call('main', null)])
+    );
+    const rows = await store.query(
+      `SELECT b.file AS dst, e.confidence AS conf FROM Edge e
+       JOIN Symbol a ON a.id = e.src JOIN Symbol b ON b.id = e.dst
+       WHERE e.kind = 'CALLS' AND a.qualified = 'src/bench/cli.rs'`
+    );
+    // Exactly one edge, to itself, confirmed — no cross-module phantom.
+    expect(rows.map((r) => String(r.dst))).toEqual(['src/bench/cli.rs']);
+    expect(String(rows[0]!.conf)).toBe('resolved');
+  });
+
+  // The shadowing rung must not swallow the method-call cap: there the
+  // receiver's static type is unknown, so a same-file namesake is coincidence
+  // rather than lexical scope.
+  it('still caps a same-file method call at fuzzy', async () => {
+    await store.applyExtraction(
+      extraction('src/recv.rs', [sym('flush', 'Buf::flush')], [{ ...call('flush', null), methodCall: true }])
+    );
+    const rows = await store.query(
+      `SELECT e.confidence AS conf FROM Edge e JOIN Symbol a ON a.id = e.src
+       WHERE e.kind = 'CALLS' AND a.qualified = 'src/recv.rs'`
+    );
+    expect(String(rows[0]!.conf)).toBe('fuzzy');
+  });
 });
 
 describe('stats precision buckets', () => {

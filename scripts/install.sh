@@ -9,6 +9,27 @@ echo "🚀 PAiRS installation — full pipeline"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
+# The store uses the built-in node:sqlite module, which needs Node >= 22.
+REQUIRED_NODE_MAJOR=22
+node_major() { node -v | sed 's/^v//; s/\..*//'; }
+
+if [ "$(node_major)" -lt "$REQUIRED_NODE_MAJOR" ]; then
+  if [ -s "${NVM_DIR:-$HOME/.nvm}/nvm.sh" ]; then
+    echo "ℹ️  Node $(node -v) is too old; switching to Node $REQUIRED_NODE_MAJOR via nvm"
+    export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+    # shellcheck disable=SC1091
+    . "$NVM_DIR/nvm.sh"
+    nvm use "$REQUIRED_NODE_MAJOR" >/dev/null 2>&1 || true
+  fi
+fi
+
+if [ "$(node_major)" -lt "$REQUIRED_NODE_MAJOR" ]; then
+  echo "❌ Error: Node >= $REQUIRED_NODE_MAJOR required (node:sqlite), found $(node -v)"
+  exit 1
+fi
+echo "🟢 Node $(node -v)"
+echo ""
+
 echo "📦 Step 1: Build"
 npm run build
 echo "✅ Build complete"

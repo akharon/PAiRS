@@ -104,6 +104,37 @@ function isDotted(spec: string): boolean {
 }
 
 /**
+ * True when `specifier` can only name a module OUTSIDE the workspace: a
+ * runtime builtin (`node:fs`) or a bare package name (`vitest`, `zod`).
+ *
+ * Deliberately decided on the specifier's SHAPE, not on whether the target
+ * resolves to an indexed file: indexing is per-file and order-dependent, so a
+ * relative import whose target simply hasn't been indexed yet would look
+ * "unresolvable" and be misclassified as external. That mistake suppressed the
+ * real `app/main.ts → lib/util.ts` CALLS edge.
+ *
+ * A relative (`./x`, `../x`) or rooted (`src/x`) specifier is therefore never
+ * external, whether or not its target exists yet. Only `::` paths (Rust, whose
+ * crate-external `use`s the name ladder handles) and dotted Python module
+ * paths are left alone, since neither shape distinguishes local from external.
+ */
+export function isExternalSpecifier(specifier: string): boolean {
+  const spec = specifier.trim().replace(/^["'<]+/, '').replace(/[">']+$/, '');
+  if (spec === '' || spec.includes('::')) return false;
+  if (spec.startsWith('node:')) return true;
+  // Relative or rooted path → a workspace file by construction.
+  if (spec.startsWith('.') || spec.startsWith('/')) return false;
+  if (spec.includes('/')) {
+    // `vitest/config`, `@scope/pkg` are packages; `src/core/x` is in-repo.
+    // A leading `@` scope or a first segment with no path-like meaning is a
+    // package; anything else is treated as in-repo and left to resolve.
+    return spec.startsWith('@');
+  }
+  // A single bare segment with no separator and no extension: a package name.
+  return extensionOf(spec) === null;
+}
+
+/**
  * Repo-relative paths `specifier`, written in `fromPath`, could refer to —
  * best guess first. Empty when the specifier is not a file reference at all
  * (Rust `use` paths, which the name ladder resolves instead).

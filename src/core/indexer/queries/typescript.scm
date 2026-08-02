@@ -96,10 +96,18 @@
   value: (object))
 
 ; --- imports -----------------------------------------------------------------------
-(import_statement source: (string) @import.specifier)
-(import_specifier name: (identifier) @import.bound)
-(namespace_import (identifier) @import.bound)
-(import_clause (identifier) @import.bound)
+; The bound names must be captured by the SAME pattern as the specifier:
+; tree-sitter reports one match per pattern, and foldMatch reads
+; `import.bound` out of the specifier's match. As separate top-level
+; patterns they landed in different matches and every `boundNames` came
+; back empty, so an imported name was indistinguishable from a local one.
+(import_statement
+  (import_clause [
+    (identifier) @import.bound
+    (namespace_import (identifier) @import.bound)
+    (named_imports (import_specifier name: (identifier) @import.bound))
+  ])?
+  source: (string) @import.specifier)
 
 ; --- re-exports (export ... from) ------------------------------------------------
 (export_statement source: (string) @import.specifier)

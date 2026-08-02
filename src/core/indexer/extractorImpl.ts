@@ -272,6 +272,41 @@ export class ExtractorImpl implements Extractor {
       const defRanges = defs
         .filter((d) => !d.scope)
         .map((d) => ({ index: nodeIdToIndex.get(d.node.id)!, def: d }));
+      /**
+       * True when `name` is bound as a parameter of some function enclosing
+       * `node` — i.e. the call target is a local binding, not a workspace
+       * symbol.
+       *
+       * Parameters are deliberately not indexed as symbols, so without this a
+       * bare `pick(e)` whose `pick` is a callback parameter falls through to
+       * the resolver's global name ladder and binds to the only workspace
+       * symbol named `pick` — in another module. That produced a *confirmed*
+       * cross-module CALLS edge (analyze/hierarchy.ts → adapters/bench) and a
+       * false Tier-1 layering error. A higher-order function taking `fn`,
+       * `cb`, `next`, or `handler` hits this constantly.
+       *
+       * Detected structurally rather than per-grammar: every supported
+       * language nests parameter identifiers under a node whose type contains
+       * "param" (formal_parameters, required_parameter, parameter_list,
+       * method_parameters, parameters, …).
+       */
+      const shadowedByParam = (node: Node, name: string): boolean => {
+        for (let fn: Node | null = node.parent; fn !== null; fn = fn.parent) {
+          for (const child of fn.namedChildren) {
+            if (child === null || !/param/i.test(child.type)) continue;
+            // Any identifier directly under the parameter list binds a name.
+            const names: string[] = [];
+            const collect = (n: Node): void => {
+              if (n.type === 'identifier' || n.type === 'shorthand_property_identifier_pattern') names.push(n.text);
+              for (const c of n.namedChildren) if (c !== null) collect(c);
+            };
+            collect(child);
+            if (names.includes(name)) return true;
+          }
+        }
+        return false;
+      };
+
       for (const ref of rawRefs) {
         let enclosing = 0; // module symbol
         let bestSize = Infinity;
@@ -286,9 +321,17 @@ export class ExtractorImpl implements Extractor {
             }
           }
         }
+        // A bare ref naming an enclosing parameter is a call through that
+        // local binding. Its real target is whatever the caller passed in, is
+        // not knowable here, and is certainly not a same-named symbol in
+        // another module — so emit no edge at all rather than a wrong one.
+        // Qualified refs are exempt: the qualifier already constrains them.
+        const bare = bareRefName(ref.name);
+        if (qualifiedRefName(ref.name) === null && shadowedByParam(ref.node, bare)) continue;
+
         extraction.refs.push({
           fromIndex: enclosing,
-          name: bareRefName(ref.name),
+          name: bare,
           qualifiedName: qualifiedRefName(ref.name),
           kind: ref.kind,
           line: ref.node.startPosition.row + 1,

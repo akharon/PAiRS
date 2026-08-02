@@ -287,4 +287,37 @@ describe('code indexer pipeline', () => {
       expect(extraction.crate).toBe('pairs_core');
     });
   });
+
+  // Calls through a parameter (callbacks, injected ports) name a local
+  // binding, not a workspace symbol. Parameters are not indexed as symbols, so
+  // emitting a ref lets the resolver's global name ladder bind it to the only
+  // same-named symbol anywhere — a *confirmed* cross-module CALLS edge. In
+  // this repo `pick(e)` in analyze/hierarchy.ts bound to adapters/bench's
+  // `pick` and raised a false Tier-1 layering error.
+  describe('parameter-shadowed calls emit no edge', () => {
+    const cases: Array<[CodeLang, string, string]> = [
+      ['typescript', 'function walk(pick: F) { return pick(1); }', 'ts'],
+      ['python', 'def walk(pick):\n    return pick(1)\n', 'py'],
+      ['rust', 'fn walk(pick: F) -> u32 { pick(1) }', 'rs'],
+    ];
+    for (const [lang, src, ext] of cases) {
+      it(`suppresses the callback ref in ${lang}`, async () => {
+        const loaded = await registry.load(lang);
+        const extraction = extractor.extract(loaded, `cb.${ext}`, src, { mtimeMs: 1, size: src.length }, null);
+        const picks = extraction.refs.filter((r) => r.kind === 'CALLS' && r.name === 'pick');
+        expect(picks).toHaveLength(0);
+      });
+    }
+
+    // Only the shadowed scope is suppressed — a call to the same name from a
+    // function that does NOT bind it is a real reference and must survive.
+    it('keeps a same-named call made outside the shadowing function', async () => {
+      const loaded = await registry.load('typescript');
+      const src = 'function walk(pick: F) { return pick(1); }\nfunction other() { return pick(2); }';
+      const extraction = extractor.extract(loaded, 'cb2.ts', src, { mtimeMs: 1, size: src.length }, null);
+      // `other` binds no `pick`, so its call is a genuine workspace ref.
+      const fromOther = extraction.refs.filter((r) => r.kind === 'CALLS' && r.name === 'pick');
+      expect(fromOther.length).toBeGreaterThan(0);
+    });
+  });
 });

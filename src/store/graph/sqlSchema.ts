@@ -15,7 +15,7 @@
  * an old index — drop and recreate. The index is derived data, never migrated.
  */
 
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 export const SCHEMA_DDL: readonly string[] = [
   `CREATE TABLE IF NOT EXISTS File(
@@ -68,6 +68,15 @@ export const SCHEMA_DDL: readonly string[] = [
      methodCall INTEGER DEFAULT 0,
      inTest INTEGER DEFAULT 0
    )`,
+  // Names a file binds from OUTSIDE the workspace (`import { expect } from
+  // 'vitest'`). Needed by resolvePending, which re-resolves parked refs long
+  // after the extraction that knew the imports is gone — without it a bare ref
+  // binds to any workspace namesake and is reported `resolved`.
+  `CREATE TABLE IF NOT EXISTS ExternalName(
+     fileId INTEGER NOT NULL REFERENCES File(id) ON DELETE CASCADE,
+     name TEXT NOT NULL,
+     PRIMARY KEY (fileId, name)
+   )`,
   `CREATE TABLE IF NOT EXISTS Meta(key TEXT PRIMARY KEY, value TEXT)`,
 ];
 
@@ -93,4 +102,4 @@ export const REFERENCE_EDGE_KINDS: readonly string[] = ['CALLS', 'READS', 'WRITE
 /** Structural (Pass 1) edge kinds — always resolved. */
 export const STRUCTURAL_EDGE_KINDS: readonly string[] = ['DECLARES', 'OWNS', 'PARAM', 'OF_TYPE', 'RETURNS'];
 
-export const ALL_TABLES: readonly string[] = ['Edge', 'PendingRef', 'Symbol', 'File', 'Meta'];
+export const ALL_TABLES: readonly string[] = ['Edge', 'PendingRef', 'ExternalName', 'Symbol', 'File', 'Meta'];

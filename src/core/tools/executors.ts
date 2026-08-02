@@ -397,7 +397,20 @@ export function createExecutors(deps: ExecutorDeps): Executors {
       const { page: edgePage, note } = paginate(filtered, input.limit);
       const syms = await Promise.all(edgePage.map((e) => store.get(input.direction === 'callers' ? e.fromId : e.toId)));
       const page = syms.map((s, i) => ({ s, e: edgePage[i]! })).filter((x) => x.s);
-      const body = page.map((x) => `  - ${cite(x.s!)}${x.e.confidence === 'fuzzy' ? '  [fuzzy]' : ''}`).join('\n');
+      // Cite the *reference site*, not the counterpart's declaration line.
+      // `EdgeRecord.line` is in `from`'s file, so it only re-anchors the
+      // `callers` direction; for `callees` the edge line belongs to the
+      // caller's file, not the callee's, so the declaration stands.
+      //
+      // Without this, N calls from one function collapsed into N identical
+      // rows: `who_calls checkRules` printed `rules.test.ts:1` ten times for
+      // ten distinct call sites, none of them navigable.
+      const body = page
+        .map((x) => {
+          const at = input.direction === 'callers' ? `${x.s!.file}:${x.e.line}` : null;
+          return `  - ${cite(x.s!)}${at ? `  → called at ${at}` : ''}${x.e.confidence === 'fuzzy' ? '  [fuzzy]' : ''}`;
+        })
+        .join('\n');
       return `${filtered.length} ${input.direction} of ${r.sym.qualified || r.sym.name}:\n${body}${note}`;
     },
 

@@ -44,7 +44,7 @@ import type {
 import { ENTRY_POINT_NAMES, isTestPath, TEST_PATH_REGEX } from '../../core/indexer/types';
 import type { CodeStore, CodeStoreFactory } from './codeStore';
 import { assertReadOnlySql } from './codeStore';
-import { importCandidatePaths } from './importPath';
+import { importCandidatePaths, isExternalSpecifier } from './importPath';
 import { nodeSqlDriver } from './sqliteDriver';
 import type { SqlConnectionLike, SqlDriver, SqlStatement } from './sqliteDriver';
 import { ALL_TABLES, REFERENCE_EDGE_KINDS, SCHEMA_DDL, SCHEMA_INDEXES, SCHEMA_VERSION } from './sqlSchema';
@@ -376,6 +376,7 @@ export class SqliteCodeStore implements CodeStore {
       this.run(`DELETE FROM Edge WHERE kind = 'DECLARES' AND src = ?`, fileId);
       this.run(`DELETE FROM Symbol WHERE fileId = ?`, fileId);
       this.run(`DELETE FROM PendingRef WHERE fileId = ?`, fileId);
+      this.run(`DELETE FROM ExternalName WHERE fileId = ?`, fileId);
       this.run(
         `UPDATE File SET lang=?, mtimeMs=?, size=?, hash=?, indexedAt=?, crate=?, parseError=? WHERE id=?`,
         extraction.lang,
@@ -469,10 +470,31 @@ export class SqliteCodeStore implements CodeStore {
 
     // Pass 2, phase A: resolve what we can now; park the rest.
     const useSpecifiers = extraction.uses.map((u) => u.specifier);
+    // Names this file imports from OUTSIDE the workspace (`vitest`, `zod`,
+    // `node:fs`). These name external symbols, so they must never bind to a
+    // workspace namesake. A glob import binds no name we can list, so it
+    // contributes nothing.
+    //
+    // Classified by specifier shape rather than by "does this resolve to an
+    // indexed file": files are indexed one at a time, so a relative import
+    // whose target comes later would look unresolvable and be wrongly marked
+    // external, suppressing a real edge.
+    const externalNames = new Set<string>();
+    for (const u of extraction.uses) {
+      if (u.isGlob || u.boundNames.length === 0) continue;
+      if (!isExternalSpecifier(u.specifier)) continue;
+      for (const n of u.boundNames) externalNames.add(n);
+    }
+    // Persist for resolvePending, which re-resolves parked refs after this
+    // extraction is gone.
+    if (externalNames.size > 0) {
+      const insExt = this.stmt(`INSERT OR IGNORE INTO ExternalName(fileId, name) VALUES (?, ?)`);
+      for (const n of externalNames) insExt.run(fileId, n);
+    }
     const pending: RawRef[] = [];
     for (const ref of extraction.refs) {
       const fromId = indexToId[ref.fromIndex]!;
-      const resolved = this.resolveOneRef(ref.name, ref.qualifiedName, useSpecifiers, ref.methodCall ?? false, extraction.path);
+      const resolved = this.resolveOneRef(ref.name, ref.qualifiedName, useSpecifiers, ref.methodCall ?? false, extraction.path, externalNames);
       if (resolved === 'unresolved') {
         pending.push(ref);
         continue;
@@ -575,7 +597,8 @@ export class SqliteCodeStore implements CodeStore {
     qualifiedName: string | null,
     useSpecifiers: string[],
     methodCall = false,
-    fromPath: string | null = null
+    fromPath: string | null = null,
+    externalNames?: ReadonlySet<string>
   ): { ids: number[]; confidence: 'resolved' | 'fuzzy' } | 'unresolved' {
     const idx = this.loadSymbolIndex();
 
@@ -655,7 +678,42 @@ export class SqliteCodeStore implements CodeStore {
       return 'unresolved';
     }
 
-    // Rung 2: bare refs.
+    // Rung 2: same-file shadowing. A bare ref in a file that itself declares
+    // `name` binds to that local declaration — lexical scope beats any
+    // workspace-wide namesake, so this is `resolved`, not a fuzzy fan-out.
+    //
+    // Without this the global ladder below returned EVERY namesake: a local
+    // `main()` in v3BenchCli.ts produced three CALLS edges (to scripts/, to
+    // cli/index.ts, and to its own real target), and those cross-module
+    // phantoms were reported as layering violations. Same for a callback
+    // parameter named `pick` and any common helper name.
+    //
+    // Only applies to bare refs — a qualified ref returns at Rung 1, where the
+    // qualifier is already a constraint. Method/member calls are excluded:
+    // there the receiver's static type is unknown, so a same-file namesake is
+    // coincidence rather than lexical scope, and `gate` must still cap it.
+    if (fromPath && !methodCall) {
+      const local = (idx.byNameWithPath.get(name) ?? []).filter((c) => c.path === fromPath);
+      if (local.length > 0) {
+        // Multiple same-file declarations (overloads, shadowed scopes) are
+        // ambiguous within the file, but still certainly not cross-module.
+        return { ids: local.map((c) => c.id), confidence: local.length === 1 ? 'resolved' : 'fuzzy' };
+      }
+    }
+
+    // Rung 3 guard: a name bound by an import that resolves OUTSIDE the
+    // workspace names an external symbol, so no workspace symbol can be its
+    // target — however few namesakes exist.
+    //
+    // Rung 3 below treats "only one workspace match" as proof and returns
+    // `resolved`. Uniqueness inside the workspace says nothing about whether
+    // the call targets it: `Parser.expect` (rules/ron.ts) was the only
+    // `expect` indexed, so all 385 vitest `expect()` calls bound to it as
+    // CONFIRMED — inflating the tools→rules boundary from ~13 refs to 107.
+    // Same for Zod's `z.string()`/`z.number()` against Parser.string/number.
+    if (externalNames?.has(name)) return 'unresolved';
+
+    // Rung 3: bare refs, workspace-wide.
     const byQualified = idx.byQualified.get(name);
     if (byQualified) return gate({ ids: [...byQualified], confidence: byQualified.length === 1 ? 'resolved' : 'fuzzy' });
     const byName = idx.byName.get(name);
@@ -675,6 +733,19 @@ export class SqliteCodeStore implements CodeStore {
 
     const pathByFileId = new Map<number, string>();
     for (const fr of this.all(`SELECT id, path FROM File`)) pathByFileId.set(Number(fr.id), String(fr.path));
+
+    // Each file's externally-bound names, recorded at extraction time (see
+    // applyExtractionInner). A ref that parks in phase A is re-resolved here,
+    // so without this the guard is bypassed on the second pass and the binding
+    // it prevented happens anyway — which is exactly how vitest's `expect`
+    // reached Parser.expect as `resolved`.
+    const externalByFile = new Map<number, Set<string>>();
+    for (const r of this.all(`SELECT fileId, name FROM ExternalName`)) {
+      const fileId = Number(r.fileId);
+      let set = externalByFile.get(fileId);
+      if (set === undefined) externalByFile.set(fileId, (set = new Set<string>()));
+      set.add(String(r.name));
+    }
 
     // Decide first, write once.
     let created = 0;
@@ -704,7 +775,10 @@ export class SqliteCodeStore implements CodeStore {
       }
 
       const fromPath = isUseImport ? null : declaringPath;
-      const resolved = this.resolveOneRef(String(r.name), String(r.qualifiedName ?? '') || null, [], Boolean(r.methodCall), fromPath);
+      // A parked import is itself the dependency statement, so it must still
+      // resolve by name; only ordinary refs get the external-name guard.
+      const externalNames = isUseImport ? undefined : externalByFile.get(Number(r.fileId));
+      const resolved = this.resolveOneRef(String(r.name), String(r.qualifiedName ?? '') || null, [], Boolean(r.methodCall), fromPath, externalNames);
       if (resolved === 'unresolved') {
         // Full-index pass: every file has declared, so this names something
         // outside the workspace (npm/stdlib/test globals like `it`/`describe`/

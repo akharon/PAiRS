@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { importCandidatePaths } from './importPath';
+import { importCandidatePaths, isExternalSpecifier } from './importPath';
 
 describe('importCandidatePaths', () => {
   it('resolves a relative TS specifier against the importing file', () => {
@@ -47,5 +47,29 @@ describe('importCandidatePaths', () => {
 
   it('resolves a sibling import from a repo-root file', () => {
     expect(importCandidatePaths('esbuild.mjs', './util')).toContain('util.mjs');
+  });
+});
+
+describe('isExternalSpecifier', () => {
+  it('calls bare package names and builtins external', () => {
+    expect(isExternalSpecifier('vitest')).toBe(true);
+    expect(isExternalSpecifier('zod')).toBe(true);
+    expect(isExternalSpecifier('node:fs')).toBe(true);
+    expect(isExternalSpecifier('@scope/pkg')).toBe(true);
+  });
+
+  // The regression this guards: classifying by "does it resolve to an indexed
+  // file" marked a relative import external whenever its target happened to be
+  // indexed later, which suppressed the real app/main.ts → lib/util.ts edge.
+  it('never calls a relative or rooted specifier external, target indexed or not', () => {
+    expect(isExternalSpecifier('./util')).toBe(false);
+    expect(isExternalSpecifier('../lib/util')).toBe(false);
+    expect(isExternalSpecifier('src/core/tools/executors')).toBe(false);
+  });
+
+  // Rust `use` paths are resolved by the name ladder, not as file paths.
+  it('leaves :: paths to the name ladder', () => {
+    expect(isExternalSpecifier('crate::auth::service')).toBe(false);
+    expect(isExternalSpecifier('std::collections::HashMap')).toBe(false);
   });
 });
