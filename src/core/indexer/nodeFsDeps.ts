@@ -13,6 +13,54 @@ import { langForPath } from './parserRegistry';
 /** Directories never worth walking (also the watcher's ignore set). */
 export const SKIP_DIRS = new Set(['.git', 'node_modules', 'dist', 'out', 'build', '.pairs', '.vscode', 'target']);
 
+/**
+ * What a directory entry is, following symlinks one level.
+ *
+ * `readdir(withFileTypes)` builds Dirents from lstat-style metadata, so a
+ * symlink answers false to BOTH isDirectory() and isFile() — walking on those
+ * alone silently drops linked source trees. Resolve the link to classify it by
+ * its target instead. Broken links and unreadable targets classify as 'other'
+ * (skipped), never throw.
+ */
+async function classifyEntry(entry: fs.Dirent, abs: string): Promise<'dir' | 'file' | 'other'> {
+  if (entry.isDirectory()) return 'dir';
+  if (entry.isFile()) return 'file';
+  if (!entry.isSymbolicLink()) return 'other';
+  try {
+    const st = await fs.promises.stat(abs); // follows the link; throws if dangling
+    return st.isDirectory() ? 'dir' : st.isFile() ? 'file' : 'other';
+  } catch {
+    return 'other'; // dangling or unreadable target
+  }
+}
+
+/** Sync counterpart of `classifyEntry` for the watcher's setup path. */
+function classifyEntrySync(entry: fs.Dirent, abs: string): 'dir' | 'file' | 'other' {
+  if (entry.isDirectory()) return 'dir';
+  if (entry.isFile()) return 'file';
+  if (!entry.isSymbolicLink()) return 'other';
+  try {
+    const st = fs.statSync(abs);
+    return st.isDirectory() ? 'dir' : st.isFile() ? 'file' : 'other';
+  } catch {
+    return 'other';
+  }
+}
+
+/**
+ * Canonical path for cycle detection, or null if unresolvable. Symlinks can
+ * point at an ancestor (`ws/link -> ws`) or at each other, which would make a
+ * naive recursive walk loop forever — dedupe on real path so each physical
+ * directory is visited once.
+ */
+async function realPathOrNull(abs: string): Promise<string | null> {
+  try {
+    return await fs.promises.realpath(abs);
+  } catch {
+    return null;
+  }
+}
+
 /** Is any segment of this workspace-relative path a skipped directory? */
 export function isSkippedPath(relPath: string): boolean {
   return relPath.split('/').some((seg) => SKIP_DIRS.has(seg) || (seg.startsWith('.') && seg !== '.'));
@@ -35,6 +83,8 @@ export function nodeWatchWorkspace(
   cb: { changed(relPath: string): void; deleted(relPath: string): void }
 ): () => void {
   const watchers = new Map<string, fs.FSWatcher>(); // relDir ('' = root) → watcher
+  const realOfWatched = new Map<string, string>(); // relDir → real path
+  const watchedReal = new Set<string>(); // real paths of watched dirs — breaks symlink cycles
   let disposed = false;
 
   const onFsEvent = (relDir: string, filename: string | null): void => {
@@ -43,7 +93,7 @@ export function nodeWatchWorkspace(
     if (isSkippedPath(rel)) return;
     const abs = path.join(workspaceRoot, rel);
     fs.promises
-      .stat(abs)
+      .stat(abs) // follows symlinks: a linked dir/file is treated as its target
       .then((st) => {
         if (st.isDirectory()) addDir(rel); // new subdir → start watching it
         else if (langForPath(rel)) cb.changed(rel);
@@ -57,23 +107,40 @@ export function nodeWatchWorkspace(
 
   const addDir = (relDir: string): void => {
     if (disposed || watchers.has(relDir) || (relDir !== '' && isSkippedPath(relDir))) return;
+    const absDir = path.join(workspaceRoot, relDir);
+    // Two links to one physical dir would otherwise mean two watchers and
+    // duplicate events; an ancestor link would recurse forever.
+    let real: string;
+    try {
+      real = fs.realpathSync(absDir);
+    } catch {
+      return; // dangling link or vanished dir
+    }
+    if (watchedReal.has(real)) return;
     let w: fs.FSWatcher;
     try {
-      w = fs.watch(path.join(workspaceRoot, relDir), (_ev, fn) => onFsEvent(relDir, fn as string | null));
+      w = fs.watch(absDir, (_ev, fn) => onFsEvent(relDir, fn as string | null));
     } catch {
       return; // dir vanished between event and watch — fine
     }
-    w.on('error', () => watchers.delete(relDir)); // never crash the host on EMFILE etc.
+    w.on('error', () => {
+      watchers.delete(relDir);
+      realOfWatched.delete(relDir);
+      watchedReal.delete(real);
+    }); // never crash the host on EMFILE etc.
     watchers.set(relDir, w);
-    // Recurse into existing children.
+    realOfWatched.set(relDir, real);
+    watchedReal.add(real);
+    // Recurse into existing children (symlinked dirs included).
     let entries: fs.Dirent[] = [];
     try {
-      entries = fs.readdirSync(path.join(workspaceRoot, relDir), { withFileTypes: true });
+      entries = fs.readdirSync(absDir, { withFileTypes: true });
     } catch {
       return;
     }
     for (const e of entries) {
-      if (e.isDirectory() && !SKIP_DIRS.has(e.name) && !e.name.startsWith('.')) {
+      if (e.name.startsWith('.') || SKIP_DIRS.has(e.name)) continue;
+      if (classifyEntrySync(e, path.join(absDir, e.name)) === 'dir') {
         addDir(relDir ? `${relDir}/${e.name}` : e.name);
       }
     }
@@ -84,6 +151,8 @@ export function nodeWatchWorkspace(
       if (d === relDir || d.startsWith(relDir + '/')) {
         w.close();
         watchers.delete(d);
+        watchedReal.delete(realOfWatched.get(d) ?? '');
+        realOfWatched.delete(d);
       }
     }
   };
@@ -93,14 +162,33 @@ export function nodeWatchWorkspace(
     disposed = true;
     for (const w of watchers.values()) w.close();
     watchers.clear();
+    realOfWatched.clear();
+    watchedReal.clear();
   };
 }
 
-/** Recursive workspace enumeration of indexable source files, workspace-relative POSIX paths. */
+/**
+ * Recursive workspace enumeration of indexable source files, workspace-relative
+ * POSIX paths.
+ *
+ * Symlinked directories and files are followed (classifyEntry), so a workspace
+ * that links in a shared source tree indexes it. Paths stay workspace-relative
+ * *through* the link (`linkedDir/ext.ts`, not the target's real path) — that is
+ * the identity the store, watcher and rule globs all use.
+ *
+ * Cycle protection tracks the real paths of the CURRENT descent (`ancestors`),
+ * not every directory ever visited: a link pointing at its own ancestor must
+ * stop, but two distinct links to one shared tree are both legitimate workspace
+ * paths and must each be enumerated. A global visited-set would silently drop
+ * whichever link the walk reached second.
+ */
 export function nodeListWorkspaceFiles(workspaceRoot: string): () => Promise<string[]> {
   return async () => {
     const results: string[] = [];
-    const walk = async (dir: string): Promise<void> => {
+    const walk = async (dir: string, ancestors: ReadonlySet<string>): Promise<void> => {
+      const real = await realPathOrNull(dir);
+      if (real === null || ancestors.has(real)) return; // unresolvable, or a link back into our own descent
+      const nextAncestors = new Set(ancestors).add(real);
       let entries: fs.Dirent[];
       try {
         entries = await fs.promises.readdir(dir, { withFileTypes: true });
@@ -110,15 +198,16 @@ export function nodeListWorkspaceFiles(workspaceRoot: string): () => Promise<str
       for (const entry of entries) {
         if (entry.name.startsWith('.') && entry.name !== '.') continue;
         const abs = path.join(dir, entry.name);
-        if (entry.isDirectory()) {
-          if (!SKIP_DIRS.has(entry.name)) await walk(abs);
-        } else if (entry.isFile()) {
+        const kind = await classifyEntry(entry, abs);
+        if (kind === 'dir') {
+          if (!SKIP_DIRS.has(entry.name)) await walk(abs, nextAncestors);
+        } else if (kind === 'file') {
           const rel = path.relative(workspaceRoot, abs).split(path.sep).join('/');
           if (langForPath(rel)) results.push(rel);
         }
       }
     };
-    await walk(workspaceRoot);
+    await walk(workspaceRoot, new Set());
     return results;
   };
 }
