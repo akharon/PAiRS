@@ -85,4 +85,15 @@ describe('nodeListWorkspaceFiles symlink support', () => {
 
     expect(await list(root)).toEqual(['linked/keep.ts']);
   });
+
+  it('honours the root .gitignore for source files', async () => {
+    const root = makeRoot();
+    fs.writeFileSync(path.join(root, 'ws', '.gitignore'), '*.generated.ts\nbuild/\n');
+    fs.writeFileSync(path.join(root, 'ws', 'main.ts'), 'export const a = 1;\n');
+    fs.writeFileSync(path.join(root, 'ws', 'gen.generated.ts'), 'export const b = 2;\n');
+    fs.mkdirSync(path.join(root, 'ws', 'build'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'ws', 'build', 'out.ts'), 'export const c = 3;\n');
+
+    expect(await list(root)).toEqual(['main.ts']);
+  });
 });

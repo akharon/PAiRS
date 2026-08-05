@@ -132,6 +132,9 @@ export function isSkippedPath(relPath: string): boolean {
  * fs.watch cannot distinguish create/modify from delete on 'rename', so
  * existence decides. Returns a disposer. Pair with core WatchQueue for
  * debouncing (plan.md 3.1).
+ *
+ * Respects the root `.gitignore` (if present) — files matching patterns are
+ * skipped just like they would be in `git status`.
  */
 export function nodeWatchWorkspace(
   workspaceRoot: string,
@@ -141,11 +144,12 @@ export function nodeWatchWorkspace(
   const realOfWatched = new Map<string, string>(); // relDir → real path
   const watchedReal = new Set<string>(); // real paths of watched dirs — breaks symlink cycles
   let disposed = false;
+  let isIgnored: (relPath: string) => boolean = () => false; // placeholder, loaded sync in addDir('') setup
 
   const onFsEvent = (relDir: string, filename: string | null): void => {
     if (disposed || filename === null) return;
     const rel = (relDir ? `${relDir}/` : '') + String(filename).split(path.sep).join('/');
-    if (isSkippedPath(rel)) return;
+    if (isSkippedPath(rel) || isIgnored(rel)) return;
     const abs = path.join(workspaceRoot, rel);
     fs.promises
       .stat(abs) // follows symlinks: a linked dir/file is treated as its target
@@ -163,6 +167,15 @@ export function nodeWatchWorkspace(
   const addDir = (relDir: string): void => {
     if (disposed || watchers.has(relDir) || (relDir !== '' && isSkippedPath(relDir))) return;
     const absDir = path.join(workspaceRoot, relDir);
+    // Load .gitignore sync on first setup (relDir = '' is root).
+    if (relDir === '') {
+      try {
+        const contents = fs.readFileSync(path.join(workspaceRoot, '.gitignore'), 'utf8');
+        isIgnored = parseGitignore(contents);
+      } catch {
+        isIgnored = () => false;
+      }
+    }
     // Two links to one physical dir would otherwise mean two watchers and
     // duplicate events; an ancestor link would recurse forever.
     let real: string;
@@ -231,6 +244,9 @@ export function nodeWatchWorkspace(
  * *through* the link (`linkedDir/ext.ts`, not the target's real path) — that is
  * the identity the store, watcher and rule globs all use.
  *
+ * Respects the root `.gitignore` (if present) — files matching patterns are
+ * skipped just like they would be in `git status`.
+ *
  * Cycle protection tracks the real paths of the CURRENT descent (`ancestors`),
  * not every directory ever visited: a link pointing at its own ancestor must
  * stop, but two distinct links to one shared tree are both legitimate workspace
@@ -239,6 +255,7 @@ export function nodeWatchWorkspace(
  */
 export function nodeListWorkspaceFiles(workspaceRoot: string): () => Promise<string[]> {
   return async () => {
+    const isIgnored = await loadGitignore(workspaceRoot);
     const results: string[] = [];
     const walk = async (dir: string, ancestors: ReadonlySet<string>): Promise<void> => {
       const real = await realPathOrNull(dir);
@@ -258,7 +275,7 @@ export function nodeListWorkspaceFiles(workspaceRoot: string): () => Promise<str
           if (!SKIP_DIRS.has(entry.name)) await walk(abs, nextAncestors);
         } else if (kind === 'file') {
           const rel = path.relative(workspaceRoot, abs).split(path.sep).join('/');
-          if (langForPath(rel)) results.push(rel);
+          if (langForPath(rel) && !isIgnored(rel)) results.push(rel);
         }
       }
     };
