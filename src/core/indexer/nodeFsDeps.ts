@@ -9,9 +9,64 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { langForPath } from './parserRegistry';
+import { globToRegExp } from '../rules/evaluate';
 
 /** Directories never worth walking (also the watcher's ignore set). */
 export const SKIP_DIRS = new Set(['.git', 'node_modules', 'dist', 'out', 'build', '.pairs', '.vscode', 'target']);
+
+/**
+ * Extensions never worth filename-indexing: compiled/binary artifacts and
+ * common media/archives. Source extensions (langForPath) are excluded from
+ * NamedFile separately — this list only keeps true binary noise out.
+ */
+export const BINARY_EXTS = new Set([
+  '.so', '.lib', '.exe', '.a', '.dll', '.dylib', '.o', '.obj', '.bin', '.pyc', '.class', '.jar', '.wasm',
+  '.png', '.jpg', '.jpeg', '.gif', '.ico', '.bmp', '.webp', '.pdf', '.zip', '.tar', '.gz', '.7z', '.rar',
+]);
+
+function isBinaryPath(relPath: string): boolean {
+  return BINARY_EXTS.has(path.extname(relPath).toLowerCase());
+}
+
+/**
+ * Minimal `.gitignore` reader: `#` comments, blank lines, plain glob patterns
+ * (via globToRegExp — `*` = one path segment, `**` = any depth), and
+ * directory-only patterns (trailing `/`, matched as a path prefix). No `!`
+ * negation, no anchored (`/`-prefixed) patterns — covers the common case
+ * without reimplementing full git semantics.
+ */
+export function parseGitignore(contents: string): (relPath: string) => boolean {
+  const filePatterns: RegExp[] = [];
+  const dirPatterns: RegExp[] = [];
+  for (const rawLine of contents.split('\n')) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#') || line.startsWith('!')) continue;
+    const isDir = line.endsWith('/');
+    const pattern = isDir ? line.slice(0, -1) : line;
+    const anchored = pattern.includes('/') ? pattern.replace(/^\//, '') : `**/${pattern}`;
+    (isDir ? dirPatterns : filePatterns).push(globToRegExp(anchored));
+  }
+  return (relPath: string): boolean => {
+    if (filePatterns.some((re) => re.test(relPath))) return true;
+    if (dirPatterns.length === 0) return false;
+    const segs = relPath.split('/');
+    for (let i = 1; i <= segs.length; i++) {
+      const prefix = segs.slice(0, i).join('/');
+      if (dirPatterns.some((re) => re.test(prefix))) return true;
+    }
+    return false;
+  };
+}
+
+/** Loads and parses `<root>/.gitignore`, or a match-nothing predicate if absent. */
+async function loadGitignore(root: string): Promise<(relPath: string) => boolean> {
+  try {
+    const contents = await fs.promises.readFile(path.join(root, '.gitignore'), 'utf8');
+    return parseGitignore(contents);
+  } catch {
+    return () => false;
+  }
+}
 
 /**
  * What a directory entry is, following symlinks one level.
@@ -204,6 +259,50 @@ export function nodeListWorkspaceFiles(workspaceRoot: string): () => Promise<str
         } else if (kind === 'file') {
           const rel = path.relative(workspaceRoot, abs).split(path.sep).join('/');
           if (langForPath(rel)) results.push(rel);
+        }
+      }
+    };
+    await walk(workspaceRoot, new Set());
+    return results;
+  };
+}
+
+/**
+ * Recursive enumeration of non-source-code files (filename indexing only —
+ * no content is read). Skips everything nodeListWorkspaceFiles skips
+ * (dotfiles/dirs, SKIP_DIRS, symlink cycles), plus files langForPath already
+ * covers (those live in File, not NamedFile), binary/media extensions
+ * (BINARY_EXTS), and anything the workspace's root `.gitignore` excludes.
+ */
+export function nodeListNamedFiles(workspaceRoot: string): () => Promise<Array<{ path: string; mtimeMs: number; size: number }>> {
+  return async () => {
+    const isIgnored = await loadGitignore(workspaceRoot);
+    const results: Array<{ path: string; mtimeMs: number; size: number }> = [];
+    const walk = async (dir: string, ancestors: ReadonlySet<string>): Promise<void> => {
+      const real = await realPathOrNull(dir);
+      if (real === null || ancestors.has(real)) return;
+      const nextAncestors = new Set(ancestors).add(real);
+      let entries: fs.Dirent[];
+      try {
+        entries = await fs.promises.readdir(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        if (entry.name.startsWith('.') && entry.name !== '.') continue;
+        const abs = path.join(dir, entry.name);
+        const kind = await classifyEntry(entry, abs);
+        if (kind === 'dir') {
+          if (!SKIP_DIRS.has(entry.name)) await walk(abs, nextAncestors);
+        } else if (kind === 'file') {
+          const rel = path.relative(workspaceRoot, abs).split(path.sep).join('/');
+          if (langForPath(rel) || isBinaryPath(rel) || isIgnored(rel)) continue;
+          try {
+            const st = await fs.promises.stat(abs);
+            results.push({ path: rel, mtimeMs: st.mtimeMs, size: st.size });
+          } catch {
+            // vanished between readdir and stat — skip
+          }
         }
       }
     };

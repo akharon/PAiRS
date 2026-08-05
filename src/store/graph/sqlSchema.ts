@@ -15,7 +15,7 @@
  * an old index — drop and recreate. The index is derived data, never migrated.
  */
 
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 export const SCHEMA_DDL: readonly string[] = [
   `CREATE TABLE IF NOT EXISTS File(
@@ -78,6 +78,16 @@ export const SCHEMA_DDL: readonly string[] = [
      PRIMARY KEY (fileId, name)
    )`,
   `CREATE TABLE IF NOT EXISTS Meta(key TEXT PRIMARY KEY, value TEXT)`,
+  // Non-source-code files (README.md, assets, config, ...) — filename-only
+  // index, no content/symbols. Kept separate from File (source files with
+  // parsed symbols) so File's "has a lang, has symbols" semantics stay exact.
+  `CREATE TABLE IF NOT EXISTS NamedFile(
+     id INTEGER PRIMARY KEY,
+     path TEXT NOT NULL UNIQUE,
+     name TEXT NOT NULL,
+     mtimeMs REAL,
+     size INTEGER
+   )`,
 ];
 
 /**
@@ -95,6 +105,7 @@ export const SCHEMA_INDEXES: readonly string[] = [
   `CREATE INDEX IF NOT EXISTS idx_edge_kind ON Edge(kind)`,
   `CREATE INDEX IF NOT EXISTS idx_pending_file ON PendingRef(fileId)`,
   `CREATE INDEX IF NOT EXISTS idx_pending_name ON PendingRef(name)`,
+  `CREATE INDEX IF NOT EXISTS idx_namedfile_name ON NamedFile(name)`,
 ];
 
 /** Reference (Pass 2) edge kinds — carry line/confidence/test. */
@@ -102,4 +113,4 @@ export const REFERENCE_EDGE_KINDS: readonly string[] = ['CALLS', 'READS', 'WRITE
 /** Structural (Pass 1) edge kinds — always resolved. */
 export const STRUCTURAL_EDGE_KINDS: readonly string[] = ['DECLARES', 'OWNS', 'PARAM', 'OF_TYPE', 'RETURNS'];
 
-export const ALL_TABLES: readonly string[] = ['Edge', 'PendingRef', 'ExternalName', 'Symbol', 'File', 'Meta'];
+export const ALL_TABLES: readonly string[] = ['Edge', 'PendingRef', 'ExternalName', 'Symbol', 'File', 'NamedFile', 'Meta'];

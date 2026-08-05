@@ -34,7 +34,7 @@
  *    migration code for it).
  */
 
-import type { DeadCodeCandidate, DeadCodeFilter, EdgeKind, EdgeRecord, FileDep, FileRecord, FileExtraction, HotspotQuery, IndexStats, SymbolRecord, AmbiguousSymbol } from '../../core/indexer/types';
+import type { DeadCodeCandidate, DeadCodeFilter, EdgeKind, EdgeRecord, FileDep, FileRecord, FileExtraction, HotspotQuery, IndexStats, NamedFileRecord, SymbolRecord, AmbiguousSymbol } from '../../core/indexer/types';
 
 /**
  * Blank out SQL string literals and comments so keyword scans (`query()`'s
@@ -130,6 +130,23 @@ export interface CodeStore {
   resolvePending(namesHint?: string[], opts?: { retireUnresolved?: boolean }): Promise<number>;
   /** Known files with their hash/mtime — the indexer diffs against disk on startup. */
   listFiles(): Promise<FileRecord[]>;
+
+  // -- Filename index (non-source files) ---------------------------------------
+  /**
+   * Replace the entire NamedFile table with `entries` in one transaction —
+   * the walk that produces `entries` is already a full re-scan (like
+   * listWorkspaceFiles for File), so there is no incremental variant.
+   */
+  replaceNamedFiles(entries: Array<{ path: string; name: string; mtimeMs: number; size: number }>): Promise<void>;
+  /** All indexed non-source filenames, ordered by path. */
+  listNamedFiles(): Promise<NamedFileRecord[]>;
+  /**
+   * Filename/path search. `pattern` is a filename glob (`*` = any run of
+   * characters, no path-segment semantics since names have no `/`) matched
+   * case-insensitively against `name`; omit for all entries. `withPaths`
+   * additionally matches the glob against the full workspace-relative path.
+   */
+  findNamedFiles(pattern?: string, opts?: { withPaths?: boolean }): Promise<NamedFileRecord[]>;
 
   // -- Symbol lookup ----------------------------------------------------------
   get(id: number): Promise<SymbolRecord | null>;

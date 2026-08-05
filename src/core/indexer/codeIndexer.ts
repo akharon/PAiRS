@@ -55,6 +55,8 @@ export interface IndexerDeps {
   extractor: Extractor;
   listWorkspaceFiles(): Promise<string[]>;
   readFile(path: string): Promise<{ source: string; mtimeMs: number; size: number }>;
+  /** Non-source filenames to refresh in NamedFile each fullIndex. Optional — omit to skip filename indexing. */
+  listNamedFiles?(): Promise<Array<{ path: string; mtimeMs: number; size: number }>>;
   /** Crate name for a workspace-relative path (O6 monorepo scoping). Null for single-crate projects. */
   crateForPath?(path: string): string | null;
 }

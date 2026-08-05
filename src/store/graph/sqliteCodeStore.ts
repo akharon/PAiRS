@@ -37,6 +37,7 @@ import type {
   FileRecord,
   HotspotQuery,
   IndexStats,
+  NamedFileRecord,
   RawRef,
   SymbolKind,
   SymbolRecord,
@@ -45,6 +46,7 @@ import { ENTRY_POINT_NAMES, isTestPath, TEST_PATH_REGEX } from '../../core/index
 import type { CodeStore, CodeStoreFactory } from './codeStore';
 import { assertReadOnlySql } from './codeStore';
 import { importCandidatePaths, isExternalSpecifier } from './importPath';
+import { globToRegExp } from '../../core/rules/evaluate';
 import { nodeSqlDriver } from './sqliteDriver';
 import type { SqlConnectionLike, SqlDriver, SqlStatement } from './sqliteDriver';
 import { ALL_TABLES, REFERENCE_EDGE_KINDS, SCHEMA_DDL, SCHEMA_INDEXES, SCHEMA_VERSION } from './sqlSchema';
@@ -107,6 +109,16 @@ function toFileRecord(r: Record<string, unknown>): FileRecord {
     indexedAt: Number(r.indexedAt),
     crate: (r.crate as string | null) || null,
     parseError: Boolean(r.parseError),
+  };
+}
+
+function toNamedFileRecord(r: Record<string, unknown>): NamedFileRecord {
+  return {
+    id: Number(r.id),
+    path: String(r.path),
+    name: String(r.name),
+    mtimeMs: Number(r.mtimeMs),
+    size: Number(r.size),
   };
 }
 
@@ -817,6 +829,28 @@ export class SqliteCodeStore implements CodeStore {
 
   async listFiles(): Promise<FileRecord[]> {
     return this.all(`SELECT * FROM File`).map(toFileRecord);
+  }
+
+  // -- Filename index (non-source files) ---------------------------------------
+
+  async replaceNamedFiles(entries: Array<{ path: string; name: string; mtimeMs: number; size: number }>): Promise<void> {
+    this.transaction(() => {
+      this.run(`DELETE FROM NamedFile`);
+      for (const e of entries) {
+        this.run(`INSERT INTO NamedFile(path, name, mtimeMs, size) VALUES(?, ?, ?, ?)`, e.path, e.name, e.mtimeMs, e.size);
+      }
+    });
+  }
+
+  async listNamedFiles(): Promise<NamedFileRecord[]> {
+    return this.all(`SELECT * FROM NamedFile ORDER BY path`).map(toNamedFileRecord);
+  }
+
+  async findNamedFiles(pattern?: string, opts?: { withPaths?: boolean }): Promise<NamedFileRecord[]> {
+    const all = this.all(`SELECT * FROM NamedFile ORDER BY path`).map(toNamedFileRecord);
+    if (!pattern) return all;
+    const re = globToRegExp(pattern.toLowerCase());
+    return all.filter((f) => re.test(f.name.toLowerCase()) || (opts?.withPaths && re.test(f.path.toLowerCase())));
   }
 
   // -- Symbol lookup -----------------------------------------------------------

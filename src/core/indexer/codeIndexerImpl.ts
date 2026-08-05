@@ -74,6 +74,12 @@ export class IndexerImpl implements Indexer {
     // so a still-unresolved ref is external (npm/stdlib/test globals) and will
     // never resolve — parking it just grows the index on every re-index.
     await this.deps.store.resolvePending(undefined, { retireUnresolved: true });
+
+    if (this.deps.listNamedFiles) {
+      const named = await this.deps.listNamedFiles();
+      await this.deps.store.replaceNamedFiles(named.map((f) => ({ ...f, name: f.path.split('/').pop()! })));
+    }
+
     await this.deps.store.checkpoint();
 
     const stats = await this.deps.store.stats();

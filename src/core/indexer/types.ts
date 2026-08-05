@@ -68,6 +68,17 @@ export interface FileRecord {
   parseError: boolean;
 }
 
+/** A non-source-code file, indexed by name/path only — no symbols, no content. */
+export interface NamedFileRecord {
+  id: number;
+  /** Workspace-relative, POSIX separators. */
+  path: string;
+  /** Basename, e.g. `README.md` for `docs/README.md` — denormalized for name search. */
+  name: string;
+  mtimeMs: number;
+  size: number;
+}
+
 export interface SymbolRecord {
   id: number;
   fileId: number;

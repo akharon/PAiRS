@@ -11,7 +11,7 @@ import * as path from 'node:path';
 import { ParserRegistryImpl, fileQuerySource } from '../../core/indexer/parserRegistryImpl';
 import { ExtractorImpl } from '../../core/indexer/extractorImpl';
 import { IndexerImpl } from '../../core/indexer/codeIndexerImpl';
-import { nodeListWorkspaceFiles, nodeReadFile, nodeWatchWorkspace } from '../../core/indexer/nodeFsDeps';
+import { nodeListNamedFiles, nodeListWorkspaceFiles, nodeReadFile, nodeWatchWorkspace } from '../../core/indexer/nodeFsDeps';
 import { WatchQueue } from '../../core/indexer/watchQueue';
 import { SqliteCodeStore } from '../../store/graph/sqliteCodeStore';
 import { nodeSqlDriver } from '../../store/graph/sqliteDriver';
@@ -49,6 +49,7 @@ async function main(): Promise<void> {
     extractor,
     listWorkspaceFiles: nodeListWorkspaceFiles(root),
     readFile: nodeReadFile(root),
+    listNamedFiles: nodeListNamedFiles(root),
   });
 
   try {
@@ -248,6 +249,54 @@ async function main(): Promise<void> {
         });
         break;
       }
+      case 'read': {
+        // pairs read <path> [startLine] [endLine] — 1-indexed, inclusive.
+        // No line args: whole file. startLine only: from there to EOF.
+        // Both: that inclusive range. Out-of-range clamps rather than erroring.
+        const target = rest[0];
+        if (!target) {
+          process.stderr.write('Usage: pairs read <path> [startLine] [endLine]\n');
+          process.exitCode = 1;
+          break;
+        }
+        const startLine = rest[1] ? Number(rest[1]) : undefined;
+        const endLine = rest[2] ? Number(rest[2]) : undefined;
+        if ((startLine !== undefined && !Number.isInteger(startLine)) || (endLine !== undefined && !Number.isInteger(endLine))) {
+          process.stderr.write('startLine/endLine must be integers.\n');
+          process.exitCode = 1;
+          break;
+        }
+        let contents: string;
+        try {
+          contents = await fs.readFile(path.join(root, target), 'utf8');
+        } catch (err) {
+          process.stderr.write(`Cannot read ${target}: ${(err as Error).message}\n`);
+          process.exitCode = 1;
+          break;
+        }
+        if (startLine === undefined) {
+          process.stdout.write(contents);
+          break;
+        }
+        const lines = contents.split('\n');
+        const from = Math.max(1, startLine);
+        const to = endLine === undefined ? lines.length : Math.min(lines.length, endLine);
+        process.stdout.write(lines.slice(from - 1, to).join('\n') + '\n');
+        break;
+      }
+      case 'files': {
+        // pairs files [pattern] [--paths] — list/search indexed non-source filenames.
+        // pattern is a filename glob (*.txt, Pic*.svg); --paths also matches full paths.
+        const withPaths = rest.includes('--paths');
+        const pattern = rest.find((a) => a !== '--paths');
+        const files = await store.findNamedFiles(pattern, { withPaths });
+        if (files.length === 0) {
+          process.stdout.write('No matching files.\n');
+          break;
+        }
+        process.stdout.write(files.map((f) => f.path).join('\n') + '\n');
+        break;
+      }
       case 'rules': {
         const rulesPath = rest[0] ?? path.join(root, '.pairs', 'rules.ron');
         const ruleset = parseRuleSet(await fs.readFile(rulesPath, 'utf8'));
@@ -255,7 +304,7 @@ async function main(): Promise<void> {
         break;
       }
       default:
-        process.stderr.write('Usage: pairs <index|init|query|stats|impact|check|baseline|rules|watch>\n');
+        process.stderr.write('Usage: pairs <index|init|query|stats|impact|check|baseline|rules|watch|files|read>\n');
         process.exitCode = 1;
     }
   } finally {
