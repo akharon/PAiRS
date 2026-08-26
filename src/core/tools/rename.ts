@@ -178,6 +178,10 @@ export async function planRename(
       if (!matches || matches.length === 0) {
         return { message: `${file}:${s.line} — "${seed.name}" not found at a word boundary; re-index and retry.` };
       }
+      // `re` is global: every word-boundary occurrence on the line is the same
+      // symbol, so rewriting all of them is correct — the schema's
+      // Edge(src,dst,kind,line) key collapses same-line duplicates into one
+      // site, and that one site stands for all occurrences on it.
       lines[idx] = original.replace(re, newName);
     }
     rewritten.set(abs, lines.join('\n'));

@@ -1,6 +1,6 @@
 {
   "name": "pairs",
-  "version": "0.21.0",
+  "version": "0.23.0",
   "description": "Derived code-graph index for AI coding agents",
   "license": "MIT",
   "author": "Mustafa Kiyar",

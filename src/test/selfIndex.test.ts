@@ -55,5 +55,8 @@ describe('self-index smoke test', () => {
     const stats = await store.stats();
     expect(stats.fuzzyRate).toBeLessThanOrEqual(0.51);
     expect(stats.unresolvedRatio).toBeLessThanOrEqual(0.63);
-  });
+    // Indexes the entire repo, so it scales with the codebase and contends
+    // with the rest of the suite for CPU; ~2s solo, well past the 5s default
+    // under full parallel load.
+  }, 60_000);
 });
