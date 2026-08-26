@@ -448,7 +448,15 @@ export class SqliteCodeStore implements CodeStore {
       }
     });
 
-    const insEdge = this.stmt(`INSERT INTO Edge(src, dst, kind, line, confidence, test) VALUES(?,?,?,?,?,?)`);
+    // `ON CONFLICT DO UPDATE` (not plain OR IGNORE): a `fuzzy` row may already
+    // sit on disk for this exact (src,dst,kind,line) from an earlier pass —
+    // see resolvePending's insEdge for the full rationale. Only ever upgrades
+    // fuzzy -> resolved, never the reverse.
+    const insEdge = this.stmt(`
+      INSERT INTO Edge(src, dst, kind, line, confidence, test) VALUES(?,?,?,?,?,?)
+      ON CONFLICT(src, dst, kind, line) DO UPDATE SET confidence = 'resolved'
+      WHERE excluded.confidence = 'resolved' AND Edge.confidence = 'fuzzy'
+    `);
     // DECLARES: File → Symbol, the one edge whose src is a file id.
     for (const id of indexToId) insEdge.run(fileId, id, 'DECLARES', 0, 'resolved', 0);
     // OWNS: parent → child.
@@ -806,6 +814,27 @@ export class SqliteCodeStore implements CodeStore {
     let retiredMisses = 0;
     const edges: Array<{ fromId: number; toId: number; kind: EdgeKind; line: number; confidence: EdgeConfidence; test: boolean }> = [];
     const settled: number[] = [];
+    // A ref that parks and re-resolves across several `resolvePending` calls
+    // (or a single call touching the same site twice) must still produce one
+    // edge, not one per pass — mirrors the `seenDep` guard in
+    // applyExtractionInner. Keyed on (fromId,toId,kind,line); 'resolved' wins
+    // over 'fuzzy' if both are seen for the same key.
+    const seenEdge = new Map<string, number>(); // key -> index into edges
+    const CONFIDENCE_RANK: Record<EdgeConfidence, number> = { unresolved: -1, fuzzy: 0, resolved: 1 };
+    const addEdge = (e: { fromId: number; toId: number; kind: EdgeKind; line: number; confidence: EdgeConfidence; test: boolean }): void => {
+      const key = `${e.fromId}|${e.toId}|${e.kind}|${e.line}`;
+      const i = seenEdge.get(key);
+      if (i === undefined) {
+        seenEdge.set(key, edges.length);
+        edges.push(e);
+        return;
+      }
+      // Same site resolved twice in this batch: never let a fuzzy hit
+      // suppress a resolved one, or vice versa downgrade it.
+      if (CONFIDENCE_RANK[e.confidence] > CONFIDENCE_RANK[edges[i]!.confidence]) {
+        edges[i] = e;
+      }
+    };
     for (const r of rows) {
       // A DEPENDS_ON pending WITH a qualifiedName is a parked import — the
       // import IS the dependency statement, so the cross-crate gate does not
@@ -820,8 +849,9 @@ export class SqliteCodeStore implements CodeStore {
         const viaPath = this.resolveImportPath(declaringPath, String(r.qualifiedName));
         if (viaPath !== null) {
           if (viaPath !== Number(r.fromSymbolId)) {
-            edges.push({ fromId: Number(r.fromSymbolId), toId: viaPath, kind: 'DEPENDS_ON', line: Number(r.line), confidence: 'resolved', test: Boolean(r.inTest) });
-            created += 1;
+            const before = edges.length;
+            addEdge({ fromId: Number(r.fromSymbolId), toId: viaPath, kind: 'DEPENDS_ON', line: Number(r.line), confidence: 'resolved', test: Boolean(r.inTest) });
+            if (edges.length > before) created += 1;
           }
           settled.push(Number(r.id));
           continue;
@@ -861,14 +891,27 @@ export class SqliteCodeStore implements CodeStore {
         continue;
       }
       for (const toId of resolved.ids) {
-        edges.push({ fromId: Number(r.fromSymbolId), toId, kind: r.kind as EdgeKind, line: Number(r.line), confidence: resolved.confidence, test: Boolean(r.inTest) });
+        const before = edges.length;
+        addEdge({ fromId: Number(r.fromSymbolId), toId, kind: r.kind as EdgeKind, line: Number(r.line), confidence: resolved.confidence, test: Boolean(r.inTest) });
+        if (edges.length > before) created += 1;
       }
       settled.push(Number(r.id));
-      created += resolved.ids.length;
     }
 
     this.transaction(() => {
-      const insEdge = this.stmt(`INSERT INTO Edge(src, dst, kind, line, confidence, test) VALUES(?,?,?,?,?,?)`);
+      // Backstop for the cross-run case the in-memory dedupe above cannot see:
+      // a `fuzzy` row may already sit on disk from an earlier pass at the
+      // exact (src,dst,kind,line) this pass now resolves with certainty.
+      // Plain `INSERT OR IGNORE` would silently lose the 'resolved' outcome —
+      // the row already exists, so the insert is ignored and the stronger
+      // confidence is dropped on the floor. `ON CONFLICT DO UPDATE` upgrades
+      // in place instead, and only ever upgrades (fuzzy -> resolved), never
+      // the reverse, matching the "fuzzy must never suppress resolved" rule.
+      const insEdge = this.stmt(`
+        INSERT INTO Edge(src, dst, kind, line, confidence, test) VALUES(?,?,?,?,?,?)
+        ON CONFLICT(src, dst, kind, line) DO UPDATE SET confidence = 'resolved'
+        WHERE excluded.confidence = 'resolved' AND Edge.confidence = 'fuzzy'
+      `);
       for (const e of edges) insEdge.run(e.fromId, e.toId, e.kind, e.line, e.confidence, e.test ? 1 : 0);
       if (settled.length > 0) {
         const del = this.stmt(`DELETE FROM PendingRef WHERE id = ?`);
@@ -921,6 +964,28 @@ export class SqliteCodeStore implements CodeStore {
     return r ? toSymbolRecord(r) : null;
   }
 
+  /**
+   * SQLite caps host parameters at 999 (SQLITE_MAX_VARIABLE_NUMBER) — chunk
+   * at 500 so a large `impact` on a real monorepo doesn't exceed it. `IN
+   * (...)` returns rows in arbitrary order and omits missing ids, so this
+   * builds the id->record map itself rather than leaving positional
+   * correspondence to the caller.
+   */
+  async getMany(ids: number[]): Promise<Map<number, SymbolRecord>> {
+    const out = new Map<number, SymbolRecord>();
+    const dedupedIds = [...new Set(ids)];
+    const CHUNK = 500;
+    for (let i = 0; i < dedupedIds.length; i += CHUNK) {
+      const chunk = dedupedIds.slice(i, i + CHUNK);
+      const rows = this.all(`SELECT ${SYMBOL_COLS} FROM Symbol s WHERE s.id IN (${placeholders(chunk.length)})`, ...chunk);
+      for (const r of rows) {
+        const rec = toSymbolRecord(r);
+        out.set(rec.id, rec);
+      }
+    }
+    return out;
+  }
+
   async lookup(nameOrQualified: string): Promise<SymbolRecord[] | AmbiguousSymbol> {
     // Exact `qualified` first, then bare `name` — a qualified hit is a
     // constraint the caller supplied and must win.
@@ -968,6 +1033,7 @@ export class SqliteCodeStore implements CodeStore {
       kind: r.kind as EdgeKind,
       line: Number(r.line ?? 0),
       confidence: (r.confidence as EdgeConfidence) ?? 'resolved',
+      test: Boolean(r.test),
     }));
   }
 
@@ -978,6 +1044,48 @@ export class SqliteCodeStore implements CodeStore {
   }
 
   // -- Analysis ----------------------------------------------------------------
+
+  /**
+   * Symbol kinds `unreferenced()` must never report: the extractor emits no
+   * reference edge that could EVER land on this kind, so "zero incoming
+   * edges" proves nothing — it's not evidence of dead code, just an
+   * unmeasurable gap. `field` is read/written only through READS/WRITES
+   * (e.g. `this.x`), and this extractor emits neither (measured: `SELECT
+   * kind, COUNT(*) FROM Edge WHERE kind IN ('READS','WRITES','OF_TYPE')`
+   * returns zero rows for all three, on this repo). A constructor-injected
+   * private field used throughout its class would otherwise show up as dead
+   * on every single run.
+   */
+  private static readonly DEAD_CODE_UNPROVABLE_KINDS: ReadonlySet<SymbolKind> = new Set(['field']);
+
+  /**
+   * Same "unprovable, not proven dead" reasoning as DEAD_CODE_UNPROVABLE_KINDS,
+   * but keyed on name rather than kind: a `constructor` is a `method` (no
+   * distinct SymbolKind), yet `new X(...)` never emits a CALLS/reference edge
+   * to it either — verified on this repo: every constructor's only incoming
+   * edges are the structural DECLARES/OWNS pair, never a reference kind, even
+   * for constructors called from real, indexed `new X(...)` sites (e.g.
+   * IndexerImpl, ParserRegistryImpl, WatchQueue, SqliteCodeStore all had zero
+   * reference edges to their constructor despite being constructed in
+   * adapters/cli and adapters/vscode).
+   */
+  private static isUnprovableByName(rec: SymbolRecord): boolean {
+    return rec.kind === 'method' && rec.name === 'constructor';
+  }
+
+  /**
+   * Symbol kinds that CAN sometimes be proven referenced (unlike
+   * DEAD_CODE_UNPROVABLE_KINDS) but only through an edge kind that covers
+   * part of their real usage — so a survivor here is unproven, not proven
+   * dead, and gets a qualifying note instead of exclusion. An `interface`
+   * gets an IMPLEMENTS edge when a class implements it, but the far more
+   * common case — used purely as a parameter/return type annotation — needs
+   * OF_TYPE/REFERENCES, which this extractor never emits either. Excluding
+   * `interface` outright would hide a genuinely dead, never-implemented
+   * interface in a codebase where IMPLEMENTS edges exist for other
+   * interfaces; labeling instead keeps it in the list without overclaiming.
+   */
+  private static readonly DEAD_CODE_TYPE_ONLY_KINDS: ReadonlySet<SymbolKind> = new Set(['interface']);
 
   async unreferenced(filter: DeadCodeFilter): Promise<DeadCodeCandidate[]> {
     const conds: string[] = [`s.kind <> 'module'`, `NOT EXISTS (SELECT 1 FROM Edge e WHERE e.dst = s.id AND e.kind IN (${placeholders(REFERENCE_EDGE_KINDS.length)}))`];
@@ -1005,7 +1113,10 @@ export class SqliteCodeStore implements CodeStore {
       // Entry points and test items are not dead code even with zero callers.
       if (ENTRY_POINT_NAMES.has(rec.name)) continue;
       if (isTestPath(rec.file)) continue;
-      out.push({ symbol: rec, note: rec.exported ? 'exported' : null });
+      if (SqliteCodeStore.DEAD_CODE_UNPROVABLE_KINDS.has(rec.kind)) continue;
+      if (SqliteCodeStore.isUnprovableByName(rec)) continue;
+      const note = rec.exported ? 'exported' : SqliteCodeStore.DEAD_CODE_TYPE_ONLY_KINDS.has(rec.kind) ? 'type-only' : null;
+      out.push({ symbol: rec, note });
     }
     const offset = filter.offset ?? 0;
     return out.slice(offset, filter.limit === undefined ? undefined : offset + filter.limit);

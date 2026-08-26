@@ -1,6 +1,6 @@
 {
   "name": "pairs",
-  "version": "0.19.0",
+  "version": "0.20.0",
   "description": "Derived code-graph index for AI coding agents",
   "license": "MIT",
   "author": "Mustafa Kiyar",
@@ -189,7 +189,7 @@
         "name": "pairs_impact",
         "displayName": "PAiRS: change impact (blast radius)",
         "toolReferenceName": "pairsImpact",
-        "modelDescription": "What transitively DEPENDS ON a symbol (\"blast radius\"): every caller, reader, and implementer that reaches it, up to `depth` hops. Call BEFORE renaming/removing/changing a symbol, or on \"what depends on X\". Catches renamed-import references grep misses. Fuzzy (name-matched) dependants are marked as such.",
+        "modelDescription": "What transitively DEPENDS ON a symbol (\"blast radius\"): every caller, reader, and implementer that reaches it, up to `depth` hops. Call BEFORE renaming/removing/changing a symbol, or on \"what depends on X\". Catches renamed-import references grep misses. Fuzzy (name-matched) dependants are marked as such. Set includeTests:false to walk only production dependants (test-only paths are excluded from the walk, not just hidden).",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -212,6 +212,10 @@
               "type": "integer",
               "minimum": 1,
               "maximum": 200
+            },
+            "includeTests": {
+              "type": "boolean",
+              "description": "Include dependants reached only through test files. Off filters test-only paths out of the walk entirely, not just the rendered list."
             }
           },
           "required": [
@@ -257,7 +261,7 @@
         "name": "pairs_who_calls",
         "displayName": "PAiRS: call graph (callers/callees)",
         "toolReferenceName": "pairsWhoCalls",
-        "modelDescription": "Direct call sites of a function/method (\"callers\"), or what it calls (\"callees\"). Lighter than `impact` when you only want one hop. Catches renamed imports grep misses.",
+        "modelDescription": "Direct call sites of a function/method (\"callers\"), or what it calls (\"callees\"). Lighter than `impact` when you only want one hop. Catches renamed imports grep misses. Set includeTests:false to hide test-file callers/callees — the footer reports how many were hidden.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -279,6 +283,10 @@
             "includeFuzzy": {
               "type": "boolean",
               "description": "Include name-match (unverified) edges."
+            },
+            "includeTests": {
+              "type": "boolean",
+              "description": "Include edges whose reference site is in a test file. Off hides them and the footer states how many were hidden."
             },
             "limit": {
               "type": "integer",
@@ -418,7 +426,7 @@
         "name": "pairs_rename_symbol",
         "displayName": "PAiRS: rename symbol",
         "toolReferenceName": "pairsRenameSymbol",
-        "modelDescription": "Rename a symbol and every direct reference site (definition + callers/readers/writers/implementers found via the same edges `impact` walks) consistently, in one pass. Aborts without touching any file if a reference site cannot be matched safely (e.g. the indexed line no longer contains the name at a word boundary) — re-index and retry. Revert via your VCS (e.g. `git checkout -- <files>`); this tool does not keep its own undo log.",
+        "modelDescription": "Rename a symbol and every direct reference site (definition + callers/readers/writers/implementers found via the same edges `impact` walks) consistently, in one pass. Aborts without touching any file if a reference site cannot be matched safely (e.g. the indexed line no longer contains the name at a word boundary) — re-index and retry. Aborts without writing if any reference site is fuzzy (name-only match) unless includeFuzzy is set. Revert via your VCS (e.g. `git checkout -- <files>`); this tool does not keep its own undo log.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -434,6 +442,10 @@
             "path": {
               "type": "string",
               "description": "Disambiguation hint: prefer the symbol defined in this file (workspace-relative path or suffix)."
+            },
+            "includeFuzzy": {
+              "type": "boolean",
+              "description": "Also rename reference sites reached by fuzzy (name-only) edges. Off by default: those sites may belong to an unrelated symbol sharing the name."
             }
           },
           "required": [

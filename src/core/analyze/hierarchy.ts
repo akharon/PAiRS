@@ -74,10 +74,10 @@ async function walk(
   }
 
   const ids = [...seen.keys()];
-  const symbols = await Promise.all(ids.map((n) => store.get(n)));
+  const symbols = await store.getMany(ids);
   const nodes: HierarchyNode[] = [];
-  ids.forEach((n, i) => {
-    const sym = symbols[i];
+  ids.forEach((n) => {
+    const sym = symbols.get(n);
     const meta = seen.get(n)!;
     if (sym) nodes.push({ symbol: sym, depth: meta.depth, confidence: meta.confidence });
   });

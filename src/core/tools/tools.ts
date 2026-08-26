@@ -70,12 +70,14 @@ export const codeToolSchemas = {
       'reader, and implementer that reaches it, up to `depth` hops. Call BEFORE ' +
       'renaming/removing/changing a symbol, or on "what depends on X". Catches ' +
       'renamed-import references grep misses. Fuzzy (name-matched) dependants ' +
-      'are marked as such.',
+      'are marked as such. Set includeTests:false to walk only production ' +
+      'dependants (test-only paths are excluded from the walk, not just hidden).',
     input: z.object({
       name: z.string().min(1).describe('Bare or qualified name of the symbol to analyze.'),
       path: pathHint,
       depth: z.number().int().min(1).max(6).default(3).describe('Transitive hops to walk.'),
       limit: z.number().int().min(1).max(200).default(50),
+      includeTests: z.boolean().default(true).describe('Include dependants reached only through test files. Off filters test-only paths out of the walk entirely, not just the rendered list.'),
     }),
   },
 
@@ -99,12 +101,14 @@ export const codeToolSchemas = {
     description:
       'Direct call sites of a function/method ("callers"), or what it calls ' +
       '("callees"). Lighter than `impact` when you only want one hop. Catches ' +
-      'renamed imports grep misses.',
+      'renamed imports grep misses. Set includeTests:false to hide test-file ' +
+      'callers/callees — the footer reports how many were hidden.',
     input: z.object({
       name: z.string().min(1),
       path: pathHint,
       direction: z.enum(['callers', 'callees']).default('callers'),
       includeFuzzy: z.boolean().default(true).describe('Include name-match (unverified) edges.'),
+      includeTests: z.boolean().default(true).describe('Include edges whose reference site is in a test file. Off hides them and the footer states how many were hidden.'),
       limit: z.number().int().min(1).max(100).default(30),
     }),
   },

@@ -33,6 +33,14 @@ export interface ImpactResult {
   dependants: ImpactNode[];
   /** True if the walk hit `maxDepth` and stopped short of the transitive closure. */
   truncated: boolean;
+  /**
+   * Edges dropped because their reference site was in a test file and
+   * `includeTests` was false. Not a count of hidden dependants (a dependant
+   * can still be reached via a non-test path) — it's the raw count of
+   * test-only edges the BFS never walked, so a caller can report "results
+   * may be incomplete" honestly.
+   */
+  hiddenTestEdges: number;
 }
 
 const CONFIDENCE_RANK: Record<EdgeConfidence, number> = { resolved: 0, fuzzy: 1, unresolved: 2 };
@@ -43,17 +51,22 @@ function weaker(a: EdgeConfidence, b: EdgeConfidence): EdgeConfidence {
 /**
  * @param maxDepth stop after this many hops (default 5). depth ≤ 0 → 1.
  * @param kinds edge kinds to follow; defaults to IMPACT_EDGE_KINDS.
+ * @param includeTests when false, edges whose reference site is in a test
+ *   file are dropped from the frontier BEFORE they can seed the next hop —
+ *   a test-only path is excluded from the walk entirely, not just hidden at
+ *   render time. Default true (unchanged behavior).
  */
 export async function impact(
   store: CodeStore,
   id: number,
   maxDepth = 5,
-  kinds: readonly EdgeKind[] = IMPACT_EDGE_KINDS
+  kinds: readonly EdgeKind[] = IMPACT_EDGE_KINDS,
+  includeTests = true
 ): Promise<ImpactResult | null> {
   const seed = await store.get(id);
   if (!seed) return null;
 
-  if (kinds.length === 0) return { seed, dependants: [], truncated: false };
+  if (kinds.length === 0) return { seed, dependants: [], truncated: false, hiddenTestEdges: 0 };
 
   const depth = maxDepth <= 0 ? 1 : maxDepth;
   const kindList = [...kinds];
@@ -63,6 +76,7 @@ export async function impact(
   let frontier = [id];
   let hop = 0;
   let truncated = false;
+  let hiddenTestEdges = 0;
 
   while (frontier.length > 0) {
     if (hop >= depth) {
@@ -70,7 +84,9 @@ export async function impact(
       break;
     }
     hop += 1;
-    const edges = await store.edgesTo(frontier, kindList);
+    const edgesRaw = await store.edgesTo(frontier, kindList);
+    const edges = includeTests ? edgesRaw : edgesRaw.filter((e) => !e.test);
+    if (!includeTests) hiddenTestEdges += edgesRaw.length - edges.length;
     const next: number[] = [];
     for (const e of edges) {
       if (e.fromId === id) continue; // exclude self-edges (e.g. a recursive function calling itself)
@@ -91,10 +107,10 @@ export async function impact(
   }
 
   const ids = [...seen.keys()];
-  const symbols = await Promise.all(ids.map((n) => store.get(n)));
+  const symbols = await store.getMany(ids);
   const dependants: ImpactNode[] = [];
-  ids.forEach((n, i) => {
-    const sym = symbols[i];
+  ids.forEach((n) => {
+    const sym = symbols.get(n);
     const meta = seen.get(n)!;
     if (sym) dependants.push({ symbol: sym, depth: meta.depth, confidence: meta.confidence });
   });
@@ -103,5 +119,5 @@ export async function impact(
     (a, b) => a.depth - b.depth || a.symbol.file.localeCompare(b.symbol.file, 'en') || a.symbol.startLine - b.symbol.startLine
   );
 
-  return { seed, dependants, truncated };
+  return { seed, dependants, truncated, hiddenTestEdges };
 }

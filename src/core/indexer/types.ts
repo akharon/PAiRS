@@ -110,6 +110,8 @@ export interface EdgeRecord {
   /** 1-based line of the reference site in `from`'s file. */
   line: number;
   confidence: EdgeConfidence;
+  /** True when the reference site is in a test file (see isTestPath). */
+  test: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -202,8 +204,19 @@ export interface FileExtraction {
 
 export interface DeadCodeCandidate {
   symbol: SymbolRecord;
-  /** Why the candidate survived filtering despite being plausible-looking API. */
-  note: 'exported' | null;
+  /**
+   * Why the candidate survived filtering despite being plausible-looking API,
+   * or a qualifier on how much to trust "zero incoming edges" as proof for
+   * THIS symbol kind:
+   *  - 'exported': kept only because filter.includeExported asked for it.
+   *  - 'type-only': the extractor emits no reference edge (OF_TYPE/REFERENCES)
+   *    for a symbol used purely in a type-annotation position, so "zero
+   *    incoming edges" does not mean unreferenced for this kind — it means
+   *    unproven. Currently only 'interface' carries this note (see
+   *    unreferenced() in sqliteCodeStore.ts); an interface actually
+   *    IMPLEMENTed by a class is still provable and does not get it.
+   */
+  note: 'exported' | 'type-only' | null;
 }
 
 export interface DeadCodeFilter {

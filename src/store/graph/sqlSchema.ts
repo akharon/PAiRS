@@ -15,7 +15,7 @@
  * an old index — drop and recreate. The index is derived data, never migrated.
  */
 
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 8;
 
 export const SCHEMA_DDL: readonly string[] = [
   `CREATE TABLE IF NOT EXISTS File(
@@ -104,6 +104,10 @@ export const SCHEMA_INDEXES: readonly string[] = [
   `CREATE INDEX IF NOT EXISTS idx_edge_src ON Edge(src, kind)`,
   `CREATE INDEX IF NOT EXISTS idx_edge_dst ON Edge(dst, kind)`,
   `CREATE INDEX IF NOT EXISTS idx_edge_kind ON Edge(kind)`,
+  // `confidence` is deliberately NOT in the key: two resolution passes can
+  // reach the same site with different confidence, and that must collapse to
+  // one row, not two.
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_edge_unique ON Edge(src, dst, kind, line)`,
   `CREATE INDEX IF NOT EXISTS idx_pending_file ON PendingRef(fileId)`,
   `CREATE INDEX IF NOT EXISTS idx_pending_name ON PendingRef(name)`,
   `CREATE INDEX IF NOT EXISTS idx_namedfile_name ON NamedFile(name)`,

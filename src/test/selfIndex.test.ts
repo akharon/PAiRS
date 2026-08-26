@@ -44,13 +44,16 @@ describe('self-index smoke test', () => {
     expect(map.driftRatio).toBeLessThan(1);
 
     // Ratchet: fails the build if precision regresses. Measured on the
-    // self-index, 2026-08-26 (after the self/this-receiver resolution rung
-    // and the Task 4 dead-code deletions): fuzzyRate ~0.48, unresolvedRatio
-    // ~0.60, both with run-to-run noise of a few tenths of a percent (file
-    // processing order affects ambiguous-fuzzy tie-breaks). Ceilings sit
-    // above the observed noise band so they don't flake.
+    // self-index, 2026-08-26 (after the Edge(src,dst,kind,line) unique index
+    // started collapsing same-site duplicate ref edges — e.g. a name called
+    // twice on one line — into one row, which is correct: the schema has no
+    // per-occurrence granularity beyond that key, so it was never counting
+    // distinct call sites): fuzzyRate ~0.48, unresolvedRatio ~0.615, both
+    // with run-to-run noise of a few tenths of a percent (file processing
+    // order affects ambiguous-fuzzy tie-breaks). Ceilings sit above the
+    // observed noise band so they don't flake.
     const stats = await store.stats();
     expect(stats.fuzzyRate).toBeLessThanOrEqual(0.51);
-    expect(stats.unresolvedRatio).toBeLessThanOrEqual(0.61);
+    expect(stats.unresolvedRatio).toBeLessThanOrEqual(0.63);
   });
 });

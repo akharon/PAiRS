@@ -10,7 +10,7 @@
  */
 
 import type { CodeStore } from '../../store/graph/codeStore';
-import type { AmbiguousSymbol, EdgeKind, SymbolRecord } from '../indexer/types';
+import type { AmbiguousSymbol, DeadCodeCandidate, EdgeKind, SymbolRecord } from '../indexer/types';
 import { impact } from '../analyze/impact';
 import { hierarchy } from '../analyze/hierarchy';
 import { moduleMap, moduleKeyOf } from '../analyze/moduleMap';
@@ -28,8 +28,26 @@ export type Executors = {
   [K in CodeToolName]: (input: CodeToolInput<K>) => Promise<string>;
 };
 
-function cite(s: SymbolRecord): string {
-  const sig = s.signature ? ` ${s.signature}` : '';
+// The extractor stores multi-line signatures with their source newlines and
+// indentation verbatim. Left untruncated, a single overloaded/long-signature
+// result can span 10 lines and push the `file:line` citation — the single
+// most useful token in the output — off to the far end where it's easy to
+// miss, defeating the "compact text" point of these tools. 100 chars keeps a
+// typical signature readable while still fitting on one line; the full
+// signature is always one `get_symbol` call away, which is the right place
+// to pay for it.
+const SIGNATURE_CITE_MAX = 100;
+
+/**
+ * @param full Skip whitespace-collapsing/truncation — for get_symbol, which
+ *   exists precisely to return the complete shape.
+ */
+function cite(s: SymbolRecord, full = false): string {
+  let sig = s.signature ? ` ${s.signature}` : '';
+  if (sig && !full) {
+    sig = sig.replace(/\s+/g, ' ');
+    if (sig.length > SIGNATURE_CITE_MAX) sig = `${sig.slice(0, SIGNATURE_CITE_MAX)}…`;
+  }
   return `${s.qualified || s.name} [${s.kind}]${sig}  ${s.file}:${s.startLine}`;
 }
 
@@ -296,14 +314,14 @@ export function createExecutors(deps: ExecutorDeps): Executors {
       if ('message' in r) return r.message;
       const s = r.sym;
       const lines = [
-        cite(s),
+        cite(s, true),
         s.doc ? `\ndoc: ${s.doc}` : '',
       ].filter(Boolean);
       if (input.includeMembers) {
         const members = await store.membersOf(s.id);
         if (members.length > 0) {
           lines.push(`\nmembers (${members.length}):`);
-          for (const m of members) lines.push(`  - ${cite(m)}`);
+          for (const m of members) lines.push(`  - ${cite(m, true)}`);
         }
       }
       return lines.join('\n');
@@ -312,13 +330,26 @@ export function createExecutors(deps: ExecutorDeps): Executors {
     async outline(input) {
       const syms = await store.outline(input.path);
       if (syms.length === 0) return `No indexed symbols in ${input.path} (not indexed, or empty).`;
-      return `${input.path} — ${syms.length} symbols:\n` + syms.map((s) => `  ${s.startLine}: ${s.qualified || s.name} [${s.kind}]${s.signature ? ` ${s.signature}` : ''}`).join('\n');
+      // Same rationale as cite(): a multi-line signature interpolated verbatim
+      // would blow up a file-wide listing far worse than a single find_symbol
+      // hit does. Collapse + truncate here too rather than duplicating the
+      // constant's reasoning.
+      return (
+        `${input.path} — ${syms.length} symbols:\n` +
+        syms
+          .map((s) => {
+            let sig = s.signature ? ` ${s.signature.replace(/\s+/g, ' ')}` : '';
+            if (sig.length > SIGNATURE_CITE_MAX + 1) sig = `${sig.slice(0, SIGNATURE_CITE_MAX)}…`;
+            return `  ${s.startLine}: ${s.qualified || s.name} [${s.kind}]${sig}`;
+          })
+          .join('\n')
+      );
     },
 
     async impact(input) {
       const r = await resolveOne(store, input.name, input.path);
       if ('message' in r) return r.message;
-      const res = await impact(store, r.sym.id, input.depth);
+      const res = await impact(store, r.sym.id, input.depth, undefined, input.includeTests);
       if (!res) return `No symbol id for "${input.name}".`;
       if (res.dependants.length === 0) return `Nothing depends on ${cite(res.seed)} within ${input.depth} hop(s).`;
       const { page, note } = paginate(res.dependants, input.limit);
@@ -326,7 +357,9 @@ export function createExecutors(deps: ExecutorDeps): Executors {
       const body = page
         .map((d) => `  - d${d.depth} ${cite(d.symbol)}${d.confidence === 'fuzzy' ? '  [fuzzy]' : ''}`)
         .join('\n');
-      return `${res.dependants.length} dependant(s) of ${res.seed.qualified || res.seed.name}${trunc}:\n${body}${note}`;
+      // An agent must never mistake a filtered list for a complete one.
+      const hiddenNote = res.hiddenTestEdges > 0 ? `\n(… ${res.hiddenTestEdges} test-file edge(s) hidden; pass includeTests to see them)` : '';
+      return `${res.dependants.length} dependant(s) of ${res.seed.qualified || res.seed.name}${trunc}:\n${body}${note}${hiddenNote}`;
     },
 
     async hierarchy(input) {
@@ -366,7 +399,9 @@ export function createExecutors(deps: ExecutorDeps): Executors {
         input.direction === 'callers'
           ? await store.edgesTo([r.sym.id], CALL_KINDS)
           : await store.edgesFrom([r.sym.id], CALL_KINDS);
-      const filtered = input.includeFuzzy ? edges : edges.filter((e) => e.confidence !== 'fuzzy');
+      const fuzzyFiltered = input.includeFuzzy ? edges : edges.filter((e) => e.confidence !== 'fuzzy');
+      const hiddenTestCount = input.includeTests ? 0 : fuzzyFiltered.filter((e) => e.test).length;
+      const filtered = input.includeTests ? fuzzyFiltered : fuzzyFiltered.filter((e) => !e.test);
       if (filtered.length === 0) return `No ${input.direction} for ${cite(r.sym)}.`;
       // Paginate the edge list first, then fetch only that page's symbols —
       // fetching every counterpart before slicing made large fan-ins cost one
@@ -388,7 +423,9 @@ export function createExecutors(deps: ExecutorDeps): Executors {
           return `  - ${cite(x.s!)}${at ? `  → called at ${at}` : ''}${x.e.confidence === 'fuzzy' ? '  [fuzzy]' : ''}`;
         })
         .join('\n');
-      return `${filtered.length} ${input.direction} of ${r.sym.qualified || r.sym.name}:\n${body}${note}`;
+      // An agent must never mistake a filtered list for a complete one.
+      const hiddenNote = hiddenTestCount > 0 ? `\n(… ${hiddenTestCount} test-file ${input.direction === 'callers' ? 'caller' : 'callee'}(s) hidden; pass includeTests to see them)` : '';
+      return `${filtered.length} ${input.direction} of ${r.sym.qualified || r.sym.name}:\n${body}${note}${hiddenNote}`;
     },
 
     async file_deps(input) {
@@ -418,8 +455,15 @@ export function createExecutors(deps: ExecutorDeps): Executors {
             offset: input.offset,
           });
           if (c.length === 0) return 'No dead-code candidates (given filters).';
+          // The old blanket "verify each (syntactic only)" header understated
+          // what's actually in the list: some candidates (like a type-only
+          // interface) aren't just syntactically unverified, they're
+          // structurally unprovable with this extractor — so that gets a
+          // specific per-candidate note instead of one vague disclaimer.
+          const noteText = (n: DeadCodeCandidate['note']): string =>
+            n === 'type-only' ? '  [type-only — no reference edges are emitted for type positions]' : n ? `  [${n}]` : '';
           return `${c.length} dead-code candidate(s) — verify each (syntactic only):\n` +
-            c.map((x) => `  - ${cite(x.symbol)}${x.note ? `  [${x.note}]` : ''}`).join('\n');
+            c.map((x) => `  - ${cite(x.symbol)}${noteText(x.note)}`).join('\n');
         }
         case 'fan_out': {
           const rows = await store.hotspots({ pathPrefix: input.pathPrefix, limit: input.limit, offset: input.offset });

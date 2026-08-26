@@ -379,6 +379,56 @@ describe('impact() transitive dependants', () => {
   });
 });
 
+describe('getMany() batch symbol fetch (Task 4)', () => {
+  let store: CodeStore;
+  let aId: number;
+  let bId: number;
+  let cId: number;
+
+  beforeAll(async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pairs-getmany-'));
+    store = await SqliteCodeStore.open(path.join(dir, 'graph.db'), nodeSqlDriver);
+    await store.applyExtraction(extraction('gm-a.rs', [sym('gmA', 'gmA', 'function')]));
+    await store.applyExtraction(extraction('gm-b.rs', [sym('gmB', 'gmB', 'function')]));
+    await store.applyExtraction(extraction('gm-c.rs', [sym('gmC', 'gmC', 'function')]));
+    aId = ((await store.lookup('gmA')) as SymbolRecord[])[0]!.id;
+    bId = ((await store.lookup('gmB')) as SymbolRecord[])[0]!.id;
+    cId = ((await store.lookup('gmC')) as SymbolRecord[])[0]!.id;
+  });
+
+  it('returns every requested id, keyed by id, regardless of query row order', async () => {
+    const result = await store.getMany([cId, aId, bId]);
+    expect(result.size).toBe(3);
+    expect(result.get(aId)?.name).toBe('gmA');
+    expect(result.get(bId)?.name).toBe('gmB');
+    expect(result.get(cId)?.name).toBe('gmC');
+  });
+
+  it('omits ids that do not exist rather than erroring', async () => {
+    const result = await store.getMany([aId, 999999]);
+    expect(result.size).toBe(1);
+    expect(result.has(999999)).toBe(false);
+    expect(result.get(aId)?.name).toBe('gmA');
+  });
+
+  it('returns an empty map for an empty id list', async () => {
+    const result = await store.getMany([]);
+    expect(result.size).toBe(0);
+  });
+
+  it('chunks past the 999 SQLite host-parameter cap without erroring or dropping ids', async () => {
+    // Only 3 real symbols are indexed, so pad with ids that don't exist —
+    // this exercises the >500 chunking path (SQLITE_MAX_VARIABLE_NUMBER=999)
+    // without needing 1500 real symbols in the fixture.
+    const padded = [aId, bId, cId, ...Array.from({ length: 1500 }, (_, i) => 1_000_000 + i)];
+    const result = await store.getMany(padded);
+    expect(result.size).toBe(3);
+    expect(result.get(aId)?.name).toBe('gmA');
+    expect(result.get(bId)?.name).toBe('gmB');
+    expect(result.get(cId)?.name).toBe('gmC');
+  });
+});
+
 describe('use statements create cross-file DEPENDS_ON edges', () => {
   // Regression: for Rust, DEPENDS_ON was never populated (rust.scm captures
   // `use` as an import specifier, not a @ref.reference), leaving module_map /
@@ -458,6 +508,47 @@ describe('path-style imports create cross-file DEPENDS_ON edges', () => {
     const map = await moduleMap(store);
     expect(map.modules).toEqual(['src/adapters/vscode', 'src/core/tools', 'src/store/graph']);
     expect(map.edges).toHaveLength(2);
+  });
+});
+
+describe('unreferenced() dead-code candidates (Task 6)', () => {
+  let store: CodeStore;
+
+  beforeAll(async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pairs-deadcode-'));
+    store = await SqliteCodeStore.open(path.join(dir, 'graph.db'), nodeSqlDriver);
+
+    // A genuinely dead top-level function: declared, never called.
+    const deadFn: NewSymbol = { name: 'trulyDead', qualified: 'trulyDead', kind: 'function', lang: 'rust', startLine: 20, endLine: 22, signature: '()', doc: null, exported: false, parentIndex: null };
+    // A private field, "used" only via `this.x` in real source — this
+    // extractor emits no READS/WRITES edge for that, so it must never be
+    // reported no matter how it's actually used.
+    const privateField: NewSymbol = { name: 'cache', qualified: 'Widget.cache', kind: 'field', lang: 'rust', startLine: 5, endLine: 5, signature: null, doc: null, exported: false, parentIndex: null };
+    // An interface used only as a type annotation — this extractor emits no
+    // OF_TYPE/REFERENCES edge for that either, so it must not be flatly
+    // reported as dead; it should survive with the type-only note instead.
+    const typeOnlyInterface: NewSymbol = { name: 'Shape', qualified: 'Shape', kind: 'interface', lang: 'rust', startLine: 1, endLine: 3, signature: null, doc: null, exported: false, parentIndex: null };
+
+    await store.applyExtraction(extraction('deadcode.rs', [deadFn, privateField, typeOnlyInterface]));
+  });
+
+  it('reports a genuinely-unreferenced top-level function', async () => {
+    const candidates = await store.unreferenced({});
+    const names = candidates.map((c) => c.symbol.name);
+    expect(names).toContain('trulyDead');
+  });
+
+  it('does not report a private field even though it has zero reference edges', async () => {
+    const candidates = await store.unreferenced({});
+    const names = candidates.map((c) => c.symbol.name);
+    expect(names).not.toContain('cache');
+  });
+
+  it('reports an interface used only as a type annotation, but qualified with a type-only note', async () => {
+    const candidates = await store.unreferenced({});
+    const shape = candidates.find((c) => c.symbol.name === 'Shape');
+    expect(shape).toBeDefined();
+    expect(shape!.note).toBe('type-only');
   });
 });
 

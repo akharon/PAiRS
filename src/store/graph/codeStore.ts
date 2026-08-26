@@ -151,6 +151,15 @@ export interface CodeStore {
   // -- Symbol lookup ----------------------------------------------------------
   get(id: number): Promise<SymbolRecord | null>;
   /**
+   * Batch form of `get`: one round trip (chunked, see the SQLite
+   * implementation) instead of one `SELECT` per id — the N+1 fix for
+   * `impact`/`hierarchy`, which each look up every dependant/relative found by
+   * a BFS. Returns a Map so callers never assume positional correspondence
+   * with `ids`: `IN (...)` returns rows in arbitrary order and silently omits
+   * any id with no matching row.
+   */
+  getMany(ids: number[]): Promise<Map<number, SymbolRecord>>;
+  /**
    * Resolve a user/agent-supplied name to symbols. Matches `qualified`
    * exactly first, then bare `name`. Multiple hits → AmbiguousSymbol (tools
    * render the candidate list and ask the agent to qualify).

@@ -11,6 +11,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { SqliteCodeStore } from '../../store/graph/sqliteCodeStore';
 import { nodeSqlDriver } from '../../store/graph/sqliteDriver';
 import { createExecutors, type Executors } from './executors';
+import { codeToolSchemas } from './tools';
 import type { CodeStore } from '../../store/graph/codeStore';
 import type { FileExtraction, NewSymbol, RawRef } from '../indexer/types';
 
@@ -47,7 +48,7 @@ describe('tool executors', () => {
   });
 
   it('impact reaches transitive callers', async () => {
-    const out = await x.impact({ name: 'core', depth: 3, limit: 50 });
+    const out = await x.impact({ name: 'core', depth: 3, limit: 50, includeTests: true });
     expect(out).toContain('mid');
     expect(out).toContain('d1');
   });
@@ -65,7 +66,7 @@ describe('tool executors', () => {
   });
 
   it('who_calls lists callers', async () => {
-    const out = await x.who_calls({ name: 'core', direction: 'callers', includeFuzzy: true, limit: 30 });
+    const out = await x.who_calls({ name: 'core', direction: 'callers', includeFuzzy: true, includeTests: true, limit: 30 });
     expect(out).toContain('mid');
   });
 
@@ -90,6 +91,111 @@ describe('tool executors', () => {
   it('module_map renders subsystems and drift', async () => {
     const out = await x.module_map({ limit: 20, resolution: 1 });
     expect(out).toMatch(/subsystem|No inter-module/);
+  });
+});
+
+describe('signature truncation in cite() (Task 5)', () => {
+  let x: Executors;
+
+  const MULTILINE_SIG = `(
+    name: string,
+    qualifiedName: string | null,
+    useSpecifiers: string[],
+    methodCall = false,
+    fromPath: string | null = null,
+    externalNames?: ReadonlySet<string>,
+    selfReceiver = false,
+    callerQualified: string | null = null
+  ): { ids: number[]; confidence: 'resolved' | 'fuzzy' } | 'unresolved'`;
+
+  beforeAll(async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pairs-exec-sig-'));
+    const store = await SqliteCodeStore.open(path.join(dir, 'g.db'), nodeSqlDriver);
+    const longSigSym: NewSymbol = {
+      name: 'resolveOneRef',
+      qualified: 'SqliteCodeStore.resolveOneRef',
+      kind: 'method',
+      lang: 'rust',
+      startLine: 617,
+      endLine: 700,
+      signature: MULTILINE_SIG,
+      doc: null,
+      exported: true,
+      parentIndex: null,
+    };
+    await store.applyExtraction(ext('sig.rs', [longSigSym]));
+    x = createExecutors({ store });
+  });
+
+  it('find_symbol renders a multi-line signature on exactly one line, with file:line at the end', async () => {
+    const out = await x.find_symbol({ name: 'resolveOneRef', limit: 20, offset: 0 });
+    const resultLine = out.split('\n').find((l) => l.startsWith('  - '));
+    expect(resultLine).toBeDefined();
+    expect(resultLine).not.toContain('\n');
+    // Every line the raw signature spanned is now folded into one, and the
+    // file:line citation is the trailing token, not buried mid-signature.
+    expect(resultLine!.trim().endsWith('sig.rs:617')).toBe(true);
+    expect(out.split('\n').length).toBe(2); // header + the one result line
+  });
+
+  it('get_symbol still returns the complete, untruncated multi-line signature', async () => {
+    const out = await x.get_symbol({ name: 'resolveOneRef', includeMembers: true });
+    // Every parameter name from the full signature must survive verbatim.
+    expect(out).toContain('qualifiedName: string | null');
+    expect(out).toContain('callerQualified: string | null = null');
+    expect(out).toContain("{ ids: number[]; confidence: 'resolved' | 'fuzzy' } | 'unresolved'");
+    // The newlines/indentation from the source are preserved (not collapsed).
+    expect(out).toContain('\n    name: string,\n');
+  });
+});
+
+describe('includeTests filtering (Task 2)', () => {
+  let store: CodeStore;
+  let x: Executors;
+
+  beforeAll(async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pairs-exec-tests-'));
+    store = await SqliteCodeStore.open(path.join(dir, 'g.db'), nodeSqlDriver);
+    await store.applyExtraction(ext('target2.rs', [sym('target2', 'target2')]));
+    // One production caller, one test caller.
+    await store.applyExtraction(ext('prod-caller.rs', [sym('prodCaller', 'prodCaller')], [{ fromIndex: 1, name: 'target2', qualifiedName: null, kind: 'CALLS', line: 5, inTest: false }]));
+    await store.applyExtraction(ext('test-caller.rs', [sym('testCaller', 'testCaller')], [{ fromIndex: 1, name: 'target2', qualifiedName: null, kind: 'CALLS', line: 6, inTest: true }]));
+    x = createExecutors({ store });
+  });
+
+  it('edgesTo returns test:true on exactly the test-file caller edge', async () => {
+    const targetRows = await store.query(`SELECT id FROM Symbol WHERE qualified='target2'`);
+    const targetId = Number(targetRows[0]!.id);
+    const edges = await store.edgesTo([targetId], ['CALLS']);
+    expect(edges.length).toBe(2);
+    const testEdges = edges.filter((e) => e.test);
+    const prodEdges = edges.filter((e) => !e.test);
+    expect(testEdges.length).toBe(1);
+    expect(prodEdges.length).toBe(1);
+    expect(testEdges[0]!.line).toBe(6);
+    expect(prodEdges[0]!.line).toBe(5);
+  });
+
+  it('who_calls with includeTests:false omits the test caller and states the hidden count', async () => {
+    const out = await x.who_calls({ name: 'target2', direction: 'callers', includeFuzzy: true, includeTests: false, limit: 30 });
+    expect(out).toContain('prodCaller');
+    expect(out).not.toContain('testCaller');
+    expect(out).toContain('1 test-file caller(s) hidden; pass includeTests to see them');
+  });
+
+  it('who_calls default (flag absent from the raw call) is byte-identical to includeTests:true', async () => {
+    // Regression guard: an agent/CLI call that never mentions includeTests
+    // must render exactly what it did before this flag existed. Parse through
+    // the real zod schema (not a hand-built object) so a default change would
+    // actually be caught.
+    const parsed = codeToolSchemas.who_calls.input.parse({ name: 'target2', direction: 'callers', includeFuzzy: true, limit: 30 });
+    expect(parsed.includeTests).toBe(true); // default is unchanged
+    const withDefault = await x.who_calls(parsed);
+    const explicit = await x.who_calls({ name: 'target2', direction: 'callers', includeFuzzy: true, includeTests: true, limit: 30 });
+    expect(withDefault).toBe(explicit);
+    expect(withDefault).toContain('testCaller');
+    expect(withDefault).toContain('prodCaller');
+    expect(withDefault).not.toContain('hidden');
   });
 });
 

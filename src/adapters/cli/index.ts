@@ -26,9 +26,9 @@ const TOOL_ARG_SPECS: Record<CodeToolName, string[]> = {
   find_symbol: ['name'],
   get_symbol: ['name', 'path'],
   outline: ['path'],
-  impact: ['name', 'path', 'depth'],
+  impact: ['name', 'path', 'depth', 'includeTests'],
   hierarchy: ['name', 'path', 'depth'],
-  who_calls: ['name', 'direction', 'path'],
+  who_calls: ['name', 'direction', 'path', 'includeTests'],
   file_deps: ['path', 'direction'],
   module_map: ['boundary'],
   analyze: ['kind', 'pathPrefix'],
@@ -39,7 +39,7 @@ const TOOL_ARG_SPECS: Record<CodeToolName, string[]> = {
 const NUMERIC_FIELDS = new Set(['depth', 'limit', 'offset']);
 
 /** Fields that are booleans in the zod schema — CLI positionals arrive as strings. */
-const BOOLEAN_FIELDS = new Set(['includeFuzzy']);
+const BOOLEAN_FIELDS = new Set(['includeFuzzy', 'includeTests']);
 
 /**
  * `pairs impact --json`'s structured output — a compatibility contract with
@@ -48,7 +48,7 @@ const BOOLEAN_FIELDS = new Set(['includeFuzzy']);
  * them more richly than executors.ts's `resolveOne` (that helper collapses
  * both into one prose message, so it can't reproduce this).
  */
-async function renderImpactJson(store: SqliteCodeStore, input: { name: string; depth: number }): Promise<string> {
+async function renderImpactJson(store: SqliteCodeStore, input: { name: string; depth: number; includeTests?: boolean }): Promise<string> {
   const hit = await store.lookup(input.name);
   if (!Array.isArray(hit)) {
     // AmbiguousSymbol — report candidates so the caller can qualify.
@@ -57,7 +57,7 @@ async function renderImpactJson(store: SqliteCodeStore, input: { name: string; d
   if (hit.length === 0) {
     return JSON.stringify({ dependants: [], note: 'no such symbol' }, null, 2);
   }
-  const result = await impact(store, hit[0]!.id, input.depth);
+  const result = await impact(store, hit[0]!.id, input.depth, undefined, input.includeTests ?? true);
   return JSON.stringify(result, null, 2);
 }
 
@@ -121,7 +121,9 @@ async function main(): Promise<void> {
       }
       const parsed = codeToolSchemas[toolName].input.safeParse(raw);
       if (!parsed.success) {
-        process.stderr.write(`Usage: pairs ${toolName} ${fields.map((f) => `<${f}>`).join(' ')} [--json]\n`);
+        // [--json] only applies to `impact` — see the note where asJson is handled below.
+        const jsonSuffix = toolName === 'impact' ? ' [--json]' : '';
+        process.stderr.write(`Usage: pairs ${toolName} ${fields.map((f) => `<${f}>`).join(' ')}${jsonSuffix}\n`);
         process.stderr.write(`${parsed.error.message}\n`);
         process.exitCode = 1;
       } else if (asJson && toolName === 'impact') {
@@ -129,8 +131,14 @@ async function main(): Promise<void> {
         // pre-existing `case 'impact':` shape below, including its own
         // ambiguous/miss shapes — `resolveOne` (used by the prose path)
         // collapses both into one message string, so it can't reproduce them.
-        process.stdout.write(`${await renderImpactJson(store, parsed.data as { name: string; depth: number })}\n`);
+        process.stdout.write(`${await renderImpactJson(store, parsed.data as { name: string; depth: number; includeTests?: boolean })}\n`);
       } else {
+        // `--json` has a defined structured shape ONLY for `impact` today (see
+        // renderImpactJson above). A silently-ignored flag is worse than an
+        // error for an agent: it asks for JSON, gets prose, and either
+        // misparses it or burns a turn discovering the flag did nothing — so
+        // say so on stderr rather than failing silently.
+        if (asJson) process.stderr.write('--json is only supported for `impact`; printing text.\n');
         const out = await (executors[toolName] as (input: unknown) => Promise<string>)(parsed.data);
         process.stdout.write(`${out}\n`);
       }
@@ -251,8 +259,12 @@ async function main(): Promise<void> {
         break;
       }
       default:
+        // [--json] scoped to impact: it's the only tool with a defined
+        // structured shape (see renderImpactJson) — every other tool ignores
+        // the flag (with a stderr warning, not silently).
         process.stderr.write(
-          `Usage: pairs <index|query|stats|watch|files|read|${Object.keys(codeToolSchemas).join('|')}> [--json]\n`
+          `Usage: pairs <index|query|stats|watch|files|read|${Object.keys(codeToolSchemas).join('|')}>\n` +
+            `       pairs impact <name> [depth] [--json]\n`
         );
         process.exitCode = 1;
     }
