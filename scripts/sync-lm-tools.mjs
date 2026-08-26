@@ -27,9 +27,6 @@ const DISPLAY = {
   file_deps: { name: 'pairs_file_deps', displayName: 'PAiRS: file dependencies', toolReferenceName: 'pairsFileDeps' },
   module_map: { name: 'pairs_module_map', displayName: 'PAiRS: module map (subsystems)', toolReferenceName: 'pairsModuleMap' },
   analyze: { name: 'pairs_analyze', displayName: 'PAiRS: analyze (dead code, cycles, hotspots)', toolReferenceName: 'pairsAnalyze' },
-  check_rules: { name: 'pairs_check_rules', displayName: 'PAiRS: check architectural rules', toolReferenceName: 'pairsCheckRules' },
-  list_rules: { name: 'pairs_list_rules', displayName: 'PAiRS: list architectural rules', toolReferenceName: 'pairsListRules' },
-  explain_rule: { name: 'pairs_explain_rule', displayName: 'PAiRS: explain a rule', toolReferenceName: 'pairsExplainRule' },
   rename_symbol: { name: 'pairs_rename_symbol', displayName: 'PAiRS: rename symbol', toolReferenceName: 'pairsRenameSymbol' },
 };
 

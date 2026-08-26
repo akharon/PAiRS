@@ -131,8 +131,7 @@ const SCAFFOLD_SEGMENTS = new Set(['src', 'crates', 'packages', 'libs', 'apps', 
 /**
  * Module key for a file: directory path, with monorepo container segments
  * (`crates`, `packages`, ...) rolled into `container/name` so a cargo
- * workspace doesn't degenerate into meaningless per-container noise (shared
- * with initProposal's former private `coarsen`/`layerName` logic).
+ * workspace doesn't degenerate into meaningless per-container noise.
  * `depth` (if given) further collapses to that many leading segments.
  */
 export function moduleKeyOf(file: string, opts: ModuleMapOptions = {}): string {
@@ -232,7 +231,7 @@ async function moduleFacts(
   return facts;
 }
 
-/** Cluster + drift over an already-built module edge list (initProposal re-clusters at crate granularity). */
+/** Cluster + drift over an already-built module edge list (callers re-cluster at crate granularity). */
 export function moduleMapFromEdges(
   modules: string[],
   edges: Array<{ from: string; to: string; weight: number }>,

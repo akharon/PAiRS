@@ -1,85 +1,108 @@
 # PAiRS
 
-**Derived code-graph index + architectural rule engine for AI coding agents.**
+**Derived code-graph index for AI coding agents.**
 
-PAiRS builds a queryable code dependency graph from your workspace and evaluates architectural rules in real-time. Use it to understand module relationships, find symbols, and enforce constraints as you code.
+PAiRS parses your workspace into a queryable code graph (symbols, calls, imports, type hierarchy). It ships as a VS Code extension and a standalone `pairs` CLI that share the same index, so navigation and refactoring-safety checks all see the same graph.
 
-## Quick Start
+Supported languages: C, C++, Python, JavaScript, TypeScript, Java, Go, Ruby, Dart, Rust, CSS, HTML.
 
-### Installation
+---
 
-1. **Open VS Code** and go to **Extensions** (Ctrl+Shift+X)
-2. **Search for "PAiRS"** and install
-3. **Reload** the VS Code window
+## 1. Installing the VS Code extension
 
-The extension activates automatically on startup and indexes your workspace in the background.
+1. Open VS Code → **Extensions** (`Ctrl+Shift+X` / `Cmd+Shift+X`).
+2. Search for **PAiRS** and install (or install the `.vsix` directly: `code --install-extension pairs-<version>.vsix`).
+3. **Reload the window** if prompted.
+4. Open a workspace folder — PAiRS activates automatically (`onStartupFinished`) and indexes it in the background. Progress shows in the bottom-right notification area.
 
-### VS Code Commands
+The index lives in `.pairs/index.db` (SQLite) inside your workspace. It's safe to add `.pairs/` to `.gitignore` — everything in it is derived and rebuilt on demand.
 
-Open the command palette (**Ctrl+Shift+P**) and type:
+A multi-root workspace gets one independent index per folder.
 
-- **PAiRS: Re-index Workspace** — Rebuild the code graph (auto-runs on activation and file changes)
-- **PAiRS: Find Symbol** — Search and jump to any symbol in the workspace
-- **PAiRS: Check Rules** — Evaluate architectural rules (run manually or auto-triggers on file save)
-- **PAiRS: Show Module Map** — Visualize module subsystems and dependency drift
+## 2. Using it in VS Code
 
-### Rule Enforcement
+### Commands (Command Palette → `Ctrl+Shift+P` / `Cmd+Shift+P`)
 
-Create `.pairs/rules.ron` in your workspace root to define architectural constraints. Rules appear as inline diagnostics (squiggles) in the editor.
+| Command | What it does |
+|---|---|
+| **PAiRS: Re-index Workspace** | Incremental re-index (also runs automatically on activation and on every file save/create/delete). |
+| **PAiRS: Rebuild Index From Scratch** | Drops the SQLite store and reparses everything. Use this if the index looks stale or corrupted — a plain re-index short-circuits unchanged files and can't recover from a broken store. |
+| **PAiRS: Find Symbol** | Quick-pick search by symbol name (bare or qualified, e.g. `login` or `AuthService::login`); jumps to its definition. |
+| **PAiRS: Show Module Map** | Opens a webview visualizing detected subsystems (as columns, ordered by dependency layer), cross-module dependency edges, cycles (amber), and drift — dependencies that cross a subsystem boundary the folder layout implies (red). Click/Enter a node to reveal it in the Explorer. |
 
-Example:
-```ron
-rules = [
-  (
-    name: "no_cycle",
-    query: "MATCH (a:Module)-[*]->(a) RETURN a",
-    severity: "error",
-    explanation: "Cyclic module dependency",
-  ),
-]
+### Status bar
+
+Bottom-right shows `pairs <N> sym · <P>% fuzzy` — total indexed symbols and the percentage resolved by fuzzy (name-only) matching rather than a verified reference. Lower fuzzy % means more reliable `impact`/`who_calls` results. Hover for a breakdown (files, symbols, edges, unresolved references); click to trigger a re-index.
+
+### Copilot agent-mode tools
+
+PAiRS registers its analysis functions as native VS Code Language Model Tools, so **GitHub Copilot in agent mode can call them directly** (no MCP server needed) — `find_symbol`, `get_symbol`, `outline`, `impact`, `hierarchy`, `who_calls`, `file_deps`, `module_map`, `analyze`, `rename_symbol`. See §5 for what each does.
+
+### Claude Code integration
+
+On every activation, PAiRS writes `.claude/skills/pairs/SKILL.md` into the workspace. If you use Claude Code in that workspace, it auto-discovers this skill and drives the same functionality through the `pairs` CLI instead of an in-process tool call. This file is regenerated on each activation to track your installed extension version — don't hand-edit it.
+
+## 3. Using the `pairs` CLI
+
+The extension bundles a CLI (`dist/cli.js`) for terminal use, CI pipelines, and Claude Code. If you have the repo/npm package rather than just the `.vsix`, it's exposed as the `pairs` binary. Run all commands from your workspace root — the index lives at `./.pairs/index.db` relative to your current directory.
+
+```
+pairs <command> [args]
 ```
 
-### Status Bar
+| Command | Usage | Description |
+|---|---|---|
+| `index` | `pairs index [--rebuild]` | Full index (or full rebuild with `--rebuild`, dropping the store first). Prints a JSON report. |
+| `stats` | `pairs stats` | Index size and resolution quality (files, symbols, edges, fuzzy rate) as JSON. |
+| `find` (via `query`) | `pairs query '<sql>'` | Raw read-only SQL against the graph schema (`File`, `Symbol`, `Edge`, `PendingRef`) for anything not covered by a dedicated command. |
+| `impact` | `pairs impact <name> [depth]` | Everything that transitively depends on a symbol, up to `depth` hops (default 5). Run this before renaming/removing something. |
+| `watch` | `pairs watch` | Indexes once, then watches the workspace and incrementally re-indexes on save. `Ctrl-C` to stop. |
+| `files` | `pairs files [pattern] [--paths]` | Lists/searches indexed non-source filenames (a glob like `*.txt` or `Pic*.svg`). `--paths` also matches against full paths. |
+| `read` | `pairs read <path> [startLine] [endLine]` | Prints a file, or a 1-indexed inclusive line range. Out-of-range values clamp rather than error. |
 
-The status bar (bottom right) shows:
-- **Symbol count** — Total symbols indexed
-- **Fuzzy rate** — Percentage of symbols with fuzzy resolution (lower is better)
+## 4. Reference: agent tools / CLI commands
 
-Click it to re-index.
+These are the same operations, exposed as VS Code Language Model Tools (Copilot) or CLI subcommands (Claude Code / scripts):
 
-## Features
+| Tool | Purpose |
+|---|---|
+| `find_symbol` | Locate a symbol's definition(s) by name. |
+| `get_symbol` | Full declaration (signature, doc, span, members) without reading the whole file. |
+| `outline` | A file's symbols in order — its structural shape. |
+| `impact` | Everything that transitively depends on a symbol ("blast radius"). Call before changing/removing it. |
+| `hierarchy` | Type ancestors (extends/implements) and descendants. |
+| `who_calls` | Direct callers or callees, one hop. |
+| `file_deps` | File-level importers or imports, optionally transitive. |
+| `module_map` | Subsystems, cycles, layers, fan-in/fan-out, and drift; pass a `boundary` to see exactly what one module uses from another. |
+| `analyze` | Workspace-wide: `dead_code`, `fan_out`, `cycles`, `test_gap`. |
+| `rename_symbol` | Rename a symbol and every reference site in one pass. Aborts untouched if any site can't be matched safely — re-index and retry. No built-in undo; revert via git. |
 
-- **Live indexing** — Code graph updates automatically on file save
-- **Symbol lookup** — Quick search with go-to-definition
-- **Diagnostics** — Real-time inline constraint violations
-- **MCP integration** — Exposes all PAiRS tools to Claude/Copilot agents
-- **Multi-root workspaces** — One index per folder, separate MCP server per folder
+## 5. Configuration
 
-## Configuration
+**Settings** (VS Code Settings → search "PAiRS"):
+- **`pairs.disabledTools`** — array of tool names (e.g. `["analyze"]`) to skip registering as Copilot Language Model Tools.
 
-Open VS Code Settings and search for "PAiRS":
-
-- **pairs.disabledTools** — Comma-separated MCP tool names to disable (e.g., `"analyze"`)
-
-## Troubleshooting
+## 6. Troubleshooting
 
 **"PAiRS: ... command not found"**
-- Run **Developer: Reload Window** (Ctrl+Shift+P)
-- Check **Help → Toggle Developer Tools** for errors
+Run **Developer: Reload Window**. Check **Help → Toggle Developer Tools → Console** for activation errors.
 
-**Index not updating**
-- Run **PAiRS: Re-index Workspace** manually
-- Check that `.pairs/` folder is writable
+**Index looks stale or wrong**
+Run **PAiRS: Rebuild Index From Scratch** (a plain re-index skips unchanged files and can't self-heal a corrupted store).
 
-**Rules not showing**
-- Ensure `.pairs/rules.ron` exists and is valid RON syntax
-- Check the **Problems** panel for parse errors
+**Node version errors when building/installing from source**
+The store uses Node's built-in `node:sqlite`, which requires **Node ≥ 22**.
 
-## Learn More
+## 7. Building from source
 
-- [Architecture & design](plan.md)
-- [Benchmark results](BENCHMARKS.md)
-- [CLI reference](https://github.com/mkyr/pairs#cli)
+```bash
+npm install
+npm run build          # esbuild → dist/
+npm run fetch-grammars # tree-sitter grammars → dist/grammars
+npm test
+npm run package         # → pairs-<version>.vsix
+npm run install          # build + package + code --install-extension, end to end
+```
 
 ---
 

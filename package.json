@@ -1,7 +1,7 @@
 {
   "name": "pairs",
   "version": "0.19.0",
-  "description": "Derived code-graph index + architectural rule engine for AI coding agents",
+  "description": "Derived code-graph index for AI coding agents",
   "license": "MIT",
   "author": "Mustafa Kiyar",
   "repository": {
@@ -36,10 +36,6 @@
         "title": "PAiRS: Find Symbol"
       },
       {
-        "command": "pairs.checkRules",
-        "title": "PAiRS: Check Rules"
-      },
-      {
         "command": "pairs.moduleMap",
         "title": "PAiRS: Show Module Map"
       }
@@ -61,9 +57,6 @@
               "file_deps",
               "module_map",
               "analyze",
-              "check_rules",
-              "list_rules",
-              "explain_rule",
               "rename_symbol"
             ]
           },
@@ -418,63 +411,6 @@
           },
           "required": [
             "kind"
-          ]
-        }
-      },
-      {
-        "name": "pairs_check_rules",
-        "displayName": "PAiRS: check architectural rules",
-        "toolReferenceName": "pairsCheckRules",
-        "modelDescription": "Evaluate the workspace's architectural rules (.pairs/rules.ron) against the code graph. Call AFTER editing code to verify no architecture rule is violated — each violation returns the rule's explanation so you can self-correct. `possible` findings come from fuzzy edges and never fail CI.",
-        "canBeReferencedInPrompt": true,
-        "inputSchema": {
-          "type": "object",
-          "properties": {
-            "tier": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 2,
-              "description": "Only evaluate rules of this tier."
-            },
-            "rule": {
-              "type": "string",
-              "description": "Only evaluate this rule id."
-            },
-            "limit": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 100
-            }
-          }
-        }
-      },
-      {
-        "name": "pairs_list_rules",
-        "displayName": "PAiRS: list architectural rules",
-        "toolReferenceName": "pairsListRules",
-        "modelDescription": "Summarize the active ruleset: rule ids, kinds, tiers, severities, and layers.",
-        "canBeReferencedInPrompt": true,
-        "inputSchema": {
-          "type": "object",
-          "properties": {}
-        }
-      },
-      {
-        "name": "pairs_explain_rule",
-        "displayName": "PAiRS: explain a rule",
-        "toolReferenceName": "pairsExplainRule",
-        "modelDescription": "Full detail of one rule: its kind, configuration, and the explanation shown on violations.",
-        "canBeReferencedInPrompt": true,
-        "inputSchema": {
-          "type": "object",
-          "properties": {
-            "rule": {
-              "type": "string",
-              "description": "Rule id from list_rules."
-            }
-          },
-          "required": [
-            "rule"
           ]
         }
       },

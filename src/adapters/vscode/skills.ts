@@ -14,16 +14,15 @@ import * as fs from 'node:fs/promises';
 
 const SKILL_MD = `---
 name: pairs
-description: Leverage PAiRS's code graph and architectural rules. Use instead of grep/Read for definitions, dependencies, refactoring safety, and rule compliance. In VS Code with Copilot, prefer the language model tools (find_symbol, impact, check_rules, rename_symbol, etc.); for CLI use the pairs commands.
+description: Leverage PAiRS's code graph. Use instead of grep/Read for definitions, dependencies, and refactoring safety. In VS Code with Copilot, prefer the language model tools (find_symbol, impact, rename_symbol, etc.); for CLI use the pairs commands.
 ---
 
-# PAiRS: Code Graph & Architectural Rules
+# PAiRS: Code Graph
 
-PAiRS maintains a live code graph (symbols, call/import edges, dependencies) and
-architectural rule engine for this workspace, updated by the VS Code extension
-while it's open. Use PAiRS instead of grep/Read for code navigation and
-refactoring — it catches renamed-import references grep misses, understands
-module structure, and enforces architecture rules.
+PAiRS maintains a live code graph (symbols, call/import edges, dependencies)
+for this workspace, updated by the VS Code extension while it's open. Use
+PAiRS instead of grep/Read for code navigation and refactoring — it catches
+renamed-import references grep misses and understands module structure.
 
 ## In VS Code with Copilot (Language Model Tools)
 
@@ -45,10 +44,6 @@ Copilot has direct access to PAiRS tools — use these for navigation and refact
   target that the source actually uses, with reference sites — what breaking
   that dependency would require.
 - **analyze** — dead code, cycles, hotspots, untested exports.
-- **check_rules** — verify \`.pairs/rules.ron\` against the graph (call AFTER
-  editing to catch rule violations early).
-- **list_rules** — summarize the active ruleset: ids, kinds, severities.
-- **explain_rule** — detail of one rule, including its explanation.
 - **rename_symbol** — rename a symbol and all direct reference sites consistently
   in one pass. Aborts if any site can't be matched safely (stale index, ambiguous
   text). Revert via git or your own backups.
@@ -58,16 +53,9 @@ Copilot has direct access to PAiRS tools — use these for navigation and refact
 For automation and CI/CD, use \`pairs\` commands:
 
 - \`pairs impact <name> [depth]\` — blast radius (same as the tool above).
-- \`pairs check [--ci] [--format human|sarif|json]\` — evaluate
-  \`.pairs/rules.ron\` against the graph. Non-zero exit only on new confirmed
-  error-severity violations.
-- \`pairs rules [path]\` — summarize the ruleset.
-- \`pairs baseline update\` — snapshot current violations so \`check\` only flags
-  new ones going forward.
 - \`pairs query '<sql>'\` — raw read-only SQL for anything not covered above.
 - \`pairs stats\` — index size and resolution quality.
 - \`pairs index\` — full re-index (rarely needed; extension keeps it live).
-- \`pairs init [--force]\` — bootstrap \`.pairs/rules.ron\` from inferred layers.
 
 ## When to Use PAiRS
 
@@ -75,12 +63,10 @@ For automation and CI/CD, use \`pairs\` commands:
 - **Checking impact before a change** — \`impact\` shows callers, readers, type
   references, etc. that might break.
 - **Refactoring safely** — \`rename_symbol\` renames definition + all reference
-  sites together; \`check_rules\` catches architecture violations.
+  sites together.
 - **Understanding module structure** — \`module_map\` shows subsystems, cycles,
   layers and drift; \`module_map\` with \`boundary\` shows why one module depends
   on another. Ask it "where does this code belong" before adding a new file.
-- **Enforcing architecture** — \`check_rules\` in CI ensures no layering,
-  circular, or visibility rule violations.
 `;
 
 export async function writeSkillFiles(workspaceRoot: string): Promise<void> {

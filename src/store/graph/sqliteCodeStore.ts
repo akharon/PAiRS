@@ -42,11 +42,10 @@ import type {
   SymbolKind,
   SymbolRecord,
 } from '../../core/indexer/types';
-import { ENTRY_POINT_NAMES, isTestPath, TEST_PATH_REGEX } from '../../core/indexer/types';
+import { ENTRY_POINT_NAMES, globToRegExp, isTestPath, TEST_PATH_REGEX } from '../../core/indexer/types';
 import type { CodeStore, CodeStoreFactory } from './codeStore';
 import { assertReadOnlySql } from './codeStore';
 import { importCandidatePaths, isExternalSpecifier } from './importPath';
-import { globToRegExp } from '../../core/rules/evaluate';
 import { nodeSqlDriver } from './sqliteDriver';
 import type { SqlConnectionLike, SqlDriver, SqlStatement } from './sqliteDriver';
 import { ALL_TABLES, REFERENCE_EDGE_KINDS, SCHEMA_DDL, SCHEMA_INDEXES, SCHEMA_VERSION } from './sqlSchema';
@@ -141,9 +140,9 @@ export class SqliteCodeStore implements CodeStore {
 
   static async open(dbPath: string, driver: SqlDriver): Promise<SqliteCodeStore> {
     const conn = driver.open(dbPath);
-    // Rules and the `pairs query` escape hatch need regex matching; SQLite has
-    // no built-in REGEXP, so register the one rules.ron's test-path predicate
-    // relies on. Invalid patterns match nothing rather than throwing mid-query.
+    // `untested()`'s test-path predicate and the `pairs query` escape hatch
+    // need regex matching; SQLite has no built-in REGEXP, so register one.
+    // Invalid patterns match nothing rather than throwing mid-query.
     conn.addFunction('regexp_matches', (value: unknown, pattern: unknown): number => {
       try {
         return new RegExp(String(pattern)).test(String(value ?? '')) ? 1 : 0;

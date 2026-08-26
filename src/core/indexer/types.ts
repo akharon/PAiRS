@@ -284,6 +284,26 @@ export function isTestPath(path: string): boolean {
   return TEST_PATH_RE.test(path);
 }
 
+/** Simple glob (`*`, `**`) → RegExp, used for path/filename pattern filters. */
+export function globToRegExp(glob: string): RegExp {
+  let out = '^';
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i]!;
+    if (c === '*') {
+      if (glob[i + 1] === '*') {
+        if (i === glob.length - 2 && glob[i - 1] === '/') {
+          // trailing `/**`: strip the `/` we already emitted, match self or deeper
+          out = out.slice(0, -1) + '(?:/.*)?';
+          i += 1;
+        } else if (glob[i + 2] === '/') { out += '(?:[^/]+/)*'; i += 2; } // `**/` may match zero segments
+        else { out += '.*'; i += 1; }
+      } else out += '[^/]*';
+    } else if ('\\^$.|?+()[]{}'.includes(c)) out += `\\${c}`;
+    else out += c;
+  }
+  return new RegExp(out + '$');
+}
+
 /**
  * Functions the host calls, not the workspace: they have no in-workspace
  * caller by design, so fan-out and dead-code passes must not flag them.

@@ -142,49 +142,6 @@ describe('rename_symbol executor', () => {
   });
 });
 
-describe('rule tool executors', () => {
-  let x: Executors;
-  let rulesPath: string;
-  beforeAll(async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pairs-ruletool-'));
-    const store = await SqliteCodeStore.open(path.join(dir, 'g.db'), nodeSqlDriver);
-    // busy() calls two targets; MaxFanOut(max: 1) flags it.
-    await store.applyExtraction(ext('u/t.rs', [sym('t1', 't1'), sym('t2', 't2')]));
-    await store.applyExtraction(ext('u/busy.rs', [sym('busy', 'busy')], [fromFn('t1', null), fromFn('t2', null)]));
-    rulesPath = path.join(dir, 'rules.ron');
-    fs.writeFileSync(
-      rulesPath,
-      '( rules: [ (id: "fanout", tier: 2, severity: warning, kind: MaxFanOut(max: 1), explain: "Keep functions focused.") ] )'
-    );
-    x = createExecutors({ store, rulesPath });
-  });
-
-  it('check_rules reports the violation with the explain payload', async () => {
-    const out = await x.check_rules({ limit: 30 });
-    expect(out).toContain('fanout');
-    expect(out).toContain('Keep functions focused.');
-    expect(out).toContain('u/busy.rs:10');
-    expect(out).toContain('warning');
-  });
-
-  it('list_rules and explain_rule render the ruleset', async () => {
-    expect(await x.list_rules({})).toContain('MaxFanOut(max: 1)');
-    const out = await x.explain_rule({ rule: 'fanout' });
-    expect(out).toContain('tier 2');
-    expect(out).toContain('Keep functions focused.');
-    expect(await x.explain_rule({ rule: 'nope' })).toContain('No rule "nope"');
-  });
-
-  it('missing/invalid rules.ron degrades to a helpful message', async () => {
-    // Rules load is checked before any store access, so a stub store suffices.
-    const noRules = createExecutors({ store: {} as never, rulesPath: '/nonexistent/rules.ron' });
-    expect(await noRules.check_rules({ limit: 30 })).toContain('No ruleset at');
-    fs.writeFileSync(rulesPath + '.bad', '( rules: [ (id: "x", kind: NoCycles()) ] )');
-    const bad = createExecutors({ store: {} as never, rulesPath: rulesPath + '.bad' });
-    expect(await bad.check_rules({ limit: 30 })).toContain('missing mandatory "explain"');
-  });
-});
-
 describe('moduleMap clustering', () => {
   // moduleMap reads only store.query(); a canned-row stub pins the Louvain +
   // drift logic deterministically without depending on edge-creation internals

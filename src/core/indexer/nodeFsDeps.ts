@@ -9,7 +9,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { langForPath } from './parserRegistry';
-import { globToRegExp } from '../rules/evaluate';
+import { globToRegExp } from './types';
 
 /** Directories never worth walking (also the watcher's ignore set). */
 export const SKIP_DIRS = new Set(['.git', 'node_modules', 'dist', 'out', 'build', '.pairs', '.vscode', 'target']);

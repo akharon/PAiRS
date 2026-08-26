@@ -9,24 +9,17 @@
  * text, not JSON — agents read prose more reliably and it costs fewer tokens.
  */
 
-import * as fs from 'node:fs';
 import type { CodeStore } from '../../store/graph/codeStore';
 import type { AmbiguousSymbol, EdgeKind, SymbolRecord } from '../indexer/types';
 import { impact } from '../analyze/impact';
 import { hierarchy } from '../analyze/hierarchy';
 import { moduleMap, moduleKeyOf } from '../analyze/moduleMap';
 import type { ModuleMap } from '../analyze/moduleMap';
-import { parseRuleSet } from '../rules/config';
-import { checkRules } from '../rules/evaluate';
-import { renderViolation, describeRuleKind } from '../rules/render';
-import type { RuleSet } from '../rules/types';
 import { planRename, applyPlan } from './rename';
 import type { CodeToolInput, CodeToolName } from './tools';
 
 export interface ExecutorDeps {
   store: CodeStore;
-  /** Path to `.pairs/rules.ron`. Re-read on every rule-tool call so edits apply live. */
-  rulesPath?: string;
   /** Workspace root. Required for rename_symbol/rename_revert (they write source files). */
   root?: string;
 }
@@ -287,22 +280,6 @@ function renderModuleMap(map: ModuleMap, limit: number): string {
 export function createExecutors(deps: ExecutorDeps): Executors {
   const { store } = deps;
 
-  /** rules.ron → RuleSet, or a user-facing message when missing/invalid. */
-  function loadRules(): RuleSet | { message: string } {
-    if (!deps.rulesPath) return { message: 'No rules configured (server started without a rules path).' };
-    let src: string;
-    try {
-      src = fs.readFileSync(deps.rulesPath, 'utf8');
-    } catch {
-      return { message: `No ruleset at ${deps.rulesPath}. Create .pairs/rules.ron to enable architectural rules.` };
-    }
-    try {
-      return parseRuleSet(src);
-    } catch (e) {
-      return { message: `Invalid ${deps.rulesPath}: ${(e as Error).message}` };
-    }
-  }
-
   return {
     async find_symbol(input) {
       const hit = await store.lookup(input.name);
@@ -428,47 +405,6 @@ export function createExecutors(deps: ExecutorDeps): Executors {
       if (map.modules.length === 0) return 'No inter-module dependencies indexed (single module, or no DEPENDS_ON edges).';
       if (input.boundary) return renderBoundary(store, map, input.boundary, input.limit, opts);
       return renderModuleMap(map, input.limit);
-    },
-
-    async check_rules(input) {
-      const rs = loadRules();
-      if ('message' in rs) return rs.message;
-      let ruleset = rs;
-      if (input.tier !== undefined || input.rule !== undefined) {
-        const rules = rs.rules.filter((r) => (input.tier === undefined || r.tier === input.tier) && (input.rule === undefined || r.id === input.rule));
-        if (rules.length === 0) return input.rule ? `No rule "${input.rule}" in the ruleset.` : `No tier-${input.tier} rules.`;
-        ruleset = { ...rs, rules };
-      }
-      const stats = await store.stats();
-      if (stats.files === 0) return 'Index is empty — run `pairs index` first; rules cannot be checked over nothing.';
-      const { violations, checkedRules } = await checkRules(store, ruleset);
-      if (violations.length === 0) return `OK — ${checkedRules.length} rule(s) checked, no violations.`;
-      const confirmed = violations.filter((v) => v.confidence === 'confirmed').length;
-      const { page, note } = paginate(violations, input.limit);
-      return (
-        `${violations.length} violation(s) (${confirmed} confirmed, ${violations.length - confirmed} possible) from ${checkedRules.length} rule(s):\n\n` +
-        page.map(renderViolation).join('\n\n') +
-        note
-      );
-    },
-
-    async list_rules() {
-      const rs = loadRules();
-      if ('message' in rs) return rs.message;
-      const layers = Object.entries(rs.layers)
-        .sort((a, b) => a[1] - b[1])
-        .map(([n, r]) => `${n}=${r}`)
-        .join(', ');
-      const body = rs.rules.map((r) => `  - ${r.id} [tier ${r.tier}, ${r.severity}] ${describeRuleKind(r.kind)}`).join('\n');
-      return `${rs.rules.length} rule(s)${layers ? `; layers: ${layers}` : ''}:\n${body}`;
-    },
-
-    async explain_rule(input) {
-      const rs = loadRules();
-      if ('message' in rs) return rs.message;
-      const r = rs.rules.find((x) => x.id === input.rule);
-      if (!r) return `No rule "${input.rule}". Known: ${rs.rules.map((x) => x.id).join(', ')}.`;
-      return `${r.id} [tier ${r.tier}, ${r.severity}]\nkind: ${describeRuleKind(r.kind)}\nexplain: ${r.explain}`;
     },
 
     async analyze(input) {

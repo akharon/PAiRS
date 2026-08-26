@@ -16,11 +16,6 @@ import { WatchQueue } from '../../core/indexer/watchQueue';
 import { SqliteCodeStore } from '../../store/graph/sqliteCodeStore';
 import { nodeSqlDriver } from '../../store/graph/sqliteDriver';
 import { impact } from '../../core/analyze/impact';
-import { parseRuleSet } from '../../core/rules/config';
-import { checkRules } from '../../core/rules/evaluate';
-import { renderViolation, summarizeRule } from '../../core/rules/render';
-import { toSarif } from '../../core/rules/sarif';
-import { ciFailures, createBaseline, diffAgainstBaseline, parseBaseline } from '../../core/rules/baseline';
 
 /** Commands that only ever read the graph — safe to serve from a snapshot copy. */
 
@@ -102,119 +97,8 @@ async function main(): Promise<void> {
         process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
         break;
       }
-      case 'check': {
-        // pairs check [--ci] [--baseline <f>] [--format human|sarif|json] [--rules <f>]
-        const opt = (name: string): string | undefined => {
-          const i = rest.indexOf(name);
-          return i >= 0 ? rest[i + 1] : undefined;
-        };
-        const ci = rest.includes('--ci');
-        const format = opt('--format') ?? 'human';
-        const rulesPath = opt('--rules') ?? path.join(root, '.pairs', 'rules.ron');
-        const baselinePath = opt('--baseline');
-
-        let src: string;
-        try {
-          src = await fs.readFile(rulesPath, 'utf8');
-        } catch {
-          process.stderr.write(`No ruleset at ${rulesPath}. Create .pairs/rules.ron first.\n`);
-          process.exitCode = 2;
-          break;
-        }
-        const ruleset = parseRuleSet(src); // ConfigError propagates with the fixable message
-
-        if (ci) await indexer.fullIndex(root); // a gate must never judge a stale graph
-        else {
-          // Non-CI check against an empty graph would report a hollow OK —
-          // refuse rather than silently pass a gate over nothing.
-          const s = await store.stats();
-          if (s.files === 0) {
-            process.stderr.write('Index is empty — run `pairs index` (or `pairs check --ci`) first.\n');
-            process.exitCode = 2;
-            break;
-          }
-        }
-        const { violations, checkedRules } = await checkRules(store, ruleset);
-
-        // Baseline: only violations NOT in the snapshot can fail the run.
-        let fresh = violations;
-        let known = 0;
-        if (baselinePath) {
-          const b = parseBaseline(await fs.readFile(baselinePath, 'utf8'));
-          const diff = diffAgainstBaseline(violations, b);
-          fresh = diff.fresh;
-          known = diff.known.length;
-          if (diff.fixedKeys.length > 0 && format === 'human') {
-            process.stderr.write(`${diff.fixedKeys.length} baselined violation(s) fixed — run \`pairs baseline update\` to ratchet.\n`);
-          }
-        }
-
-        if (format === 'sarif') process.stdout.write(`${toSarif(fresh, ruleset.rules, '0.3.0')}\n`);
-        else if (format === 'json') process.stdout.write(`${JSON.stringify({ violations: fresh, known, checkedRules }, null, 2)}\n`);
-        else {
-          if (fresh.length === 0) {
-            process.stdout.write(`OK — ${checkedRules.length} rule(s), ${known} baselined, no new violations.\n`);
-          } else {
-            process.stdout.write(fresh.map(renderViolation).join('\n\n') + '\n');
-            process.stdout.write(`\n${fresh.length} new violation(s) (${known} baselined).\n`);
-          }
-        }
-
-        // Exit 1 only on new CONFIRMED error-severity violations (R1).
-        if (ciFailures(fresh).length > 0) process.exitCode = 1;
-        break;
-      }
-      case 'baseline': {
-        // pairs baseline update [--rules <f>] [--out <f>]
-        if (rest[0] !== 'update') {
-          process.stderr.write('Usage: pairs baseline update [--rules <f>] [--out <f>]\n');
-          process.exitCode = 1;
-          break;
-        }
-        const opt = (name: string): string | undefined => {
-          const i = rest.indexOf(name);
-          return i >= 0 ? rest[i + 1] : undefined;
-        };
-        const rulesPath = opt('--rules') ?? path.join(root, '.pairs', 'rules.ron');
-        const outPath = opt('--out') ?? path.join(root, '.pairs', 'baseline.json');
-        const ruleset = parseRuleSet(await fs.readFile(rulesPath, 'utf8'));
-        const { violations } = await checkRules(store, ruleset);
-        const baseline = createBaseline(violations);
-        await fs.writeFile(outPath, `${JSON.stringify(baseline, null, 2)}\n`);
-        process.stdout.write(`Baseline written: ${outPath} (${baseline.keys.length} accepted violation(s)).\n`);
-        break;
-      }
-      case 'init': {
-        // pairs init [--force] — index, infer layers, write starter rules.ron
-        // + a findings report (plan.md 3.4 / R5). Never overwrites an existing
-        // ruleset without --force.
-        const rulesPath = path.join(root, '.pairs', 'rules.ron');
-        const exists = await fs.access(rulesPath).then(() => true, () => false);
-        if (exists && !rest.includes('--force')) {
-          process.stderr.write(`${rulesPath} already exists — review it, or re-run with --force to overwrite.\n`);
-          process.exitCode = 2;
-          break;
-        }
-        process.stderr.write('Indexing…\n');
-        const report = await indexer.fullIndex(root);
-        process.stderr.write(`Indexed ${report.files} files in ${report.elapsedMs} ms.\n`);
-        const { proposeInit } = await import('../../core/analyze/initProposal');
-        const proposal = await proposeInit(store);
-        await fs.writeFile(rulesPath, proposal.rulesRon);
-        const nLayers = Object.keys(proposal.layers).length;
-        process.stdout.write(`Wrote ${rulesPath}: ${nLayers} inferred layer(s) over ${proposal.map.modules.length} module(s).\n`);
-        if (proposal.findings.length) {
-          process.stdout.write(`\nReview these before trusting the proposal:\n`);
-          for (const f of proposal.findings) process.stdout.write(`  - ${f}\n`);
-        }
-        process.stdout.write(`\nNext: \`pairs check\` to see day-1 violations, \`pairs baseline update\` to accept them.\n`);
-        break;
-      }
       case 'watch': {
-        // pairs watch [--check] — incremental re-index on save (plan.md 3.1);
-        // with --check, re-evaluate rules after each settled batch (3.3-lite).
-        const withCheck = rest.includes('--check');
-        const rulesPath = path.join(root, '.pairs', 'rules.ron');
+        // pairs watch — incremental re-index on save (plan.md 3.1).
         process.stderr.write('Indexing…\n');
         const report = await indexer.fullIndex(root);
         process.stderr.write(`Indexed ${report.files} files in ${report.elapsedMs} ms. Watching (Ctrl-C to stop).\n`);
@@ -223,18 +107,7 @@ async function main(): Promise<void> {
           removeFile: (p) => indexer.removeFile(p),
           async onFlushed(changed, removed) {
             await store.checkpoint();
-            const t0 = Date.now();
             for (const p of [...changed, ...removed]) process.stderr.write(`  ~ ${p}\n`);
-            if (!withCheck) return;
-            let src: string;
-            try {
-              src = await fs.readFile(rulesPath, 'utf8');
-            } catch {
-              return; // no ruleset — watch is still useful for the index alone
-            }
-            const { violations } = await checkRules(store, parseRuleSet(src));
-            const line = violations.length === 0 ? 'OK' : violations.map(renderViolation).join('\n\n');
-            process.stdout.write(`${line}\n[check ${Date.now() - t0} ms]\n`);
           },
           onError: (p, err) => process.stderr.write(`  ! ${p}: ${err.message}\n`),
         });
@@ -297,14 +170,8 @@ async function main(): Promise<void> {
         process.stdout.write(files.map((f) => f.path).join('\n') + '\n');
         break;
       }
-      case 'rules': {
-        const rulesPath = rest[0] ?? path.join(root, '.pairs', 'rules.ron');
-        const ruleset = parseRuleSet(await fs.readFile(rulesPath, 'utf8'));
-        process.stdout.write(ruleset.rules.map((r) => `${summarizeRule(r)}\n`).join(''));
-        break;
-      }
       default:
-        process.stderr.write('Usage: pairs <index|init|query|stats|impact|check|baseline|rules|watch|files|read>\n');
+        process.stderr.write('Usage: pairs <index|query|stats|impact|watch|files|read>\n');
         process.exitCode = 1;
     }
   } finally {
