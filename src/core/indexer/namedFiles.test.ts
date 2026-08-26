@@ -91,10 +91,9 @@ describe('parseGitignore', () => {
     expect(isIgnored('# comment')).toBe(false);
   });
 
-  it('skips negation lines rather than mis-handling them', () => {
+  it('applies `!` negation to re-include a path an earlier pattern excluded', () => {
     const isIgnored = parseGitignore('*.log\n!keep.log\n');
-    // No negation support: keep.log is still reported ignored by *.log alone,
-    // since the negation line itself is simply skipped, not applied.
-    expect(isIgnored('keep.log')).toBe(true);
+    expect(isIgnored('keep.log')).toBe(false);
+    expect(isIgnored('other.log')).toBe(true);
   });
 });

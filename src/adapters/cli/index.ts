@@ -16,6 +16,27 @@ import { WatchQueue } from '../../core/indexer/watchQueue';
 import { SqliteCodeStore } from '../../store/graph/sqliteCodeStore';
 import { nodeSqlDriver } from '../../store/graph/sqliteDriver';
 import { impact } from '../../core/analyze/impact';
+import { createExecutors } from '../../core/tools/executors';
+import { codeToolSchemas, type CodeToolName } from '../../core/tools/tools';
+
+const MAX_READ_BYTES = 1024 * 1024;
+
+/** CLI arg → tool input, per tool: positional args mapped to the schema's fields in order. */
+const TOOL_ARG_SPECS: Record<CodeToolName, string[]> = {
+  find_symbol: ['name'],
+  get_symbol: ['name', 'path'],
+  outline: ['path'],
+  impact: ['name', 'path', 'depth'],
+  hierarchy: ['name', 'path', 'depth'],
+  who_calls: ['name', 'direction', 'path'],
+  file_deps: ['path', 'direction'],
+  module_map: ['boundary'],
+  analyze: ['kind', 'pathPrefix'],
+  rename_symbol: ['name', 'newName', 'path'],
+};
+
+/** Fields that are numbers in the zod schema — CLI positionals arrive as strings. */
+const NUMERIC_FIELDS = new Set(['depth', 'limit', 'offset']);
 
 /** Commands that only ever read the graph — safe to serve from a snapshot copy. */
 
@@ -46,8 +67,32 @@ async function main(): Promise<void> {
     readFile: nodeReadFile(root),
     listNamedFiles: nodeListNamedFiles(root),
   });
+  const executors = createExecutors({ store, root });
 
   try {
+    // `impact` keeps its own legacy JSON-emitting case below (existing
+    // scripts may depend on that shape) rather than being folded into the
+    // generic tool dispatch, which renders text like the other tools.
+    if (command !== 'impact' && (codeToolSchemas as Record<string, unknown>)[command] !== undefined) {
+      const toolName = command as CodeToolName;
+      const fields = TOOL_ARG_SPECS[toolName];
+      const raw: Record<string, string | number> = {};
+      for (let i = 0; i < fields.length && i < rest.length; i++) {
+        const field = fields[i]!;
+        const value = rest[i]!;
+        raw[field] = NUMERIC_FIELDS.has(field) ? Number(value) : value;
+      }
+      const parsed = codeToolSchemas[toolName].input.safeParse(raw);
+      if (!parsed.success) {
+        process.stderr.write(`Usage: pairs ${toolName} ${fields.map((f) => `<${f}>`).join(' ')}\n`);
+        process.stderr.write(`${parsed.error.message}\n`);
+        process.exitCode = 1;
+      } else {
+        const out = await (executors[toolName] as (input: unknown) => Promise<string>)(parsed.data);
+        process.stdout.write(`${out}\n`);
+      }
+      return;
+    }
     switch (command) {
       case 'index': {
         // --rebuild: a plain fullIndex short-circuits unchanged files and can
@@ -139,9 +184,24 @@ async function main(): Promise<void> {
           process.exitCode = 1;
           break;
         }
+        const absTarget = path.join(root, target);
+        try {
+          const st = await fs.stat(absTarget);
+          if (st.size > MAX_READ_BYTES) {
+            process.stderr.write(
+              `${target} is ${st.size} bytes, over the ${MAX_READ_BYTES}-byte read limit. Use startLine/endLine to read a slice.\n`
+            );
+            process.exitCode = 1;
+            break;
+          }
+        } catch (err) {
+          process.stderr.write(`Cannot read ${target}: ${(err as Error).message}\n`);
+          process.exitCode = 1;
+          break;
+        }
         let contents: string;
         try {
-          contents = await fs.readFile(path.join(root, target), 'utf8');
+          contents = await fs.readFile(absTarget, 'utf8');
         } catch (err) {
           process.stderr.write(`Cannot read ${target}: ${(err as Error).message}\n`);
           process.exitCode = 1;
@@ -171,7 +231,9 @@ async function main(): Promise<void> {
         break;
       }
       default:
-        process.stderr.write('Usage: pairs <index|query|stats|impact|watch|files|read>\n');
+        process.stderr.write(
+          `Usage: pairs <index|query|stats|impact|watch|files|read|${Object.keys(codeToolSchemas).join('|')}>\n`
+        );
         process.exitCode = 1;
     }
   } finally {

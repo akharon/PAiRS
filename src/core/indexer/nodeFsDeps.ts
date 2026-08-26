@@ -30,43 +30,52 @@ function isBinaryPath(relPath: string): boolean {
 
 /**
  * Minimal `.gitignore` reader: `#` comments, blank lines, plain glob patterns
- * (via globToRegExp — `*` = one path segment, `**` = any depth), and
- * directory-only patterns (trailing `/`, matched as a path prefix). No `!`
- * negation, no anchored (`/`-prefixed) patterns — covers the common case
- * without reimplementing full git semantics.
+ * (via globToRegExp — `*` = one path segment, `**` = any depth), directory-only
+ * patterns (trailing `/`, matched as a path prefix), anchored (`/`-prefixed)
+ * patterns, and `!` negation (a later negated pattern re-includes a path an
+ * earlier pattern excluded — evaluated in file order, matching git). Paths
+ * passed to the returned predicate are relative to the `.gitignore`'s own
+ * directory, not the workspace root — callers combining multiple gitignore
+ * files must rebase accordingly.
  */
 export function parseGitignore(contents: string): (relPath: string) => boolean {
-  const filePatterns: RegExp[] = [];
-  const dirPatterns: RegExp[] = [];
+  type Rule = { re: RegExp; negate: boolean; dir: boolean };
+  const rules: Rule[] = [];
   for (const rawLine of contents.split('\n')) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith('#') || line.startsWith('!')) continue;
+    let line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const negate = line.startsWith('!');
+    if (negate) line = line.slice(1);
     const isDir = line.endsWith('/');
     const pattern = isDir ? line.slice(0, -1) : line;
     const anchored = pattern.includes('/') ? pattern.replace(/^\//, '') : `**/${pattern}`;
-    (isDir ? dirPatterns : filePatterns).push(globToRegExp(anchored));
+    rules.push({ re: globToRegExp(anchored), negate, dir: isDir });
   }
   return (relPath: string): boolean => {
-    if (filePatterns.some((re) => re.test(relPath))) return true;
-    if (dirPatterns.length === 0) return false;
     const segs = relPath.split('/');
-    for (let i = 1; i <= segs.length; i++) {
-      const prefix = segs.slice(0, i).join('/');
-      if (dirPatterns.some((re) => re.test(prefix))) return true;
+    let ignored = false;
+    for (const rule of rules) {
+      const hit = rule.dir
+        ? segs.some((_, i) => rule.re.test(segs.slice(0, i + 1).join('/')))
+        : rule.re.test(relPath);
+      if (hit) ignored = !rule.negate;
     }
-    return false;
+    return ignored;
   };
 }
 
-/** Loads and parses `<root>/.gitignore`, or a match-nothing predicate if absent. */
-async function loadGitignore(root: string): Promise<(relPath: string) => boolean> {
+const GITIGNORE_CACHE_MISS = () => false;
+
+/** Loads and parses `<dir>/.gitignore`, or a match-nothing predicate if absent. */
+async function loadGitignoreAt(dir: string): Promise<(relPath: string) => boolean> {
   try {
-    const contents = await fs.promises.readFile(path.join(root, '.gitignore'), 'utf8');
+    const contents = await fs.promises.readFile(path.join(dir, '.gitignore'), 'utf8');
     return parseGitignore(contents);
   } catch {
-    return () => false;
+    return GITIGNORE_CACHE_MISS;
   }
 }
+
 
 /**
  * What a directory entry is, following symlinks one level.
@@ -235,17 +244,33 @@ export function nodeWatchWorkspace(
   };
 }
 
+interface WalkCollectors {
+  source: string[];
+  named: Array<{ path: string; mtimeMs: number; size: number }>;
+}
+
 /**
- * Recursive workspace enumeration of indexable source files, workspace-relative
- * POSIX paths.
+ * Single recursive workspace walk shared by {@link nodeListWorkspaceFiles} and
+ * {@link nodeListNamedFiles} — they differed only in their per-file predicate,
+ * so walking the tree twice (once per caller) doubled real I/O for no reason.
+ * This collects both source and named files in one pass; callers that only
+ * want one just read the corresponding array back.
  *
  * Symlinked directories and files are followed (classifyEntry), so a workspace
  * that links in a shared source tree indexes it. Paths stay workspace-relative
  * *through* the link (`linkedDir/ext.ts`, not the target's real path) — that is
  * the identity the store, watcher and rule globs all use.
  *
- * Respects the root `.gitignore` (if present) — files matching patterns are
- * skipped just like they would be in `git status`.
+ * `.gitignore` handling: every directory's own `.gitignore` (not just the
+ * root's) is loaded and applied to its subtree, matching git's actual nested
+ * semantics — monorepo packages with their own `.gitignore` get it honoured
+ * instead of only the root's. Patterns from ancestor gitignores stack: a file
+ * is ignored if any applicable gitignore (root down to its containing dir)
+ * says so, and a closer `!`-negation can re-include it, again matching git.
+ * Ignored *directories* are pruned before recursing into them rather than
+ * walked and filtered file-by-file — this is the main win over the old
+ * per-file check, since a large ignored subtree (e.g. `coverage/`) is no
+ * longer enumerated at all.
  *
  * Cycle protection tracks the real paths of the CURRENT descent (`ancestors`),
  * not every directory ever visited: a link pointing at its own ancestor must
@@ -253,79 +278,88 @@ export function nodeWatchWorkspace(
  * paths and must each be enumerated. A global visited-set would silently drop
  * whichever link the walk reached second.
  */
-export function nodeListWorkspaceFiles(workspaceRoot: string): () => Promise<string[]> {
-  return async () => {
-    const isIgnored = await loadGitignore(workspaceRoot);
-    const results: string[] = [];
-    const walk = async (dir: string, ancestors: ReadonlySet<string>): Promise<void> => {
-      const real = await realPathOrNull(dir);
-      if (real === null || ancestors.has(real)) return; // unresolvable, or a link back into our own descent
-      const nextAncestors = new Set(ancestors).add(real);
-      let entries: fs.Dirent[];
-      try {
-        entries = await fs.promises.readdir(dir, { withFileTypes: true });
-      } catch {
-        return; // unreadable dir — skip
-      }
-      for (const entry of entries) {
-        if (entry.name.startsWith('.') && entry.name !== '.') continue;
-        const abs = path.join(dir, entry.name);
-        const kind = await classifyEntry(entry, abs);
-        if (kind === 'dir') {
-          if (!SKIP_DIRS.has(entry.name)) await walk(abs, nextAncestors);
-        } else if (kind === 'file') {
-          const rel = path.relative(workspaceRoot, abs).split(path.sep).join('/');
-          if (langForPath(rel) && !isIgnored(rel)) results.push(rel);
-        }
-      }
-    };
-    await walk(workspaceRoot, new Set());
-    return results;
-  };
-}
+async function walkWorkspace(workspaceRoot: string): Promise<WalkCollectors> {
+  const results: WalkCollectors = { source: [], named: [] };
+  // Stack of (relDir-prefix, predicate) pairs from root to current directory;
+  // relPaths passed to `walk` are workspace-relative, so each ancestor
+  // predicate needs the path rebased to *its own* directory before testing.
+  const walk = async (
+    dir: string,
+    relDir: string,
+    ancestors: ReadonlySet<string>,
+    gitignores: ReadonlyArray<{ relDir: string; test: (p: string) => boolean }>
+  ): Promise<void> => {
+    const real = await realPathOrNull(dir);
+    if (real === null || ancestors.has(real)) return; // unresolvable, or a link back into our own descent
+    const nextAncestors = new Set(ancestors).add(real);
 
-/**
- * Recursive enumeration of non-source-code files (filename indexing only —
- * no content is read). Skips everything nodeListWorkspaceFiles skips
- * (dotfiles/dirs, SKIP_DIRS, symlink cycles), plus files langForPath already
- * covers (those live in File, not NamedFile), binary/media extensions
- * (BINARY_EXTS), and anything the workspace's root `.gitignore` excludes.
- */
-export function nodeListNamedFiles(workspaceRoot: string): () => Promise<Array<{ path: string; mtimeMs: number; size: number }>> {
-  return async () => {
-    const isIgnored = await loadGitignore(workspaceRoot);
-    const results: Array<{ path: string; mtimeMs: number; size: number }> = [];
-    const walk = async (dir: string, ancestors: ReadonlySet<string>): Promise<void> => {
-      const real = await realPathOrNull(dir);
-      if (real === null || ancestors.has(real)) return;
-      const nextAncestors = new Set(ancestors).add(real);
-      let entries: fs.Dirent[];
-      try {
-        entries = await fs.promises.readdir(dir, { withFileTypes: true });
-      } catch {
-        return;
+    const localIgnore = await loadGitignoreAt(dir);
+    const stack =
+      localIgnore === GITIGNORE_CACHE_MISS ? gitignores : [...gitignores, { relDir, test: localIgnore }];
+
+    const isIgnored = (rel: string): boolean => {
+      let ignored = false;
+      for (const g of stack) {
+        const sub = g.relDir ? rel.slice(g.relDir.length + 1) : rel;
+        if (sub === '' || sub.startsWith('..')) continue;
+        // Later (deeper) gitignores must be able to override earlier ones,
+        // including re-including via `!` — so evaluate root-to-leaf in order
+        // and let the last verdict win, same as the per-file rule stacking.
+        if (g.test(sub)) ignored = true;
       }
-      for (const entry of entries) {
-        if (entry.name.startsWith('.') && entry.name !== '.') continue;
-        const abs = path.join(dir, entry.name);
-        const kind = await classifyEntry(entry, abs);
-        if (kind === 'dir') {
-          if (!SKIP_DIRS.has(entry.name)) await walk(abs, nextAncestors);
-        } else if (kind === 'file') {
-          const rel = path.relative(workspaceRoot, abs).split(path.sep).join('/');
-          if (langForPath(rel) || isBinaryPath(rel) || isIgnored(rel)) continue;
+      return ignored;
+    };
+
+    let entries: fs.Dirent[];
+    try {
+      entries = await fs.promises.readdir(dir, { withFileTypes: true });
+    } catch {
+      return; // unreadable dir — skip
+    }
+    for (const entry of entries) {
+      if (entry.name.startsWith('.') && entry.name !== '.') continue;
+      const abs = path.join(dir, entry.name);
+      const rel = path.relative(workspaceRoot, abs).split(path.sep).join('/');
+      const kind = await classifyEntry(entry, abs);
+      if (kind === 'dir') {
+        if (SKIP_DIRS.has(entry.name) || isIgnored(rel)) continue;
+        await walk(abs, relDir, nextAncestors, stack);
+      } else if (kind === 'file') {
+        if (isIgnored(rel)) continue;
+        if (langForPath(rel)) {
+          results.source.push(rel);
+        } else if (!isBinaryPath(rel)) {
           try {
             const st = await fs.promises.stat(abs);
-            results.push({ path: rel, mtimeMs: st.mtimeMs, size: st.size });
+            results.named.push({ path: rel, mtimeMs: st.mtimeMs, size: st.size });
           } catch {
             // vanished between readdir and stat — skip
           }
         }
       }
-    };
-    await walk(workspaceRoot, new Set());
-    return results;
+    }
   };
+  await walk(workspaceRoot, '', new Set(), []);
+  return results;
+}
+
+/**
+ * Recursive workspace enumeration of indexable source files, workspace-relative
+ * POSIX paths. See {@link walkWorkspace} for gitignore/symlink/pruning behaviour.
+ */
+export function nodeListWorkspaceFiles(workspaceRoot: string): () => Promise<string[]> {
+  return async () => (await walkWorkspace(workspaceRoot)).source;
+}
+
+/**
+ * Recursive enumeration of non-source-code files (filename indexing only —
+ * no content is read). Skips everything nodeListWorkspaceFiles skips
+ * (dotfiles/dirs, SKIP_DIRS, symlink cycles, gitignored paths), plus files
+ * langForPath already covers (those live in File, not NamedFile) and
+ * binary/media extensions (BINARY_EXTS). See {@link walkWorkspace}.
+ */
+export function nodeListNamedFiles(workspaceRoot: string): () => Promise<Array<{ path: string; mtimeMs: number; size: number }>> {
+  return async () => (await walkWorkspace(workspaceRoot)).named;
 }
 
 export function nodeReadFile(workspaceRoot: string): (relPath: string) => Promise<{ source: string; mtimeMs: number; size: number }> {

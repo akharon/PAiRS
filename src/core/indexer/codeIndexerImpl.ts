@@ -17,6 +17,16 @@ import type { CodeLang, FileExtraction, SymbolKind } from './types';
 
 const DEFAULT_MAX_FILE_SIZE_BYTES = 1024 * 1024;
 
+/**
+ * Pass-1 files in flight at once. Each is an independent I/O-bound read()
+ * followed by a CPU-bound parse (`skipResolve: true`, so there's no
+ * cross-file resolution ordering to preserve within the pass — forward
+ * references are resolved in one pass after every file has declared, not
+ * per-file). Bounded rather than unbounded to avoid exhausting file
+ * descriptors / spiking memory on very large workspaces.
+ */
+const PASS1_CONCURRENCY = 12;
+
 export class IndexerImpl implements Indexer {
   private readonly deps: IndexerDeps;
   /** path → {mtimeMs, size, hash}, populated from store.listFiles() on first use. */
@@ -63,10 +73,16 @@ export class IndexerImpl implements Indexer {
     }
 
     const errors: SpanError[] = [];
-    for (const path of diskPaths) {
-      const result = await this.indexOneFile(path, { skipResolve: true });
-      errors.push(...result.parseErrors);
-    }
+    let cursor = 0;
+    const worker = async (): Promise<void> => {
+      for (;;) {
+        const path = diskPaths[cursor++];
+        if (path === undefined) return;
+        const result = await this.indexOneFile(path, { skipResolve: true });
+        errors.push(...result.parseErrors);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(PASS1_CONCURRENCY, diskPaths.length) }, worker));
 
     // Full pass over every pending ref only after all files have declared —
     // forward references resolve here, not per-file.
