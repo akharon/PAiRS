@@ -13,8 +13,8 @@
  */
 
 /**
- * v1 *validates* on Rust only (precision contract, benchmarks — see
- * plan.md S1 exit criteria); the parser/extractor layer supports all 12
+ * v1 *validates* on Rust only (precision contract, benchmarks — the
+ * S1 exit criteria); the parser/extractor layer supports all 12
  * languages the reference indexer shipped grammars for, so switching one on
  * later is a query-file + kind-map entry, not new extraction logic (idea.md
  * §5). Unvalidated languages parse and populate the graph; their
@@ -153,6 +153,13 @@ export interface RawRef {
    */
   methodCall?: boolean;
   /**
+   * True when the receiver is the enclosing type itself (`this.foo()`,
+   * `self.foo()`). Unlike a general method call the receiver's static type IS
+   * known — it is the enclosing symbol's own scope — so the resolver may
+   * resolve within that scope instead of capping at `fuzzy`.
+   */
+  selfReceiver?: boolean;
+  /**
    * True when the reference site lies inside a test region — a
    * `#[cfg(test)]`/`mod tests` block or a `#[test]` fn. Test code deliberately
    * depends "upward" (a core unit test driving the real sim integrator), so
@@ -238,7 +245,7 @@ export interface IndexStats {
    * every `assert!`/`Vec::new`/framework call is correctly unresolved and lands
    * here. On the ARES sample this sat near 50% while *zero* unresolved refs
    * named a workspace symbol — it mostly measures how much stdlib a codebase
-   * uses. Precision is `fuzzyRate`; see plan.md S1.
+   * uses. Precision is `fuzzyRate` (the S1 metric).
    */
   unresolvedRatio: number;
   /** Of `pendingRefs`, those naming nothing in the workspace — external/stdlib calls, not failures. */

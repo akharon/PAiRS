@@ -18,6 +18,7 @@ import { nodeListWorkspaceFiles, nodeReadFile } from '../core/indexer/nodeFsDeps
 import { fileQuerySource, ParserRegistryImpl } from '../core/indexer/parserRegistryImpl';
 import { SqliteCodeStore } from '../store/graph/sqliteCodeStore';
 import { nodeSqlDriver } from '../store/graph/sqliteDriver';
+import type { IndexReport } from '../core/indexer/codeIndexer';
 
 const GRAMMARS_DIR = path.join(__dirname, '..', '..', 'dist', 'grammars');
 const QUERIES_DIR = path.join(__dirname, '..', 'core', 'indexer', 'queries');
@@ -26,7 +27,7 @@ const QUERIES_DIR = path.join(__dirname, '..', 'core', 'indexer', 'queries');
  * Writes `files` (workspace-relative path → source text) into a fresh temp
  * dir and runs a real fullIndex over it.
  */
-export async function indexProject(files: Record<string, string>): Promise<{ store: SqliteCodeStore; root: string }> {
+export async function indexProject(files: Record<string, string>): Promise<{ store: SqliteCodeStore; root: string; report: IndexReport }> {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pairs-index-'));
   for (const [rel, contents] of Object.entries(files)) {
     const abs = path.join(root, rel);
@@ -48,6 +49,6 @@ export async function indexProject(files: Record<string, string>): Promise<{ sto
     readFile: nodeReadFile(root),
   });
 
-  await indexer.fullIndex(root);
-  return { store, root };
+  const report = await indexer.fullIndex(root);
+  return { store, root, report };
 }

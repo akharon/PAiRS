@@ -40,13 +40,12 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Smoke index (ARES)
-        if: always()
+      - name: Smoke index
         run: |
-          # If .gizem already exists from a prior test, clean it
-          rm -rf .gizem
+          # Clean any index left by a prior step
+          rm -rf .pairs
           # Run a quick index on the current repo (acts as smoke test)
           node dist/cli.js index 2>&1 | head -20
-          # Verify .gizem was created
-          test -d .gizem && echo "✓ .gizem directory created" || (echo "✗ .gizem directory not found" && exit 1)
+          # Verify the index was created
+          test -d .pairs && echo "✓ .pairs directory created" || (echo "✗ .pairs directory not found" && exit 1)
         shell: bash

@@ -36,7 +36,6 @@ const bundles = [
   { entry: 'src/adapters/vscode/extension.ts', outfile: 'dist/extension.js' },
   { entry: 'src/adapters/cli/index.ts', outfile: 'dist/cli.js' },
   { entry: 'src/adapters/mcp/serverCli.ts', outfile: 'dist/mcp-server.js' },
-  { entry: 'src/adapters/bench/v3BenchCli.ts', outfile: 'dist/v3-bench.js' },
 ].filter(({ entry }) => {
   if (existsSync(entry)) return true;
   console.log(`[esbuild] skipping ${entry} — not implemented yet`);

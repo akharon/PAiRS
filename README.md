@@ -55,7 +55,7 @@ pairs <command> [args]
 | `index` | `pairs index [--rebuild]` | Full index (or full rebuild with `--rebuild`, dropping the store first). Prints a JSON report. |
 | `stats` | `pairs stats` | Index size and resolution quality (files, symbols, edges, fuzzy rate) as JSON. |
 | `find` (via `query`) | `pairs query '<sql>'` | Raw read-only SQL against the graph schema (`File`, `Symbol`, `Edge`, `PendingRef`) for anything not covered by a dedicated command. |
-| `impact` | `pairs impact <name> [depth]` | Everything that transitively depends on a symbol, up to `depth` hops (default 5). Run this before renaming/removing something. |
+| `impact` | `pairs impact <name> [depth] [--json]` | Everything that transitively depends on a symbol, up to `depth` hops (default 3). Run this before renaming/removing something. Prints prose by default (like every other tool below); pass `--json` for the structured result, which existing scripts should use instead of relying on bare `pairs impact` output. |
 | `watch` | `pairs watch` | Indexes once, then watches the workspace and incrementally re-indexes on save. `Ctrl-C` to stop. |
 | `files` | `pairs files [pattern] [--paths]` | Lists/searches indexed non-source filenames (a glob like `*.txt` or `Pic*.svg`). `--paths` also matches against full paths. |
 | `read` | `pairs read <path> [startLine] [endLine]` | Prints a file, or a 1-indexed inclusive line range. Out-of-range values clamp rather than error. |

@@ -16,6 +16,7 @@ import type { CodeStore } from '../../store/graph/codeStore';
 import type { Extractor } from './extractors';
 import type { ParserRegistry } from './parserRegistry';
 import type { FileExtraction, FileRecord, IndexStats } from './types';
+import { indexProject } from '../../test/indexProject';
 
 const EMPTY_STATS: IndexStats = {
   files: 0,
@@ -155,6 +156,19 @@ describe('IndexerImpl.fullIndex', () => {
     const report = await indexer.fullIndex('/root');
     expect(report.functions).toBe(5); // function + method
     expect(report.types).toBe(6); // struct + enum + trait, not var
+  });
+
+  // End-to-end regression guard: the test above only proves the report-
+  // assembly arithmetic is correct against a hand-built byKind fixture, which
+  // is exactly why a real extraction/storage break (wrong capture name, wrong
+  // DEF_CAPTURE_TO_KIND lookup, stats() read before commit, ...) could survive
+  // the suite undetected. This goes through the actual parser/extractor/store,
+  // the same path `pairs index` uses.
+  it('reports a non-zero types count for a real TypeScript class and interface (Task 2)', async () => {
+    const { report } = await indexProject({
+      'src/shapes.ts': `export interface Shape {\n  area(): number;\n}\n\nexport class Circle implements Shape {\n  area(): number {\n    return 1;\n  }\n}\n`,
+    });
+    expect(report.types).toBe(2); // Shape (interface) + Circle (class)
   });
 });
 

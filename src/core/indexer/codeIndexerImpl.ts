@@ -33,7 +33,7 @@ export class IndexerImpl implements Indexer {
   private fileCache: Map<string, { mtimeMs: number; size: number; hash: string }> | null = null;
   /**
    * Serializes index operations within this process. The store is single-writer
-   * by design (ADR-009), but that invariant is *per store*, and the VS Code
+   * by design, but that invariant is *per store*, and the VS Code
    * extension can trigger a `pairs.reindex` while the activation-time fullIndex
    * is still running — two interleaved fullIndex runs would corrupt the store's
    * in-memory symbol mirror and duplicate edges. Chain every index op behind

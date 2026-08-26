@@ -1,5 +1,5 @@
 /**
- * Debounced incremental-index queue (plan.md 3.1). Pure core (R10): no fs, no
+ * Debounced incremental-index queue. Pure core (R10): no fs, no
  * vscode — an adapter feeds it raw change/delete events (from fs.watch or
  * VS Code's FileSystemWatcher) and it coalesces bursts (editor saves fire
  * 2–4 events per file) into one indexFile/removeFile per settled file.
@@ -7,7 +7,7 @@
  * Ordering: events for the SAME path collapse to the latest kind (a change
  * followed by a delete is just a delete). Distinct paths flush together after
  * `debounceMs` of quiet. Flushes chain behind each other — combined with the
- * indexer's own opChain this keeps the single-writer invariant (ADR-009).
+ * indexer's own opChain this keeps the single-writer invariant.
  */
 
 export interface WatchSink {

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * pairs CLI — headless entry point (plan.md Phase 0: `pairs index`,
- * `pairs query`, `pairs stats`). Wires core/indexer to store/graph exactly
+ * pairs CLI — headless entry point (`pairs index`, `pairs query`,
+ * `pairs stats`). Wires core/indexer to store/graph exactly
  * as the VS Code extension (Phase 1) and MCP server will, over the same
  * `Indexer`/`CodeStore` interfaces — no vscode import here (R10).
  */
@@ -32,11 +32,34 @@ const TOOL_ARG_SPECS: Record<CodeToolName, string[]> = {
   file_deps: ['path', 'direction'],
   module_map: ['boundary'],
   analyze: ['kind', 'pathPrefix'],
-  rename_symbol: ['name', 'newName', 'path'],
+  rename_symbol: ['name', 'newName', 'path', 'includeFuzzy'],
 };
 
 /** Fields that are numbers in the zod schema — CLI positionals arrive as strings. */
 const NUMERIC_FIELDS = new Set(['depth', 'limit', 'offset']);
+
+/** Fields that are booleans in the zod schema — CLI positionals arrive as strings. */
+const BOOLEAN_FIELDS = new Set(['includeFuzzy']);
+
+/**
+ * `pairs impact --json`'s structured output — a compatibility contract with
+ * scripts that depended on the pre-existing `case 'impact':` shape. The
+ * ambiguous/miss shapes come straight from `store.lookup`, which distinguishes
+ * them more richly than executors.ts's `resolveOne` (that helper collapses
+ * both into one prose message, so it can't reproduce this).
+ */
+async function renderImpactJson(store: SqliteCodeStore, input: { name: string; depth: number }): Promise<string> {
+  const hit = await store.lookup(input.name);
+  if (!Array.isArray(hit)) {
+    // AmbiguousSymbol — report candidates so the caller can qualify.
+    return JSON.stringify({ ambiguous: hit }, null, 2);
+  }
+  if (hit.length === 0) {
+    return JSON.stringify({ dependants: [], note: 'no such symbol' }, null, 2);
+  }
+  const result = await impact(store, hit[0]!.id, input.depth);
+  return JSON.stringify(result, null, 2);
+}
 
 /** Commands that only ever read the graph — safe to serve from a snapshot copy. */
 
@@ -70,23 +93,43 @@ async function main(): Promise<void> {
   const executors = createExecutors({ store, root });
 
   try {
-    // `impact` keeps its own legacy JSON-emitting case below (existing
-    // scripts may depend on that shape) rather than being folded into the
-    // generic tool dispatch, which renders text like the other tools.
-    if (command !== 'impact' && (codeToolSchemas as Record<string, unknown>)[command] !== undefined) {
+    // --json is stripped here (same place as --include-fuzzy) so it's
+    // available to every tool the generic dispatch handles, but today only
+    // `impact` has a defined structured shape to emit — see renderImpactJson.
+    // Every other tool keeps rendering prose regardless of the flag.
+    const jsonIdx = rest.indexOf('--json');
+    const asJson = jsonIdx !== -1;
+    if (asJson) rest.splice(jsonIdx, 1);
+
+    if ((codeToolSchemas as Record<string, unknown>)[command] !== undefined) {
       const toolName = command as CodeToolName;
       const fields = TOOL_ARG_SPECS[toolName];
-      const raw: Record<string, string | number> = {};
+      const raw: Record<string, string | number | boolean> = {};
+      if (toolName === 'rename_symbol') {
+        const idx = rest.indexOf('--include-fuzzy');
+        if (idx !== -1) {
+          rest.splice(idx, 1);
+          raw.includeFuzzy = true;
+        }
+      }
       for (let i = 0; i < fields.length && i < rest.length; i++) {
         const field = fields[i]!;
         const value = rest[i]!;
-        raw[field] = NUMERIC_FIELDS.has(field) ? Number(value) : value;
+        if (NUMERIC_FIELDS.has(field)) raw[field] = Number(value);
+        else if (BOOLEAN_FIELDS.has(field)) raw[field] = value === 'true' || value === '1';
+        else raw[field] = value;
       }
       const parsed = codeToolSchemas[toolName].input.safeParse(raw);
       if (!parsed.success) {
-        process.stderr.write(`Usage: pairs ${toolName} ${fields.map((f) => `<${f}>`).join(' ')}\n`);
+        process.stderr.write(`Usage: pairs ${toolName} ${fields.map((f) => `<${f}>`).join(' ')} [--json]\n`);
         process.stderr.write(`${parsed.error.message}\n`);
         process.exitCode = 1;
+      } else if (asJson && toolName === 'impact') {
+        // Compatibility contract: this must emit BYTE-IDENTICAL JSON to the
+        // pre-existing `case 'impact':` shape below, including its own
+        // ambiguous/miss shapes — `resolveOne` (used by the prose path)
+        // collapses both into one message string, so it can't reproduce them.
+        process.stdout.write(`${await renderImpactJson(store, parsed.data as { name: string; depth: number })}\n`);
       } else {
         const out = await (executors[toolName] as (input: unknown) => Promise<string>)(parsed.data);
         process.stdout.write(`${out}\n`);
@@ -119,31 +162,8 @@ async function main(): Promise<void> {
         process.stdout.write(`${JSON.stringify(stats, null, 2)}\n`);
         break;
       }
-      case 'impact': {
-        // pairs impact <nameOrQualified> [depth]
-        const target = rest[0];
-        const depth = rest[1] ? Number(rest[1]) : 5;
-        if (!target) {
-          process.stderr.write('Usage: pairs impact <name> [depth]\n');
-          process.exitCode = 1;
-          break;
-        }
-        const hit = await store.lookup(target);
-        if (!Array.isArray(hit)) {
-          // AmbiguousSymbol — report candidates so the caller can qualify.
-          process.stdout.write(`${JSON.stringify({ ambiguous: hit }, null, 2)}\n`);
-          break;
-        }
-        if (hit.length === 0) {
-          process.stdout.write(`${JSON.stringify({ dependants: [], note: 'no such symbol' }, null, 2)}\n`);
-          break;
-        }
-        const result = await impact(store, hit[0].id, depth);
-        process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-        break;
-      }
       case 'watch': {
-        // pairs watch — incremental re-index on save (plan.md 3.1).
+        // pairs watch — incremental re-index on save.
         process.stderr.write('Indexing…\n');
         const report = await indexer.fullIndex(root);
         process.stderr.write(`Indexed ${report.files} files in ${report.elapsedMs} ms. Watching (Ctrl-C to stop).\n`);
@@ -232,7 +252,7 @@ async function main(): Promise<void> {
       }
       default:
         process.stderr.write(
-          `Usage: pairs <index|query|stats|impact|watch|files|read|${Object.keys(codeToolSchemas).join('|')}>\n`
+          `Usage: pairs <index|query|stats|watch|files|read|${Object.keys(codeToolSchemas).join('|')}> [--json]\n`
         );
         process.exitCode = 1;
     }

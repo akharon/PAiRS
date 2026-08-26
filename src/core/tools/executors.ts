@@ -5,7 +5,7 @@
  * them verbatim.
  *
  * Rendering convention: every symbol cites `qualified  file:startLine` so an
- * agent can jump straight to the definition (plan.md 1.2). Results are compact
+ * agent can jump straight to the definition. Results are compact
  * text, not JSON — agents read prose more reliably and it costs fewer tokens.
  */
 
@@ -443,11 +443,16 @@ export function createExecutors(deps: ExecutorDeps): Executors {
       if (!deps.root) return 'Renaming is unavailable (server started without a workspace root).';
       const r = await resolveOne(store, input.name, input.path);
       if ('message' in r) return r.message;
-      const plan = await planRename(store, deps.root, r.sym, input.newName);
+      const plan = await planRename(store, deps.root, r.sym, input.newName, {
+        includeFuzzy: input.includeFuzzy,
+      });
       if ('message' in plan) return plan.message;
       const touched = applyPlan(plan);
+      const fuzzyCount = plan.sites.filter((s) => s.confidence === 'fuzzy').length;
+      const fuzzyNote = fuzzyCount > 0 ? ` (${fuzzyCount} fuzzy site(s) included)` : '';
       return (
-        `Renamed ${r.sym.qualified || r.sym.name} → ${input.newName} across ${touched.length} file(s):\n` +
+        `Renamed ${r.sym.qualified || r.sym.name} → ${input.newName} across ${touched.length} file(s)` +
+        `${fuzzyNote}:\n` +
         touched.map((f) => `  - ${f}`).join('\n') +
         `\nRevert via your VCS (e.g. \`git checkout -- <files>\`) if needed.`
       );

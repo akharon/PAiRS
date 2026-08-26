@@ -15,7 +15,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { CodeStore } from '../../store/graph/codeStore';
-import type { SymbolRecord } from '../indexer/types';
+import type { EdgeConfidence, SymbolRecord } from '../indexer/types';
 import { IMPACT_EDGE_KINDS } from '../analyze/impact';
 
 const IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -23,6 +23,8 @@ const IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 interface Site {
   file: string;
   line: number;
+  /** 'resolved' for the definition site and verified refs; 'fuzzy' for name-only matches. */
+  confidence: EdgeConfidence;
 }
 
 function wordBoundaryRegex(name: string): RegExp {
@@ -33,13 +35,20 @@ function wordBoundaryRegex(name: string): RegExp {
 /** Every distinct file:line where `oldName` must be replaced: the definition plus direct reference sites. */
 async function collectSites(store: CodeStore, seed: SymbolRecord): Promise<Site[]> {
   const sites = new Map<string, Site>();
-  const add = (file: string, line: number) => sites.set(`${file}:${line}`, { file, line });
+  const add = (file: string, line: number, confidence: EdgeConfidence) => {
+    const key = `${file}:${line}`;
+    const existing = sites.get(key);
+    // A line reached by both a resolved and a fuzzy edge is resolved: the
+    // verified reference is proof the name at this line is the seed.
+    if (existing && existing.confidence === 'resolved') return;
+    sites.set(key, { file, line, confidence });
+  };
 
-  add(seed.file, seed.startLine);
+  add(seed.file, seed.startLine, 'resolved');
   const edges = await store.edgesTo([seed.id], [...IMPACT_EDGE_KINDS]);
   for (const e of edges) {
     const from = await store.get(e.fromId);
-    if (from) add(from.file, e.line);
+    if (from) add(from.file, e.line, e.confidence);
   }
   return [...sites.values()];
 }
@@ -60,12 +69,36 @@ export async function planRename(
   store: CodeStore,
   root: string,
   seed: SymbolRecord,
-  newName: string
+  newName: string,
+  opts?: { includeFuzzy?: boolean }
 ): Promise<RenamePlan | RenamePlanError> {
   if (!IDENT_RE.test(newName)) return { message: `"${newName}" is not a valid identifier.` };
   if (newName === seed.name) return { message: `New name is the same as the current name.` };
 
-  const sites = await collectSites(store, seed);
+  const allSites = await collectSites(store, seed);
+  const fuzzySites = allSites.filter((s) => s.confidence === 'fuzzy');
+
+  // A fuzzy edge is a bare-name match, not a verified reference — it may well
+  // point at an unrelated symbol that merely shares the name. Rewriting one
+  // corrupts an unrelated file, and there is no undo log, so refuse by default
+  // and make the caller opt in with full knowledge of the sites at risk.
+  if (fuzzySites.length > 0 && opts?.includeFuzzy !== true) {
+    const listed = fuzzySites
+      .slice(0, 20)
+      .map((s) => `  - ${s.file}:${s.line}`)
+      .join('\n');
+    const more = fuzzySites.length > 20 ? `\n  ... and ${fuzzySites.length - 20} more` : '';
+    return {
+      message:
+        `Aborted: ${fuzzySites.length} of ${allSites.length} reference site(s) are fuzzy ` +
+        `(matched by name only, not a verified reference) and may belong to an unrelated ` +
+        `symbol with the same name:\n${listed}${more}\n` +
+        `No files were modified. Re-run with includeFuzzy to rename these sites too.`,
+    };
+  }
+
+  const sites = opts?.includeFuzzy === true ? allSites : allSites.filter((s) => s.confidence === 'resolved');
+
   const byFile = new Map<string, Site[]>();
   for (const s of sites) {
     const list = byFile.get(s.file) ?? [];

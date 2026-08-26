@@ -1,5 +1,5 @@
 /**
- * Tool contracts for PAiRS's code-graph retrieval surface (plan.md 1.1–1.5).
+ * Tool contracts for PAiRS's code-graph retrieval surface.
  *
  * One zod schema per tool; the VS Code Language Model Tools (Copilot) derive
  * their JSON schema from here via scripts/sync-lm-tools.mjs, so the contract
@@ -170,12 +170,20 @@ export const codeToolSchemas = {
       'writers/implementers found via the same edges `impact` walks) consistently, ' +
       'in one pass. Aborts without touching any file if a reference site cannot be ' +
       'matched safely (e.g. the indexed line no longer contains the name at a word ' +
-      'boundary) — re-index and retry. Revert via your VCS (e.g. `git checkout -- ' +
-      '<files>`); this tool does not keep its own undo log.',
+      'boundary) — re-index and retry. Aborts without writing if any reference site is ' +
+      'fuzzy (name-only match) unless includeFuzzy is set. Revert via your VCS (e.g. ' +
+      '`git checkout -- <files>`); this tool does not keep its own undo log.',
     input: z.object({
       name: z.string().min(1).describe('Bare or qualified name of the symbol to rename.'),
       newName: z.string().min(1).describe('New bare identifier.'),
       path: pathHint,
+      includeFuzzy: z
+        .boolean()
+        .optional()
+        .describe(
+          'Also rename reference sites reached by fuzzy (name-only) edges. Off by default: ' +
+            'those sites may belong to an unrelated symbol sharing the name.'
+        ),
     }),
   },
 } as const;

@@ -1,7 +1,7 @@
 /**
  * Resolver-ladder contract, against a real SQLite database in a temp dir.
  *
- * These assertions are the S1 precision fix (plan.md): they encode *which*
+ * These assertions are the S1 precision fix: they encode *which*
  * confidence a ref earns, which is the difference between a graph an agent can
  * trust and one it can't. A fake store would only test the fake, since the
  * ladder is SQL.
@@ -46,6 +46,15 @@ function use_(specifier: string, line = 1): FileExtraction['uses'][number] {
 
 function call(name: string, qualifiedName: string | null): RawRef {
   return { fromIndex: 0, name, qualifiedName, kind: 'CALLS', line: 1 };
+}
+
+/**
+ * A `this.name()`/`self.name()` call from method `fromIndex`. `name` is the
+ * bare method name, matching what the extractor's stripReceiver/bareRefName
+ * already produce by the time a RawRef reaches the store.
+ */
+function selfCall(name: string, fromIndex: number): RawRef {
+  return { fromIndex, name, qualifiedName: null, kind: 'CALLS', line: 1, methodCall: true, selfReceiver: true };
 }
 
 describe('resolveOneRef ladder', () => {
@@ -181,6 +190,65 @@ describe('resolveOneRef ladder', () => {
     );
     expect(String(rows[0]!.conf)).toBe('fuzzy');
   });
+
+  // Rung 0: `this.helper()` inside a class that declares exactly one `helper`
+  // — the receiver's type is known (the enclosing scope), so this is a
+  // verified target, not a name-match guess.
+  it('resolves a this.helper() call to the enclosing class’s own method', async () => {
+    const callerSym = sym('greet', 'Greeter.greet', 'method');
+    await store.applyExtraction(
+      extraction('src/greeter.ts', [sym('Greeter', 'Greeter', 'class'), sym('helper', 'Greeter.helper', 'method'), callerSym], [selfCall('helper', 3)])
+    );
+    const rows = await store.query(
+      `SELECT b.qualified AS dst, e.confidence AS conf FROM Edge e
+       JOIN Symbol a ON a.id = e.src JOIN Symbol b ON b.id = e.dst
+       WHERE e.kind = 'CALLS' AND a.qualified = 'Greeter.greet'`
+    );
+    expect(rows.map((r) => String(r.dst))).toEqual(['Greeter.helper']);
+    expect(String(rows[0]!.conf)).toBe('resolved');
+  });
+
+  // No `helper` on the caller's own class: falls through to the ordinary
+  // ladder rather than reaching for an unrelated class's same-named method.
+  it('falls through to fuzzy when the enclosing class has no matching method', async () => {
+    await store.applyExtraction(extraction('src/other.ts', [sym('Other', 'Other', 'class'), sym('helper', 'Other.helper', 'method')]));
+    const callerSym = sym('greet', 'Lonely.greet', 'method');
+    await store.applyExtraction(extraction('src/lonely.ts', [sym('Lonely', 'Lonely', 'class'), callerSym], [selfCall('helper', 2)]));
+    const rows = await store.query(
+      `SELECT b.qualified AS dst, e.confidence AS conf FROM Edge e
+       JOIN Symbol a ON a.id = e.src JOIN Symbol b ON b.id = e.dst
+       WHERE e.kind = 'CALLS' AND a.qualified = 'Lonely.greet'`
+    );
+    expect(String(rows[0]!.conf)).toBe('fuzzy');
+    expect(rows.map((r) => String(r.dst))).not.toContain('Other.helper');
+  });
+
+  // Regression guard for the whole task: a non-self receiver must still cap
+  // at fuzzy. If this fails, the cap has been broadened, not narrowed.
+  it('still caps a plain x.helper() (non-self receiver) at fuzzy', async () => {
+    await store.applyExtraction(
+      extraction('src/plain.ts', [], [{ ...call('helper', null), methodCall: true, selfReceiver: false }])
+    );
+    const rows = await store.query(
+      `SELECT e.confidence AS conf FROM Edge e JOIN Symbol a ON a.id = e.src WHERE e.kind = 'CALLS' AND a.qualified = 'src/plain.ts'`
+    );
+    expect(String(rows[0]!.conf)).toBe('fuzzy');
+  });
+
+  // Rust form: `self.helper()` inside an `impl Greeter` block.
+  it('resolves self.helper() inside an impl block to Greeter::helper', async () => {
+    const callerSym = sym('greet', 'Greeter::greet', 'method');
+    await store.applyExtraction(
+      extraction('src/greeter.rs', [sym('Greeter', 'Greeter', 'struct'), sym('helper', 'Greeter::helper', 'method'), callerSym], [selfCall('helper', 3)])
+    );
+    const rows = await store.query(
+      `SELECT b.qualified AS dst, e.confidence AS conf FROM Edge e
+       JOIN Symbol a ON a.id = e.src JOIN Symbol b ON b.id = e.dst
+       WHERE e.kind = 'CALLS' AND a.qualified = 'Greeter::greet'`
+    );
+    expect(rows.map((r) => String(r.dst))).toEqual(['Greeter::helper']);
+    expect(String(rows[0]!.conf)).toBe('resolved');
+  });
 });
 
 describe('stats precision buckets', () => {
@@ -195,6 +263,40 @@ describe('stats precision buckets', () => {
     const stats = await store.stats();
     expect(stats.resolvableMisses).toBe(0);
     expect(stats.externalRefs).toBe(1);
+  });
+
+  it('resolvableMisses stays non-zero after retiring unresolved refs (Task 2)', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pairs-stats-retired-'));
+    const store = await SqliteCodeStore.open(path.join(dir, 'graph.db'), nodeSqlDriver);
+    // A defines `helper`, which B also happens to bind from an external
+    // package — so the bare `helper` ref in B is guarded to 'unresolved' by
+    // the external-name rung, even though the workspace does define a
+    // same-named symbol elsewhere. That guard makes it a genuine resolver
+    // miss once retired, not an external ref.
+    await store.applyExtraction(extraction('a.rs', [sym('helper', 'helper')]));
+    await store.applyExtraction(
+      extraction(
+        'b.rs',
+        [],
+        [call('helper', null), call('trulyMissing', null)],
+        [{ specifier: 'somepkg', boundNames: ['helper'], isGlob: false, line: 1 }]
+      )
+    );
+
+    await store.resolvePending(undefined, { retireUnresolved: true });
+    const stats = await store.stats();
+    expect(stats.resolvableMisses).toBeGreaterThan(0);
+  });
+
+  it('a purely external ref (no workspace definition) does not count as a miss', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pairs-stats-external-'));
+    const store = await SqliteCodeStore.open(path.join(dir, 'graph.db'), nodeSqlDriver);
+    await store.applyExtraction(extraction('a.rs', [sym('helper', 'helper')]));
+    await store.applyExtraction(extraction('b.rs', [], [call('trulyMissing', null)]));
+
+    await store.resolvePending(undefined, { retireUnresolved: true });
+    const stats = await store.stats();
+    expect(stats.resolvableMisses).toBe(0);
   });
 });
 

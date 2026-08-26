@@ -1,5 +1,5 @@
 /**
- * impact(id, depth) — transitive who-depends-on-this walk (plan.md 1.3, V2).
+ * impact(id, depth) — transitive who-depends-on-this walk (V2).
  *
  * Answers "what depends on X?": a breadth-first walk over the reference graph
  * following edges *into* the seed symbol (`edgesTo`), so the result is every
@@ -8,7 +8,7 @@
  * is the Phase 1 gate (V2 ≥ 95%).
  *
  * Pure core: no vscode, no storage-engine specifics — walks the CodeStore interface only
- * (R10). Fuzzy edges are included but marked, matching plan.md 2.4's "possible"
+ * (R10). Fuzzy edges are included but marked, matching the "possible"
  * class: a caller reached only through a fuzzy edge is still a caller worth
  * surfacing, just lower-confidence.
  */

@@ -1,5 +1,5 @@
 /**
- * Golden corpus for Rust extraction (plan.md deliverable 0.6 / Phase 0 exit
+ * Golden corpus for Rust extraction (Phase 0 exit
  * criterion: "40+ fixtures covering fns, impl blocks, traits, `use` forms,
  * method calls, macros").
  *
@@ -10,7 +10,8 @@
  *
  * Cases are marked where they pin a **known v1 limitation** rather than desired
  * behaviour. Those are deliberate: they document the gap and fail loudly the day
- * someone fixes it. Every such case names the plan.md decision it follows from.
+ * someone fixes it. Every such case names the S1 precision-fix decision it
+ * follows from, inline in its own comment.
  *
  * Requires dist/grammars (npm run fetch-grammars) — real tree-sitter wasm.
  */
@@ -167,7 +168,7 @@ fn format(s: &str) -> String { s.to_string() }
 
   it('qualifies impl methods through the impl scope', () => {
     // The S1 precision fix: `impl` is a @scope capture, so methods qualify by
-    // their type instead of colliding on a bare name (plan.md S1).
+    // their type instead of colliding on a bare name.
     expect(find(extract(IMPL), 'new', 'method')!.qualified).toBe('Greeter::new');
     expect(find(extract(IMPL), 'greet', 'method')!.qualified).toBe('Greeter::greet');
   });
@@ -273,7 +274,7 @@ describe('rust corpus: calls and refs', () => {
 
   it('keeps the qualifier on a scoped call', () => {
     // The S1 fix: `Foo::new` must reach the resolver qualified, or every
-    // `X::new()` collapses onto one bare `new` (plan.md S1).
+    // `X::new()` collapses onto one bare `new`.
     const x = extract(`fn a() { Greeter::new(); }`);
     expect(calls(x).find((r) => r.name === 'new')).toMatchObject({ qualifiedName: 'Greeter::new' });
   });
@@ -284,7 +285,7 @@ describe('rust corpus: calls and refs', () => {
   });
 
   it('records a method call, unqualified', () => {
-    // Known v1 limitation (plan.md S1, deferred to v1.1): a `.` receiver is a
+    // Known v1 limitation (S1, deferred to v1.1): a `.` receiver is a
     // *value*, and v1 does not infer its type — so this reaches the resolver
     // bare and can only resolve fuzzily. `qualifiedName` stays null on purpose:
     // `engine.start` would never match a `qualified` and would silently disable
@@ -332,7 +333,7 @@ describe('rust corpus: calls and refs', () => {
 });
 
 describe('rust corpus: macros', () => {
-  // Macros are allowed to be unresolved, but must be *counted* (plan.md 0.6).
+  // Macros are allowed to be unresolved, but must be *counted*.
   it('records a macro invocation as a ref', () => {
     const x = extract(`fn a() { println!("hi"); }`);
     expect(x.refs.some((r) => r.name === 'println')).toBe(true);

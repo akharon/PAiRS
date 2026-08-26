@@ -32,9 +32,9 @@ Example shape (python.scm):
 
 Node-type references while writing these: each grammar repo's
 `src/node-types.json`, or interactively at https://tree-sitter.github.io/tree-sitter/playground.
-Validate with the per-language fixture tests (see extractors.test.ts plan in
-docs/ArchSpec.md — one small real-world source file per language,
-asserting the exact FileExtraction).
+Validate with the per-language fixture tests in `pipeline.test.ts` and
+`polyglot.test.ts`, plus the Rust golden corpus in `rustCorpus.test.ts` —
+asserting the exact FileExtraction and cross-file resolution.
 
 **Never guess node-type names** — they differ per grammar and silently
 capture nothing when wrong. Verify empirically: parse a fixture with the

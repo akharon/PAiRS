@@ -1,5 +1,5 @@
 /**
- * VS Code extension shell (plan.md 1.6). The ONLY file permitted to import
+ * VS Code extension shell. The ONLY file permitted to import
  * `vscode` (R10 — enforced by eslint no-restricted-imports); everything it
  * touches below the adapter boundary is the same editor-agnostic core the CLI
  * uses, so the extension host and headless CLI share one store and indexer.
@@ -104,7 +104,7 @@ async function rebuildIndex(ws: Workspace): Promise<void> {
 }
 
 /**
- * In-process Language Model Tools (plan.md 1.6) for Copilot agent mode,
+ * In-process Language Model Tools for Copilot agent mode,
  * registered via vscode.lm.registerTool against the extension's already-open
  * store. Names/schemas
  * come from package.json's languageModelTools block, generated from
@@ -180,7 +180,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('pairs.rebuildIndex', () => rebuildIndex(ws)),
     vscode.commands.registerCommand('pairs.findSymbol', () => findSymbol(ws)),
     vscode.commands.registerCommand('pairs.moduleMap', async () => {
-      // Read-only module-graph webview (plan.md 3.5): Louvain subsystems as
+      // Read-only module-graph webview: Louvain subsystems as
       // columns ordered by dependency layer, drift edges red, cycle edges
       // amber. Self-contained HTML, inline script only (CSP forbids remote
       // scripts) — the script filters/focuses/pans the view and asks the
@@ -205,7 +205,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // commands down with it (0.4.0 shipped exactly that failure mode).
   context.subscriptions.push(...registerLmTools(ws));
 
-  // Incremental loop (plan.md 3.1): source saves/creates/deletes flow through
+  // Incremental loop: source saves/creates/deletes flow through
   // the debounced WatchQueue into indexFile/removeFile (both serialized on the
   // indexer's opChain), then the status bar refreshes — it tracks the code
   // without a manual reindex.

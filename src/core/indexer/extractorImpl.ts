@@ -87,7 +87,7 @@ interface PendingDef {
    * `impl Greeter` block, whose symbol is the separately-captured
    * `struct_item`. Without it, methods qualify bare and every same-named
    * method across every type collides into one candidate set (the dominant
-   * source of `fuzzy` CALLS edges — see plan.md S1).
+   * source of `fuzzy` CALLS edges — the S1 precision fix).
    */
   scope: boolean;
 }
@@ -130,8 +130,42 @@ function hasAttr(item: Node, needle: string): boolean {
   return false;
 }
 
+/** Prefixes `stripReceiver` erases — kept in one place so detection and stripping can't drift apart. */
+const SELF_RECEIVER_RE = /^(this|self|Self|cls)\.|^(self|Self)::/;
+
 function stripReceiver(name: string): string {
-  return name.replace(/^(this|self|Self|cls)\./, '').replace(/^(self|Self)::/, '');
+  return name.replace(SELF_RECEIVER_RE, '');
+}
+
+/**
+ * True when `node` (the property/field/attribute identifier captured by
+ * `@ref.call`) is a direct member access off a bare `this`/`self`/`Self`/`cls`
+ * receiver — `this.foo` in `member_expression`, `self.foo` in
+ * `field_expression`, `self.foo` in Python's `attribute`. The query captures
+ * only the identifier itself (`foo`), never the receiver, so this can't be
+ * read off `name` the way the `::`-qualified case can — it has to walk up to
+ * the receiver node in the CST.
+ *
+ * A receiver of anything other than a bare identifier (`self.engine.foo`,
+ * `this.getEngine().foo`) is a value chain, not a self reference, and must not
+ * match — the static type of `engine` is exactly the kind of thing this
+ * repo's fuzzy cap exists for.
+ */
+function isSelfReceiverMemberAccess(node: Node): boolean {
+  const parent = node.parent;
+  if (!parent) return false;
+  // Field name varies by grammar: TS/JS member_expression → object, Rust
+  // field_expression → value, C++ field_expression → argument, Ruby call →
+  // receiver. `this`/`self` are dedicated node types in most grammars (TS,
+  // Java, C++, Ruby) but a plain `identifier` in Python's.
+  const receiver =
+    parent.childForFieldName('object') ??
+    parent.childForFieldName('value') ??
+    parent.childForFieldName('argument') ??
+    parent.childForFieldName('receiver');
+  if (!receiver) return false;
+  if (receiver.type === 'this' || receiver.type === 'self') return true;
+  return receiver.type === 'identifier' && /^(this|self|Self|cls)$/.test(receiver.text);
 }
 
 /** Bare final segment of a possibly-qualified reference name (`this.x`/`self.x` → `x`). */
@@ -347,6 +381,12 @@ export class ExtractorImpl implements Extractor {
             ref.node.type === 'property_identifier' ||
             ref.node.parent?.type === 'attribute' ||
             ref.node.parent?.type === 'macro_invocation',
+          // Two shapes carry this evidence: a `self::`/`Self::` scoped path,
+          // whose text survives on `ref.name` (checked before stripReceiver
+          // erases it); and a `this.foo`/`self.foo` member access, where the
+          // query captures only the property identifier and the receiver has
+          // to be read off the CST instead (see isSelfReceiverMemberAccess).
+          selfReceiver: SELF_RECEIVER_RE.test(ref.name) || isSelfReceiverMemberAccess(ref.node),
           inTest: inTestRegion(ref.node),
         });
       }

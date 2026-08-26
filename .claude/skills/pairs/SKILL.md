@@ -38,7 +38,7 @@ Copilot has direct access to PAiRS tools — use these for navigation and refact
 
 For automation and CI/CD, use `pairs` commands:
 
-- `pairs impact <name> [depth]` — blast radius (same as the tool above).
+- `pairs impact <name> [depth] [--json]` — blast radius (same as the tool above). Prints prose like every other CLI tool by default; pass `--json` for the structured result (this is a breaking change from the old bare-JSON default — update any script that parsed `pairs impact` output directly).
 - `pairs query '<sql>'` — raw read-only SQL for anything not covered above.
 - `pairs stats` — index size and resolution quality.
 - `pairs index` — full re-index (rarely needed; extension keeps it live).

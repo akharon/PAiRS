@@ -140,7 +140,7 @@ export function isSkippedPath(relPath: string): boolean {
  * ARES) and crashes on the resulting unhandled 'error' event.
  * fs.watch cannot distinguish create/modify from delete on 'rename', so
  * existence decides. Returns a disposer. Pair with core WatchQueue for
- * debouncing (plan.md 3.1).
+ * debouncing.
  *
  * Respects the root `.gitignore` (if present) — files matching patterns are
  * skipped just like they would be in `git status`.

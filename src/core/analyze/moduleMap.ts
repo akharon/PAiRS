@@ -1,5 +1,5 @@
 /**
- * module_map (plan.md 1.5) — the module dependency graph, its community
+ * module_map — the module dependency graph, its community
  * structure (Louvain), and explicit-vs-implicit drift.
  *
  * "Module" = a file's directory: in Rust the module path is the file path, so a

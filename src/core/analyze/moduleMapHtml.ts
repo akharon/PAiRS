@@ -1,5 +1,5 @@
 /**
- * ModuleMap → self-contained HTML/SVG for the VS Code webview (plan.md 3.5).
+ * ModuleMap → self-contained HTML/SVG for the VS Code webview.
  * Pure core (R10): string in, string out — no vscode import, no external
  * libraries (webview CSP forbids remote scripts, but inline <script> is
  * allowed and used here for interactivity).

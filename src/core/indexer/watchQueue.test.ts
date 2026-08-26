@@ -1,7 +1,7 @@
 /**
- * WatchQueue debounce/coalesce behavior (plan.md 3.1) and the V8 property:
+ * WatchQueue debounce/coalesce behavior and the V8 property:
  * after a burst of random edits, the incrementally-maintained graph must be
- * isomorphic to a cold full index of the same final tree (plan.md 3.2 / R7).
+ * isomorphic to a cold full index of the same final tree (R7).
  */
 
 import * as fs from 'node:fs';

@@ -505,7 +505,17 @@ export class SqliteCodeStore implements CodeStore {
     const pending: RawRef[] = [];
     for (const ref of extraction.refs) {
       const fromId = indexToId[ref.fromIndex]!;
-      const resolved = this.resolveOneRef(ref.name, ref.qualifiedName, useSpecifiers, ref.methodCall ?? false, extraction.path, externalNames);
+      const callerQualified = extraction.symbols[ref.fromIndex]?.qualified ?? null;
+      const resolved = this.resolveOneRef(
+        ref.name,
+        ref.qualifiedName,
+        useSpecifiers,
+        ref.methodCall ?? false,
+        extraction.path,
+        externalNames,
+        ref.selfReceiver ?? false,
+        callerQualified
+      );
       if (resolved === 'unresolved') {
         pending.push(ref);
         continue;
@@ -548,8 +558,8 @@ export class SqliteCodeStore implements CodeStore {
 
     if (pending.length > 0) {
       const insPending = this.stmt(
-        `INSERT INTO PendingRef(fileId, fromSymbolId, name, qualifiedName, kind, line, methodCall, inTest)
-         VALUES(?,?,?,?,?,?,?,?)`
+        `INSERT INTO PendingRef(fileId, fromSymbolId, name, qualifiedName, kind, line, methodCall, selfReceiver, inTest)
+         VALUES(?,?,?,?,?,?,?,?,?)`
       );
       for (const ref of pending) {
         insPending.run(
@@ -560,6 +570,7 @@ export class SqliteCodeStore implements CodeStore {
           ref.kind,
           ref.line,
           ref.methodCall === true ? 1 : 0,
+          ref.selfReceiver === true ? 1 : 0,
           ref.inTest === true ? 1 : 0
         );
       }
@@ -609,7 +620,9 @@ export class SqliteCodeStore implements CodeStore {
     useSpecifiers: string[],
     methodCall = false,
     fromPath: string | null = null,
-    externalNames?: ReadonlySet<string>
+    externalNames?: ReadonlySet<string>,
+    selfReceiver = false,
+    callerQualified: string | null = null
   ): { ids: number[]; confidence: 'resolved' | 'fuzzy' } | 'unresolved' {
     const idx = this.loadSymbolIndex();
 
@@ -658,6 +671,25 @@ export class SqliteCodeStore implements CodeStore {
       }
       return out;
     };
+
+    // Rung 0: `this`/`self` receiver calls. Unlike a general method call, the
+    // receiver's static type IS known here — it is the enclosing symbol's own
+    // scope — so a unique method on that scope is a verified target, in the
+    // same sense Rung 2's same-file local declaration is verified. This does
+    // NOT walk EXTENDS/IMPLEMENTS: a method inherited from a base class finds
+    // zero matches here and falls through to the ordinary (capped) ladder.
+    if (selfReceiver && callerQualified) {
+      const sep = callerQualified.includes('::') ? '::' : '.';
+      const segs = callerQualified.split(sep);
+      if (segs.length > 1) {
+        const scope = segs.slice(0, -1).join(sep);
+        const candidates = idx.byQualified.get(`${scope}${sep}${name}`);
+        if (candidates !== undefined) {
+          if (candidates.length === 1) return { ids: [...candidates], confidence: 'resolved' };
+          return { ids: [...candidates], confidence: 'fuzzy' };
+        }
+      }
+    }
 
     // Rung 1: the ref as written, when it carried a `::` qualifier.
     //
@@ -735,13 +767,14 @@ export class SqliteCodeStore implements CodeStore {
   async resolvePending(namesHint?: string[], opts?: { retireUnresolved?: boolean }): Promise<number> {
     const rows = namesHint?.length
       ? this.all(
-          `SELECT id, fileId, fromSymbolId, name, qualifiedName, kind, line, methodCall, inTest
+          `SELECT id, fileId, fromSymbolId, name, qualifiedName, kind, line, methodCall, selfReceiver, inTest
            FROM PendingRef WHERE name IN (${placeholders(namesHint.length)})`,
           ...namesHint
         )
-      : this.all(`SELECT id, fileId, fromSymbolId, name, qualifiedName, kind, line, methodCall, inTest FROM PendingRef`);
+      : this.all(`SELECT id, fileId, fromSymbolId, name, qualifiedName, kind, line, methodCall, selfReceiver, inTest FROM PendingRef`);
     if (rows.length === 0) return 0;
 
+    const idx = this.loadSymbolIndex();
     const pathByFileId = new Map<number, string>();
     for (const fr of this.all(`SELECT id, path FROM File`)) pathByFileId.set(Number(fr.id), String(fr.path));
 
@@ -758,9 +791,19 @@ export class SqliteCodeStore implements CodeStore {
       set.add(String(r.name));
     }
 
+    // Names the workspace actually defines. Used to tell a genuine miss (we
+    // have this symbol but failed to link it) from an external ref (npm,
+    // stdlib, test globals) at the moment we retire the row — after deletion
+    // the name is gone and stats() can no longer make the distinction.
+    const definedNames = new Set<string>();
+    for (const r of this.all(`SELECT DISTINCT name FROM Symbol WHERE kind <> 'module'`)) {
+      definedNames.add(String(r.name));
+    }
+
     // Decide first, write once.
     let created = 0;
     let retired = 0;
+    let retiredMisses = 0;
     const edges: Array<{ fromId: number; toId: number; kind: EdgeKind; line: number; confidence: EdgeConfidence; test: boolean }> = [];
     const settled: number[] = [];
     for (const r of rows) {
@@ -789,7 +832,17 @@ export class SqliteCodeStore implements CodeStore {
       // A parked import is itself the dependency statement, so it must still
       // resolve by name; only ordinary refs get the external-name guard.
       const externalNames = isUseImport ? undefined : externalByFile.get(Number(r.fileId));
-      const resolved = this.resolveOneRef(String(r.name), String(r.qualifiedName ?? '') || null, [], Boolean(r.methodCall), fromPath, externalNames);
+      const callerQualified = idx.qualifiedById.get(Number(r.fromSymbolId)) ?? null;
+      const resolved = this.resolveOneRef(
+        String(r.name),
+        String(r.qualifiedName ?? '') || null,
+        [],
+        Boolean(r.methodCall),
+        fromPath,
+        externalNames,
+        Boolean(r.selfReceiver),
+        callerQualified
+      );
       if (resolved === 'unresolved') {
         // Full-index pass: every file has declared, so this names something
         // outside the workspace (npm/stdlib/test globals like `it`/`describe`/
@@ -799,6 +852,11 @@ export class SqliteCodeStore implements CodeStore {
         if (opts?.retireUnresolved === true) {
           settled.push(Number(r.id));
           retired += 1;
+          // A *qualified* ref (`Vec::new`) is never a miss on bare name alone —
+          // the workspace having some unrelated `new` does not make it
+          // resolvable. Mirrors the predicate stats() applies to live rows.
+          const qualified = String(r.qualifiedName ?? '');
+          if (qualified === '' && definedNames.has(String(r.name))) retiredMisses += 1;
         }
         continue;
       }
@@ -821,6 +879,10 @@ export class SqliteCodeStore implements CodeStore {
       // `externalRefs` silently read 0.
       if (opts?.retireUnresolved === true) {
         this.run(`INSERT OR REPLACE INTO Meta(key, value) VALUES('retired_refs', ?)`, String(retired));
+        this.run(
+          `INSERT OR REPLACE INTO Meta(key, value) VALUES('retired_resolvable_misses', ?)`,
+          String(retiredMisses)
+        );
       }
     });
     return created;
@@ -1082,11 +1144,16 @@ export class SqliteCodeStore implements CodeStore {
     // satisfy it. A *qualified* ref (`Vec::new`) is never a miss on name alone:
     // the workspace having some unrelated `new` doesn't make `Vec::new`
     // resolvable. Retired refs were proven external, so they are not misses.
-    const resolvableMisses = num(
+    const liveResolvableMisses = num(
       `SELECT COUNT(*) AS c FROM PendingRef p
        WHERE p.qualifiedName = ''
          AND EXISTS (SELECT 1 FROM Symbol s WHERE s.name = p.name AND s.kind <> 'module')`
     );
+    // Retired rows were classified at retirement time (see resolvePending);
+    // their names are deleted, so they cannot be re-tested here.
+    const retiredResolvableMisses =
+      Number(this.one(`SELECT value FROM Meta WHERE key = 'retired_resolvable_misses'`)?.value ?? 0) || 0;
+    const resolvableMisses = liveResolvableMisses + retiredResolvableMisses;
 
     const fuzzy = num(`SELECT COUNT(*) AS c FROM Edge WHERE confidence = 'fuzzy' AND kind IN (${placeholders(REFERENCE_EDGE_KINDS.length)})`, ...REFERENCE_EDGE_KINDS);
     const resolvedEdges = edges - fuzzy;

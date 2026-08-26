@@ -2,7 +2,7 @@
  * End-to-end pipeline test: parse fixture source per language, verify
  * extraction shape. Adapted from vendor/reference-indexer/src/index/
  * pipeline.test.ts — the multi-language "extracts symbols and calls" sweep
- * is the golden-corpus model (plan.md 0.6); complexity assertions are
+ * is the golden-corpus model; complexity assertions are
  * dropped (out of scope, see extractors.ts). Requires dist/grammars to exist
  * (npm run fetch-grammars) since it loads real tree-sitter wasm.
  */
