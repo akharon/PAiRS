@@ -13,6 +13,7 @@
 
 import { z } from 'zod';
 import { CODE_LANGS, SYMBOL_KINDS } from '../indexer/types';
+import { IMPACT_EDGE_KINDS } from '../analyze/impact';
 
 const symbolKind = z.enum(SYMBOL_KINDS as [string, ...string[]]);
 const codeLang = z.enum(CODE_LANGS as [string, ...string[]]);
@@ -33,13 +34,20 @@ export const codeToolSchemas = {
       'Find where a symbol is defined by name (bare or qualified), workspace-wide. ' +
       'Returns definitions with file:line, kind, and signature. Use INSTEAD of ' +
       'grep/Read to locate a definition. Ambiguous names return the candidate ' +
-      'list so you can re-call qualified.',
+      'list so you can re-call qualified. Pass preview:true to also get each ' +
+      "hit's doc and first body lines, which usually removes the follow-up Read.",
     input: z.object({
       name: z.string().min(1).describe('Bare or qualified name, e.g. "login" or "AuthService::login".'),
       kinds: z.array(symbolKind).optional().describe('Restrict to these symbol kinds.'),
       langs: z.array(codeLang).optional(),
       limit: z.number().int().min(1).max(50).default(20),
       offset,
+      preview: z
+        .boolean()
+        .default(false)
+        .describe(
+          "Include the symbol's doc line and first few body lines with each hit — usually removes the follow-up Read."
+        ),
     }),
   },
 
@@ -71,13 +79,21 @@ export const codeToolSchemas = {
       'renaming/removing/changing a symbol, or on "what depends on X". Catches ' +
       'renamed-import references grep misses. Fuzzy (name-matched) dependants ' +
       'are marked as such. Set includeTests:false to walk only production ' +
-      'dependants (test-only paths are excluded from the walk, not just hidden).',
+      'dependants (test-only paths are excluded from the walk, not just hidden). ' +
+      'Pass kinds to slice by edge type (e.g. kinds:["CALLS"] for callers only).',
     input: z.object({
       name: z.string().min(1).describe('Bare or qualified name of the symbol to analyze.'),
       path: pathHint,
       depth: z.number().int().min(1).max(6).default(3).describe('Transitive hops to walk.'),
       limit: z.number().int().min(1).max(200).default(50),
       includeTests: z.boolean().default(true).describe('Include dependants reached only through test files. Off filters test-only paths out of the walk entirely, not just the rendered list.'),
+      kinds: z
+        .array(z.enum(IMPACT_EDGE_KINDS))
+        .optional()
+        .describe(
+          'Restrict the walk to these dependency edge kinds — e.g. ["CALLS"] for callers only, ' +
+            '["READS","WRITES"] for data access. Omit for all kinds.'
+        ),
     }),
   },
 

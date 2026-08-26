@@ -22,6 +22,13 @@ export interface ExecutorDeps {
   store: CodeStore;
   /** Workspace root. Required for rename_symbol/rename_revert (they write source files). */
   root?: string;
+  /**
+   * Reads a workspace-relative file's text, or returns null if unreadable.
+   * Injected rather than importing `fs` here so core stays free of I/O (R10)
+   * and the preview path is testable without a real workspace. When absent,
+   * `preview` degrades to doc-only — never to an error.
+   */
+  readSource?: (relPath: string) => string | null;
 }
 
 export type Executors = {
@@ -49,6 +56,86 @@ function cite(s: SymbolRecord, full = false): string {
     if (sig.length > SIGNATURE_CITE_MAX) sig = `${sig.slice(0, SIGNATURE_CITE_MAX)}…`;
   }
   return `${s.qualified || s.name} [${s.kind}]${sig}  ${s.file}:${s.startLine}`;
+}
+
+/**
+ * Lines of a symbol's body to inline in a hit. Three lines is the point where
+ * a reader can tell an implementation from a stub or a re-export without
+ * paying for the whole body — past that the caller should be Reading the file
+ * anyway, which is why this is a hard cap rather than a parameter.
+ */
+const PREVIEW_MAX_LINES = 3;
+/** Per-line cap, same reasoning as SIGNATURE_CITE_MAX: one hit stays one screen row. */
+const PREVIEW_LINE_MAX = 120;
+/** Continuation indent, matching the `from ...` continuation in renderBoundary. */
+const PREVIEW_INDENT = '      ';
+
+function truncatePreviewLine(l: string): string {
+  return l.length > PREVIEW_LINE_MAX ? `${l.slice(0, PREVIEW_LINE_MAX)}\u2026` : l;
+}
+
+/**
+ * Strip the excerpt's common indentation. Measured over non-blank lines only:
+ * a blank line inside a body has no leading whitespace to speak of, and
+ * letting it count would pin the shared indent at 0 and leave every real line
+ * pushed off to the right by its original nesting depth.
+ */
+function dedentPreview(lines: string[]): string[] {
+  let min = Infinity;
+  for (const l of lines) {
+    if (l.trim() === '') continue;
+    min = Math.min(min, l.length - l.trimStart().length);
+  }
+  if (!Number.isFinite(min) || min === 0) return lines;
+  return lines.map((l) => l.slice(min));
+}
+
+/**
+ * The doc line and first few body lines of a symbol. This is the whole point
+ * of `preview`: a signature tells an agent where a symbol is, but not whether
+ * it is a real implementation, a stub, or a re-export — and answering that
+ * question with a Read costs far more tokens than three lines do.
+ *
+ * Never throws and never returns a partial error string: a stale index or an
+ * unreadable file degrades the hit to doc-only (or to nothing), because a
+ * preview is an optimisation and must not be able to fail the tool.
+ *
+ * Returns '' when there is nothing to show; callers must then emit nothing
+ * extra, not a blank line.
+ */
+function renderPreview(
+  s: SymbolRecord,
+  read?: (p: string) => string | null,
+  opts?: { includeDoc?: boolean }
+): string {
+  const out: string[] = [];
+  if (opts?.includeDoc !== false && s.doc) {
+    const first = s.doc.split('\n')[0]!.trim();
+    if (first) out.push(`${PREVIEW_INDENT}doc: ${truncatePreviewLine(first)}`);
+  }
+  if (read) {
+    let text: string | null = null;
+    try {
+      text = read(s.file);
+    } catch {
+      text = null;
+    }
+    if (text !== null) {
+      const lines = text.split('\n');
+      // startLine is 1-based and comes from the index, which can be stale
+      // relative to disk — an out-of-range start yields an empty slice here
+      // rather than an exception.
+      const start = s.startLine - 1;
+      const end = Math.min(s.endLine, lines.length);
+      const slice = lines.slice(start, Math.min(end, start + PREVIEW_MAX_LINES));
+      if (slice.length > 0) {
+        for (const l of dedentPreview(slice)) out.push(`${PREVIEW_INDENT}${truncatePreviewLine(l)}`);
+        const remaining = end - start - slice.length;
+        if (remaining > 0) out.push(`${PREVIEW_INDENT}\u2026 (${remaining} more line(s))`);
+      }
+    }
+  }
+  return out.join('\n');
 }
 
 function isAmbiguous(x: SymbolRecord[] | AmbiguousSymbol): x is AmbiguousSymbol {
@@ -306,7 +393,15 @@ export function createExecutors(deps: ExecutorDeps): Executors {
       if (input.langs?.length) syms = syms.filter((s) => input.langs!.includes(s.lang));
       if (syms.length === 0) return `No symbol named "${input.name}" (after filters).`;
       const { page, note } = paginate(syms, input.limit, input.offset);
-      return `${page.length} definition(s) for "${input.name}":\n` + page.map((s) => `  - ${cite(s)}`).join('\n') + note;
+      const body = page
+        .map((s) => {
+          const line = `  - ${cite(s)}`;
+          if (!input.preview) return line;
+          const p = renderPreview(s, deps.readSource);
+          return p ? `${line}\n${p}` : line;
+        })
+        .join('\n');
+      return `${page.length} definition(s) for "${input.name}":\n` + body + note;
     },
 
     async get_symbol(input) {
@@ -317,6 +412,12 @@ export function createExecutors(deps: ExecutorDeps): Executors {
         cite(s, true),
         s.doc ? `\ndoc: ${s.doc}` : '',
       ].filter(Boolean);
+      // Unconditional here (unlike find_symbol's opt-in flag): get_symbol is
+      // by definition the "show me this symbol's shape" call, so the excerpt
+      // is always what the caller came for. includeDoc is off because the doc
+      // is already rendered on its own line above.
+      const preview = renderPreview(s, deps.readSource, { includeDoc: false });
+      if (preview) lines.push(`\nbody:\n${preview}`);
       if (input.includeMembers) {
         const members = await store.membersOf(s.id);
         if (members.length > 0) {
@@ -349,9 +450,17 @@ export function createExecutors(deps: ExecutorDeps): Executors {
     async impact(input) {
       const r = await resolveOne(store, input.name, input.path);
       if ('message' in r) return r.message;
-      const res = await impact(store, r.sym.id, input.depth, undefined, input.includeTests);
+      // An empty `kinds` array must mean "no restriction", not "no kinds":
+      // passing [] through would hit impact()'s kinds.length === 0 early
+      // return and answer "nothing depends on X" — the most dangerous
+      // possible false negative right before a rename or a delete.
+      const kinds = input.kinds?.length ? input.kinds : undefined;
+      // A filtered empty result reads as "safe to delete" unless the header
+      // says what was filtered out.
+      const kindNote = kinds ? ` via ${kinds.join('/')} only` : '';
+      const res = await impact(store, r.sym.id, input.depth, kinds, input.includeTests);
       if (!res) return `No symbol id for "${input.name}".`;
-      if (res.dependants.length === 0) return `Nothing depends on ${cite(res.seed)} within ${input.depth} hop(s).`;
+      if (res.dependants.length === 0) return `Nothing depends on ${cite(res.seed)} within ${input.depth} hop(s)${kindNote}.`;
       const { page, note } = paginate(res.dependants, input.limit);
       const trunc = res.truncated ? ` (walk truncated at depth ${input.depth})` : '';
       const body = page
@@ -359,7 +468,7 @@ export function createExecutors(deps: ExecutorDeps): Executors {
         .join('\n');
       // An agent must never mistake a filtered list for a complete one.
       const hiddenNote = res.hiddenTestEdges > 0 ? `\n(… ${res.hiddenTestEdges} test-file edge(s) hidden; pass includeTests to see them)` : '';
-      return `${res.dependants.length} dependant(s) of ${res.seed.qualified || res.seed.name}${trunc}:\n${body}${note}${hiddenNote}`;
+      return `${res.dependants.length} dependant(s)${kindNote} of ${res.seed.qualified || res.seed.name}${trunc}:\n${body}${note}${hiddenNote}`;
     },
 
     async hierarchy(input) {
@@ -494,11 +603,21 @@ export function createExecutors(deps: ExecutorDeps): Executors {
       const touched = applyPlan(plan);
       const fuzzyCount = plan.sites.filter((s) => s.confidence === 'fuzzy').length;
       const fuzzyNote = fuzzyCount > 0 ? ` (${fuzzyCount} fuzzy site(s) included)` : '';
+      // Non-blocking collisions: legal, but the caller is the only one who can
+      // judge whether reusing the name across modules is a semantic clash.
+      const others = plan.collisionsElsewhere;
+      const collisionNote = others.length
+        ? `\nNote: ${others.length} other symbol(s) named "${input.newName}" already exist elsewhere (` +
+          others.slice(0, 3).map((c) => `${c.file}:${c.startLine}`).join(', ') +
+          (others.length > 3 ? `, +${others.length - 3} more` : '') +
+          `); verify this is not a semantic clash.`
+        : '';
       return (
         `Renamed ${r.sym.qualified || r.sym.name} → ${input.newName} across ${touched.length} file(s)` +
         `${fuzzyNote}:\n` +
         touched.map((f) => `  - ${f}`).join('\n') +
-        `\nRevert via your VCS (e.g. \`git checkout -- <files>\`) if needed.`
+        `\nRevert via your VCS (e.g. \`git checkout -- <files>\`) if needed.` +
+        collisionNote
       );
     },
   };

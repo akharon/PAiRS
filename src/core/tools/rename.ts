@@ -15,7 +15,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { CodeStore } from '../../store/graph/codeStore';
-import type { EdgeConfidence, SymbolRecord } from '../indexer/types';
+import type { AmbiguousSymbol, EdgeConfidence, SymbolRecord } from '../indexer/types';
 import { IMPACT_EDGE_KINDS } from '../analyze/impact';
 
 const IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -53,6 +53,37 @@ async function collectSites(store: CodeStore, seed: SymbolRecord): Promise<Site[
   return [...sites.values()];
 }
 
+function isAmbiguous(x: SymbolRecord[] | AmbiguousSymbol): x is AmbiguousSymbol {
+  return !Array.isArray(x) && x.ambiguous === true;
+}
+
+/**
+ * Same-name symbols that the rename would land on top of, split by severity
+ * because the two cases warrant opposite responses. A collision inside the
+ * seed's own file or its own impl block produces a duplicate declaration or a
+ * shadow, which is always wrong and which no undo log exists to recover from —
+ * so that aborts. A same-named symbol in an unrelated module is normal in any
+ * real codebase (every module has its own `parse`, `render`, `new`), so
+ * aborting there would make the tool unusable; it is reported instead and the
+ * caller judges.
+ */
+async function findCollisions(
+  store: CodeStore,
+  seed: SymbolRecord,
+  newName: string
+): Promise<{ blocking: SymbolRecord[]; elsewhere: SymbolRecord[] }> {
+  const hit = await store.lookup(newName);
+  const all = isAmbiguous(hit) ? hit.candidates : hit;
+  const blocking: SymbolRecord[] = [];
+  const elsewhere: SymbolRecord[] = [];
+  for (const c of all) {
+    if (c.id === seed.id) continue;
+    if (c.file === seed.file || (seed.parentId !== null && c.parentId === seed.parentId)) blocking.push(c);
+    else elsewhere.push(c);
+  }
+  return { blocking, elsewhere };
+}
+
 export interface RenamePlanError {
   message: string;
 }
@@ -62,6 +93,8 @@ export interface RenamePlan {
   sites: Site[];
   /** absolute file path -> new full content. */
   rewritten: Map<string, string>;
+  /** Same-named symbols in OTHER files — legal, but worth reporting. */
+  collisionsElsewhere: SymbolRecord[];
 }
 
 /** Builds the rewrite in memory; does not touch disk. Returns an error if any site can't be matched safely. */
@@ -74,6 +107,23 @@ export async function planRename(
 ): Promise<RenamePlan | RenamePlanError> {
   if (!IDENT_RE.test(newName)) return { message: `"${newName}" is not a valid identifier.` };
   if (newName === seed.name) return { message: `New name is the same as the current name.` };
+
+  // Destination-name check, before any site collection: this is about the name
+  // being renamed *to*, so includeFuzzy has no bearing on it.
+  const collisions = await findCollisions(store, seed, newName);
+  if (collisions.blocking.length > 0) {
+    const listed = collisions.blocking
+      .slice(0, 5)
+      .map((c) => `  - ${c.qualified || c.name} [${c.kind}]  ${c.file}:${c.startLine}`)
+      .join('\n');
+    const more = collisions.blocking.length > 5 ? `\n  ... and ${collisions.blocking.length - 5} more` : '';
+    return {
+      message:
+        `Aborted: "${newName}" is already declared in the same scope, which would collide ` +
+        `with the renamed symbol:\n${listed}${more}\n` +
+        `No files were modified. Pick a different name.`,
+    };
+  }
 
   const allSites = await collectSites(store, seed);
   const fuzzySites = allSites.filter((s) => s.confidence === 'fuzzy');
@@ -133,7 +183,7 @@ export async function planRename(
     rewritten.set(abs, lines.join('\n'));
   }
 
-  return { seed, sites, rewritten };
+  return { seed, sites, rewritten, collisionsElsewhere: collisions.elsewhere };
 }
 
 export function applyPlan(plan: RenamePlan): string[] {

@@ -55,7 +55,7 @@ pairs <command> [args]
 | `index` | `pairs index [--rebuild]` | Full index (or full rebuild with `--rebuild`, dropping the store first). Prints a JSON report. |
 | `stats` | `pairs stats` | Index size and resolution quality (files, symbols, edges, fuzzy rate) as JSON. |
 | `find` (via `query`) | `pairs query '<sql>'` | Raw read-only SQL against the graph schema (`File`, `Symbol`, `Edge`, `PendingRef`) for anything not covered by a dedicated command. |
-| `impact` | `pairs impact <name> [depth] [--json]` | Everything that transitively depends on a symbol, up to `depth` hops (default 3). Run this before renaming/removing something. Prints prose by default (like every other tool below); pass `--json` for the structured result, which existing scripts should use instead of relying on bare `pairs impact` output. |
+| `impact` | `pairs impact <name> [depth] [--kinds CALLS,READS] [--json]` | Everything that transitively depends on a symbol, up to `depth` hops (default 3). Run this before renaming/removing something. `--kinds` restricts the walk to specific edge kinds (`CALLS`, `READS`, `WRITES`, `IMPLEMENTS`, `EXTENDS`, `REFERENCES`) — e.g. `--kinds CALLS` for callers only; the header states the restriction so a filtered empty result can't be mistaken for "nothing depends on this". Prints prose by default (like every other tool below); pass `--json` for the structured result, which existing scripts should use instead of relying on bare `pairs impact` output. |
 | `watch` | `pairs watch` | Indexes once, then watches the workspace and incrementally re-indexes on save. `Ctrl-C` to stop. |
 | `files` | `pairs files [pattern] [--paths]` | Lists/searches indexed non-source filenames (a glob like `*.txt` or `Pic*.svg`). `--paths` also matches against full paths. |
 | `read` | `pairs read <path> [startLine] [endLine]` | Prints a file, or a 1-indexed inclusive line range. Out-of-range values clamp rather than error. |
@@ -66,16 +66,16 @@ These are the same operations, exposed as VS Code Language Model Tools (Copilot)
 
 | Tool | Purpose |
 |---|---|
-| `find_symbol` | Locate a symbol's definition(s) by name. |
+| `find_symbol` | Locate a symbol's definition(s) by name. Pass `preview: true` (CLI: `--preview`) to inline each hit's doc line and first body lines — usually removes the follow-up `Read`. |
 | `get_symbol` | Full declaration (signature, doc, span, members) without reading the whole file. |
 | `outline` | A file's symbols in order — its structural shape. |
-| `impact` | Everything that transitively depends on a symbol ("blast radius"). Call before changing/removing it. |
+| `impact` | Everything that transitively depends on a symbol ("blast radius"). Call before changing/removing it. Pass `kinds: ["CALLS"]` to slice by edge type. |
 | `hierarchy` | Type ancestors (extends/implements) and descendants. |
 | `who_calls` | Direct callers or callees, one hop. |
 | `file_deps` | File-level importers or imports, optionally transitive. |
 | `module_map` | Subsystems, cycles, layers, fan-in/fan-out, and drift; pass a `boundary` to see exactly what one module uses from another. |
 | `analyze` | Workspace-wide: `dead_code`, `fan_out`, `cycles`, `test_gap`. |
-| `rename_symbol` | Rename a symbol and every reference site in one pass. Aborts untouched if any site can't be matched safely — re-index and retry. No built-in undo; revert via git. |
+| `rename_symbol` | Rename a symbol and every reference site in one pass. Aborts untouched if any site can't be matched safely, or if the new name is already declared in the same file/impl block — re-index and retry, or pick another name. Same-named symbols in *other* files are reported, not blocked. No built-in undo; revert via git. |
 
 ## 5. Configuration
 

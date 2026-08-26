@@ -17,6 +17,11 @@
 
 import * as path from 'node:path';
 import * as fs from 'node:fs/promises';
+// Synchronous counterpart for the preview reader: ExecutorDeps.readSource
+// returns `string | null`, not a Promise. The extension runs in the node
+// host, so node fs is available and vscode.workspace.fs (async-only) would
+// force needless plumbing for a three-line excerpt.
+import * as fsSync from 'node:fs';
 import * as vscode from 'vscode';
 import { ParserRegistryImpl, fileQuerySource } from '../../core/indexer/parserRegistryImpl';
 import { ExtractorImpl } from '../../core/indexer/extractorImpl';
@@ -110,8 +115,26 @@ async function rebuildIndex(ws: Workspace): Promise<void> {
  * come from package.json's languageModelTools block, generated from
  * core/tools/tools.ts by scripts/sync-lm-tools.mjs.
  */
+/** Upper bound on a file read for a preview excerpt — see the CLI's twin. */
+const MAX_PREVIEW_READ_BYTES = 1024 * 1024;
+
 function registerLmTools(ws: Workspace): vscode.Disposable[] {
-  const executors = createExecutors({ store: ws.store, root: ws.root });
+  /**
+   * Preview reader for find_symbol/get_symbol. Size-capped so a generated or
+   * minified file can't cost megabytes to produce a three-line excerpt, and
+   * null on any failure — a preview is an optimisation and must never be a
+   * reason for the tool itself to fail.
+   */
+  const readSource = (rel: string): string | null => {
+    try {
+      const abs = path.join(ws.root, rel);
+      if (fsSync.statSync(abs).size > MAX_PREVIEW_READ_BYTES) return null;
+      return fsSync.readFileSync(abs, 'utf8');
+    } catch {
+      return null;
+    }
+  };
+  const executors = createExecutors({ store: ws.store, root: ws.root, readSource });
   const disabled = new Set(vscode.workspace.getConfiguration('pairs').get<string[]>('disabledTools', []));
   const disposables: vscode.Disposable[] = [];
   for (const [name, schema] of Object.entries(codeToolSchemas)) {

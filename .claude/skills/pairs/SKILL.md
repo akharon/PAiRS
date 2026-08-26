@@ -1,25 +1,29 @@
 ---
 name: pairs
-description: Leverage PAiRS's code graph and architectural rules. Use instead of grep/Read for definitions, dependencies, refactoring safety, and rule compliance. In VS Code with Copilot, prefer the language model tools (find_symbol, impact, check_rules, rename_symbol, etc.); for CLI use the pairs commands.
+description: Leverage PAiRS's code graph. Use instead of grep/Read for definitions, dependencies, and refactoring safety. In VS Code with Copilot, prefer the language model tools (find_symbol, impact, rename_symbol, etc.); for CLI use the pairs commands.
 ---
 
-# PAiRS: Code Graph & Architectural Rules
+# PAiRS: Code Graph
 
-PAiRS maintains a live code graph (symbols, call/import edges, dependencies) and
-architectural rule engine for this workspace, updated by the VS Code extension
-while it's open. Use PAiRS instead of grep/Read for code navigation and
-refactoring — it catches renamed-import references grep misses, understands
-module structure, and enforces architecture rules.
+PAiRS maintains a live code graph (symbols, call/import edges, dependencies)
+for this workspace, updated by the VS Code extension while it's open. Use
+PAiRS instead of grep/Read for code navigation and refactoring — it catches
+renamed-import references grep misses and understands module structure.
 
 ## In VS Code with Copilot (Language Model Tools)
 
 Copilot has direct access to PAiRS tools — use these for navigation and refactoring:
 
 - **find_symbol** — locate where a symbol is defined (by name, bare or qualified).
+  Pass `preview: true` to also get each hit's doc line and first body lines —
+  that usually answers "is this the right symbol?" without a follow-up Read.
 - **get_symbol** — full declaration: signature, doc, members.
 - **outline** — file structure: all symbols in order.
 - **impact** — blast radius of a symbol (all dependants, transitive). Call BEFORE
-  renaming/removing/changing.
+  renaming/removing/changing. Pass `kinds: ["CALLS"]` (or `["READS","WRITES"]`,
+  etc.) to slice by edge type when you only want callers or only data access;
+  the header states the restriction, so a filtered empty result is never
+  mistaken for "nothing depends on this".
 - **hierarchy** — inheritance tree: what a type EXTENDS/IMPLEMENTS (ancestors)
   and what EXTENDS/IMPLEMENTS it (descendants). Call before changing a base
   class/interface to see every subclass affected.
@@ -31,39 +35,31 @@ Copilot has direct access to PAiRS tools — use these for navigation and refact
   target that the source actually uses, with reference sites — what breaking
   that dependency would require.
 - **analyze** — dead code, cycles, hotspots, untested exports.
-- **check_rules** — verify `.pairs/rules.ron` against the graph (call AFTER
-  editing to catch rule violations early).
-- **list_rules** — summarize the active ruleset: ids, kinds, severities.
-- **explain_rule** — detail of one rule, including its explanation.
 - **rename_symbol** — rename a symbol and all direct reference sites consistently
   in one pass. Aborts if any site can't be matched safely (stale index, ambiguous
-  text). Revert via git or your own backups.
+  text), or if the new name is already declared in the same file or impl block.
+  Same-named symbols in other files are reported as a note, not blocked. Revert
+  via git or your own backups.
 
 ## In the CLI (from workspace root)
 
 For automation and CI/CD, use `pairs` commands:
 
-- `pairs impact <name> [depth]` — blast radius (same as the tool above).
-- `pairs check [--ci] [--format human|sarif|json]` — evaluate
-  `.pairs/rules.ron` against the graph. Non-zero exit only on new confirmed
-  error-severity violations.
-- `pairs rules [path]` — summarize the ruleset.
-- `pairs baseline update` — snapshot current violations so `check` only flags
-  new ones going forward.
+- `pairs find_symbol <name> [--preview]` — locate a definition. `--preview` adds the doc line and first body lines, which usually removes the follow-up Read.
+- `pairs get_symbol <name>` — full declaration: signature, doc, a body excerpt, and members.
+- `pairs impact <name> [depth] [--kinds CALLS,READS] [--json]` — blast radius (same as the tool above). `--kinds` restricts the walk to specific edge kinds. Prints prose like every other CLI tool by default; pass `--json` for the structured result (breaking change from the old bare-JSON default — update any script that parsed `pairs impact` output directly).
 - `pairs query '<sql>'` — raw read-only SQL for anything not covered above.
 - `pairs stats` — index size and resolution quality.
 - `pairs index` — full re-index (rarely needed; extension keeps it live).
-- `pairs init [--force]` — bootstrap `.pairs/rules.ron` from inferred layers.
 
 ## When to Use PAiRS
 
-- **Finding definitions** — `find_symbol` / `outline` instead of grep/Read.
+- **Finding definitions** — `find_symbol` / `outline` instead of grep/Read. Add
+  `preview: true` to `find_symbol` when you would otherwise Read the file next.
 - **Checking impact before a change** — `impact` shows callers, readers, type
   references, etc. that might break.
 - **Refactoring safely** — `rename_symbol` renames definition + all reference
-  sites together; `check_rules` catches architecture violations.
+  sites together.
 - **Understanding module structure** — `module_map` shows subsystems, cycles,
   layers and drift; `module_map` with `boundary` shows why one module depends
   on another. Ask it "where does this code belong" before adding a new file.
-- **Enforcing architecture** — `check_rules` in CI ensures no layering,
-  circular, or visibility rule violations.

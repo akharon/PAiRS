@@ -15,8 +15,8 @@ import { codeToolSchemas } from './tools';
 import type { CodeStore } from '../../store/graph/codeStore';
 import type { FileExtraction, NewSymbol, RawRef } from '../indexer/types';
 
-function sym(name: string, qualified: string, kind: NewSymbol['kind'] = 'function'): NewSymbol {
-  return { name, qualified, kind, lang: 'rust', startLine: 10, endLine: 12, signature: '()', doc: null, exported: true, parentIndex: null };
+function sym(name: string, qualified: string, kind: NewSymbol['kind'] = 'function', doc: string | null = null): NewSymbol {
+  return { name, qualified, kind, lang: 'rust', startLine: 10, endLine: 12, signature: '()', doc, exported: true, parentIndex: null };
 }
 function ext(p: string, symbols: NewSymbol[], refs: RawRef[] = []): FileExtraction {
   return { path: p, lang: 'rust', mtimeMs: 1, size: 1, hash: `h-${p}-${Math.random()}`, crate: null, parseError: false, symbols: [sym(p, p, 'module'), ...symbols], refs, uses: [] };
@@ -25,14 +25,20 @@ const fromFn = (name: string, qualifiedName: string | null): RawRef => ({ fromIn
 
 describe('tool executors', () => {
   let x: Executors;
+  // Hoisted so the preview tests can build sibling executors over the same
+  // fixture store with different readSource injections.
+  let store: SqliteCodeStore;
   beforeAll(async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pairs-exec-'));
-    const store = await SqliteCodeStore.open(path.join(dir, 'g.db'), nodeSqlDriver);
+    store = await SqliteCodeStore.open(path.join(dir, 'g.db'), nodeSqlDriver);
     await store.applyExtraction(ext('core.rs', [sym('core', 'core')]));
     await store.applyExtraction(ext('mid.rs', [sym('mid', 'mid')], [fromFn('core', null)]));
     // Two same-named `login` to exercise the ambiguity path.
     await store.applyExtraction(ext('a.rs', [sym('login', 'auth::login')]));
     await store.applyExtraction(ext('b.rs', [sym('login', 'admin::login')]));
+    // A doc-bearing symbol: `sym` defaults doc to null, and the preview tests
+    // need one symbol whose doc line is actually renderable.
+    await store.applyExtraction(ext('documented.rs', [sym('documented', 'documented', 'function', 'Explains itself.')]));
     // Base <- Sub via EXTENDS, for the hierarchy executor.
     await store.applyExtraction(ext('base.rs', [sym('Base', 'Base', 'class')]));
     await store.applyExtraction(
@@ -42,9 +48,81 @@ describe('tool executors', () => {
   });
 
   it('find_symbol cites file:line', async () => {
-    const out = await x.find_symbol({ name: 'core', limit: 20, offset: 0 });
+    const out = await x.find_symbol({ name: 'core', limit: 20, offset: 0, preview: false });
     expect(out).toContain('core.rs:10');
     expect(out).toContain('[function]');
+  });
+
+  it('find_symbol without preview emits one line per hit and no continuation', async () => {
+    const out = await x.find_symbol({ name: 'core', limit: 20, offset: 0, preview: false });
+    expect(out.split('\n')[0]).toBe('1 definition(s) for "core":');
+    expect(out.split('\n').length).toBe(2); // header + the single result line
+    expect(out).toContain('  - core [function] ()  core.rs:10');
+  });
+
+  it('find_symbol with preview inlines the doc and the injected body lines', async () => {
+    // sym() spans lines 10-12, so the stub must be at least 12 lines long for
+    // lines.slice(9, 12) to land on real content.
+    const body = Array.from({ length: 12 }, (_, i) => `line${i + 1}`).join('\n');
+    const withRead = createExecutors({ store, readSource: () => body });
+    const out = await withRead.find_symbol({ name: 'documented', limit: 20, offset: 0, preview: true });
+    expect(out).toContain('      doc: Explains itself.');
+    expect(out).toContain('      line10');
+    expect(out).toContain('      line11');
+    expect(out).toContain('      line12');
+    // The span is exactly PREVIEW_MAX_LINES, so nothing is elided.
+    expect(out).not.toContain('more line(s)');
+  });
+
+  it('find_symbol with preview and no readSource shows the doc only, without throwing', async () => {
+    const out = await x.find_symbol({ name: 'documented', limit: 20, offset: 0, preview: true });
+    expect(out).toContain('      doc: Explains itself.');
+    expect(out).toContain('documented.rs:10');
+    expect(out.split('\n').length).toBe(3); // header + hit + doc line, no body
+  });
+
+  it('find_symbol with preview degrades to the bare hit when the file is unreadable', async () => {
+    const unreadable = createExecutors({ store, readSource: () => null });
+    const out = await unreadable.find_symbol({ name: 'core', limit: 20, offset: 0, preview: true });
+    // `core` has no doc and no readable file, so preview adds nothing at all.
+    expect(out.split('\n').length).toBe(2);
+    expect(out).toContain('core.rs:10');
+  });
+
+  it('find_symbol survives a readSource that throws', async () => {
+    const throwing = createExecutors({
+      store,
+      readSource: () => {
+        throw new Error('boom');
+      },
+    });
+    const out = await throwing.find_symbol({ name: 'documented', limit: 20, offset: 0, preview: true });
+    expect(out).toContain('documented.rs:10');
+    expect(out).toContain('      doc: Explains itself.');
+  });
+
+  it('impact kinds:[CALLS] drops an EXTENDS-only dependant the unfiltered walk finds', async () => {
+    const all = await x.impact({ name: 'Base', depth: 3, limit: 50, includeTests: true });
+    expect(all).toContain('Sub');
+
+    const callsOnly = await x.impact({ name: 'Base', depth: 3, limit: 50, includeTests: true, kinds: ['CALLS'] });
+    expect(callsOnly).not.toContain('Sub');
+    // An empty filtered result must never read as "safe to delete".
+    expect(callsOnly).toContain('Nothing depends on');
+    expect(callsOnly).toContain('via CALLS only');
+  });
+
+  it('impact kinds:[CALLS] keeps a real CALLS dependant and states the restriction', async () => {
+    const out = await x.impact({ name: 'core', depth: 3, limit: 50, includeTests: true, kinds: ['CALLS'] });
+    expect(out).toContain('mid');
+    expect(out).toContain('dependant(s) via CALLS only of core');
+  });
+
+  it('impact kinds:[] means unrestricted, not "no dependants"', async () => {
+    const unfiltered = await x.impact({ name: 'core', depth: 3, limit: 50, includeTests: true });
+    const emptyKinds = await x.impact({ name: 'core', depth: 3, limit: 50, includeTests: true, kinds: [] });
+    expect(emptyKinds).toBe(unfiltered);
+    expect(emptyKinds).not.toContain('Nothing depends on');
   });
 
   it('impact reaches transitive callers', async () => {
@@ -128,7 +206,7 @@ describe('signature truncation in cite() (Task 5)', () => {
   });
 
   it('find_symbol renders a multi-line signature on exactly one line, with file:line at the end', async () => {
-    const out = await x.find_symbol({ name: 'resolveOneRef', limit: 20, offset: 0 });
+    const out = await x.find_symbol({ name: 'resolveOneRef', limit: 20, offset: 0, preview: false });
     const resultLine = out.split('\n').find((l) => l.startsWith('  - '));
     expect(resultLine).toBeDefined();
     expect(resultLine).not.toContain('\n');
@@ -245,6 +323,49 @@ describe('rename_symbol executor', () => {
     const store = await SqliteCodeStore.open(path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pairs-rename-noroot-')), 'g.db'), nodeSqlDriver);
     const noRoot = createExecutors({ store });
     expect(await noRoot.rename_symbol({ name: 'anything', newName: 'x', path: undefined })).toContain('unavailable');
+  });
+});
+
+describe('rename_symbol collision pre-flight', () => {
+  // A dedicated store and temp dir: the block above renames core -> core_v2 in
+  // its own beforeAll, so sharing that fixture would make these assertions
+  // depend on test ordering.
+  let x: Executors;
+  let dir: string;
+
+  beforeAll(async () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pairs-collide-'));
+    const store = await SqliteCodeStore.open(path.join(dir, 'g.db'), nodeSqlDriver);
+
+    fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
+    // Both `alpha` and `taken` live in src/one.rs, so renaming alpha -> taken
+    // is a same-file collision. `elsewhere` sits in its own file, so renaming
+    // alpha -> elsewhere is legal but worth reporting.
+    const nine = Array.from({ length: 9 }, () => '');
+    fs.writeFileSync(path.join(dir, 'src/one.rs'), nine.concat('fn alpha() {}', 'fn taken() {}').join('\n') + '\n');
+    fs.writeFileSync(path.join(dir, 'src/two.rs'), nine.concat('fn elsewhere() {}').join('\n') + '\n');
+
+    await store.applyExtraction(ext('src/one.rs', [sym('alpha', 'alpha'), sym('taken', 'taken')]));
+    await store.applyExtraction(ext('src/two.rs', [sym('elsewhere', 'elsewhere')]));
+
+    x = createExecutors({ store, root: dir });
+  });
+
+  it('aborts on a same-file collision and leaves the file byte-identical', async () => {
+    const before = fs.readFileSync(path.join(dir, 'src/one.rs'), 'utf8');
+    const out = await x.rename_symbol({ name: 'alpha', newName: 'taken', path: undefined });
+    expect(out).toContain('Aborted: "taken" is already declared in the same scope');
+    expect(out).toContain('src/one.rs:10');
+    expect(out).toContain('No files were modified.');
+    expect(fs.readFileSync(path.join(dir, 'src/one.rs'), 'utf8')).toBe(before);
+  });
+
+  it('succeeds on a different-file same-name symbol but reports it', async () => {
+    const out = await x.rename_symbol({ name: 'alpha', newName: 'elsewhere', path: undefined });
+    expect(out).toContain('Renamed');
+    expect(out).toContain('1 other symbol(s) named "elsewhere" already exist elsewhere');
+    expect(out).toContain('src/two.rs:10');
+    expect(fs.readFileSync(path.join(dir, 'src/one.rs'), 'utf8')).toContain('fn elsewhere() {}');
   });
 });
 

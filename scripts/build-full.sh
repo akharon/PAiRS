@@ -41,6 +41,17 @@ echo ""
 echo "✓ Step 1 done"
 echo ""
 
+echo "🔄 Step 1b: regenerate derived artifacts (LM tool schemas, Claude skill)"
+# Both are generated from a single source (tools.ts / SKILL.md) and are
+# committed, so regenerate before typecheck: a stale package.json or
+# skillContent.ts otherwise ships tool descriptions that don't match the tools.
+npm run sync-lm-tools
+npm run sync-skill
+
+echo ""
+echo "✓ Step 1b done"
+echo ""
+
 echo "🔍 Step 2: npm run typecheck"
 npm run typecheck
 

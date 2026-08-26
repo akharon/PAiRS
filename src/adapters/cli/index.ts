@@ -7,6 +7,9 @@
  */
 
 import * as fs from 'node:fs/promises';
+// Synchronous counterpart: ExecutorDeps.readSource returns `string | null`,
+// not a Promise, so the preview reader cannot use the promises API above.
+import * as fsSync from 'node:fs';
 import * as path from 'node:path';
 import { ParserRegistryImpl, fileQuerySource } from '../../core/indexer/parserRegistryImpl';
 import { ExtractorImpl } from '../../core/indexer/extractorImpl';
@@ -15,9 +18,10 @@ import { nodeListNamedFiles, nodeListWorkspaceFiles, nodeReadFile, nodeWatchWork
 import { WatchQueue } from '../../core/indexer/watchQueue';
 import { SqliteCodeStore } from '../../store/graph/sqliteCodeStore';
 import { nodeSqlDriver } from '../../store/graph/sqliteDriver';
-import { impact } from '../../core/analyze/impact';
+import { impact, IMPACT_EDGE_KINDS } from '../../core/analyze/impact';
 import { createExecutors } from '../../core/tools/executors';
 import { codeToolSchemas, type CodeToolName } from '../../core/tools/tools';
+import type { EdgeKind } from '../../core/indexer/types';
 
 const MAX_READ_BYTES = 1024 * 1024;
 
@@ -48,7 +52,10 @@ const BOOLEAN_FIELDS = new Set(['includeFuzzy', 'includeTests']);
  * them more richly than executors.ts's `resolveOne` (that helper collapses
  * both into one prose message, so it can't reproduce this).
  */
-async function renderImpactJson(store: SqliteCodeStore, input: { name: string; depth: number; includeTests?: boolean }): Promise<string> {
+async function renderImpactJson(
+  store: SqliteCodeStore,
+  input: { name: string; depth: number; includeTests?: boolean; kinds?: readonly EdgeKind[] }
+): Promise<string> {
   const hit = await store.lookup(input.name);
   if (!Array.isArray(hit)) {
     // AmbiguousSymbol — report candidates so the caller can qualify.
@@ -57,7 +64,15 @@ async function renderImpactJson(store: SqliteCodeStore, input: { name: string; d
   if (hit.length === 0) {
     return JSON.stringify({ dependants: [], note: 'no such symbol' }, null, 2);
   }
-  const result = await impact(store, hit[0]!.id, input.depth, undefined, input.includeTests ?? true);
+  // Same empty-array rule as the prose path: [] means "unrestricted", never
+  // "no kinds" — otherwise --json --kinds would emit an empty dependant list.
+  const result = await impact(
+    store,
+    hit[0]!.id,
+    input.depth,
+    input.kinds?.length ? input.kinds : undefined,
+    input.includeTests ?? true
+  );
   return JSON.stringify(result, null, 2);
 }
 
@@ -90,7 +105,22 @@ async function main(): Promise<void> {
     readFile: nodeReadFile(root),
     listNamedFiles: nodeListNamedFiles(root),
   });
-  const executors = createExecutors({ store, root });
+  /**
+   * Preview reader for find_symbol/get_symbol. Reuses MAX_READ_BYTES so a
+   * generated or minified file can't cost megabytes of memory to produce a
+   * three-line excerpt. Returns null on any failure — a preview is an
+   * optimisation and must never be a reason for the tool itself to fail.
+   */
+  const readSource = (rel: string): string | null => {
+    try {
+      const abs = path.join(root, rel);
+      if (fsSync.statSync(abs).size > MAX_READ_BYTES) return null;
+      return fsSync.readFileSync(abs, 'utf8');
+    } catch {
+      return null;
+    }
+  };
+  const executors = createExecutors({ store, root, readSource });
 
   try {
     // --json is stripped here (same place as --include-fuzzy) so it's
@@ -104,12 +134,57 @@ async function main(): Promise<void> {
     if ((codeToolSchemas as Record<string, unknown>)[command] !== undefined) {
       const toolName = command as CodeToolName;
       const fields = TOOL_ARG_SPECS[toolName];
-      const raw: Record<string, string | number | boolean> = {};
+      const raw: Record<string, string | number | boolean | string[]> = {};
       if (toolName === 'rename_symbol') {
         const idx = rest.indexOf('--include-fuzzy');
         if (idx !== -1) {
           rest.splice(idx, 1);
           raw.includeFuzzy = true;
+        }
+      }
+      // Boolean flags can't ride the positional mapping either: `preview` sits
+      // after `offset` in the schema, so reaching it positionally would mean
+      // typing limit and offset first. It is the CLI's main token-saving
+      // switch, so it gets a real flag.
+      if (toolName === 'find_symbol') {
+        const idx = rest.indexOf('--preview');
+        if (idx !== -1) {
+          rest.splice(idx, 1);
+          raw.preview = true;
+        }
+      }
+      // `kinds` is a list, so it cannot ride the positional mapping below
+      // (it would have to sit after includeTests and be unreachable). Spliced
+      // out here, before that loop, or the flag and its value would be eaten
+      // as positionals.
+      if (toolName === 'impact') {
+        const idx = rest.indexOf('--kinds');
+        if (idx !== -1) {
+          const value = rest[idx + 1];
+          if (value === undefined || value.startsWith('--')) {
+            process.stderr.write(
+              `--kinds needs a comma-separated list, e.g. --kinds ${IMPACT_EDGE_KINDS.slice(0, 2).join(',')}\n`
+            );
+            process.exitCode = 1;
+            return;
+          }
+          rest.splice(idx, 2);
+          const requested = value
+            .split(',')
+            .map((k) => k.trim().toUpperCase())
+            .filter(Boolean);
+          // Validate here rather than deferring to zod: zod's error for a bad
+          // member of an enum array is a nested JSON dump, unreadable at a
+          // terminal, and this is the one flag a user is likely to mistype.
+          const bad = requested.filter((k) => !(IMPACT_EDGE_KINDS as readonly string[]).includes(k));
+          if (bad.length > 0) {
+            process.stderr.write(
+              `Unknown edge kind(s): ${bad.join(', ')}. Legal values: ${IMPACT_EDGE_KINDS.join(', ')}\n`
+            );
+            process.exitCode = 1;
+            return;
+          }
+          raw.kinds = requested;
         }
       }
       for (let i = 0; i < fields.length && i < rest.length; i++) {
@@ -122,7 +197,8 @@ async function main(): Promise<void> {
       const parsed = codeToolSchemas[toolName].input.safeParse(raw);
       if (!parsed.success) {
         // [--json] only applies to `impact` — see the note where asJson is handled below.
-        const jsonSuffix = toolName === 'impact' ? ' [--json]' : '';
+        const jsonSuffix =
+          toolName === 'impact' ? ' [--kinds CALLS,READS] [--json]' : toolName === 'find_symbol' ? ' [--preview]' : '';
         process.stderr.write(`Usage: pairs ${toolName} ${fields.map((f) => `<${f}>`).join(' ')}${jsonSuffix}\n`);
         process.stderr.write(`${parsed.error.message}\n`);
         process.exitCode = 1;
@@ -131,7 +207,7 @@ async function main(): Promise<void> {
         // pre-existing `case 'impact':` shape below, including its own
         // ambiguous/miss shapes — `resolveOne` (used by the prose path)
         // collapses both into one message string, so it can't reproduce them.
-        process.stdout.write(`${await renderImpactJson(store, parsed.data as { name: string; depth: number; includeTests?: boolean })}\n`);
+        process.stdout.write(`${await renderImpactJson(store, parsed.data as { name: string; depth: number; includeTests?: boolean; kinds?: readonly EdgeKind[] })}\n`);
       } else {
         // `--json` has a defined structured shape ONLY for `impact` today (see
         // renderImpactJson above). A silently-ignored flag is worse than an

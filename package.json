@@ -1,6 +1,6 @@
 {
   "name": "pairs",
-  "version": "0.20.0",
+  "version": "0.21.0",
   "description": "Derived code-graph index for AI coding agents",
   "license": "MIT",
   "author": "Mustafa Kiyar",
@@ -70,7 +70,7 @@
         "name": "pairs_find_symbol",
         "displayName": "PAiRS: find symbol definition",
         "toolReferenceName": "pairsFindSymbol",
-        "modelDescription": "Find where a symbol is defined by name (bare or qualified), workspace-wide. Returns definitions with file:line, kind, and signature. Use INSTEAD of grep/Read to locate a definition. Ambiguous names return the candidate list so you can re-call qualified.",
+        "modelDescription": "Find where a symbol is defined by name (bare or qualified), workspace-wide. Returns definitions with file:line, kind, and signature. Use INSTEAD of grep/Read to locate a definition. Ambiguous names return the candidate list so you can re-call qualified. Pass preview:true to also get each hit's doc and first body lines, which usually removes the follow-up Read.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -132,6 +132,10 @@
               "type": "integer",
               "minimum": 0,
               "description": "Skip this many results — re-call with the offset from a truncated response to page."
+            },
+            "preview": {
+              "type": "boolean",
+              "description": "Include the symbol's doc line and first few body lines with each hit — usually removes the follow-up Read."
             }
           },
           "required": [
@@ -189,7 +193,7 @@
         "name": "pairs_impact",
         "displayName": "PAiRS: change impact (blast radius)",
         "toolReferenceName": "pairsImpact",
-        "modelDescription": "What transitively DEPENDS ON a symbol (\"blast radius\"): every caller, reader, and implementer that reaches it, up to `depth` hops. Call BEFORE renaming/removing/changing a symbol, or on \"what depends on X\". Catches renamed-import references grep misses. Fuzzy (name-matched) dependants are marked as such. Set includeTests:false to walk only production dependants (test-only paths are excluded from the walk, not just hidden).",
+        "modelDescription": "What transitively DEPENDS ON a symbol (\"blast radius\"): every caller, reader, and implementer that reaches it, up to `depth` hops. Call BEFORE renaming/removing/changing a symbol, or on \"what depends on X\". Catches renamed-import references grep misses. Fuzzy (name-matched) dependants are marked as such. Set includeTests:false to walk only production dependants (test-only paths are excluded from the walk, not just hidden). Pass kinds to slice by edge type (e.g. kinds:[\"CALLS\"] for callers only).",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -216,6 +220,21 @@
             "includeTests": {
               "type": "boolean",
               "description": "Include dependants reached only through test files. Off filters test-only paths out of the walk entirely, not just the rendered list."
+            },
+            "kinds": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "CALLS",
+                  "READS",
+                  "WRITES",
+                  "IMPLEMENTS",
+                  "EXTENDS",
+                  "REFERENCES"
+                ]
+              },
+              "description": "Restrict the walk to these dependency edge kinds — e.g. [\"CALLS\"] for callers only, [\"READS\",\"WRITES\"] for data access. Omit for all kinds."
             }
           },
           "required": [
@@ -461,6 +480,7 @@
     "build:watch": "node esbuild.mjs --watch",
     "fetch-grammars": "node scripts/fetch-grammars.mjs",
     "sync-lm-tools": "node scripts/sync-lm-tools.mjs",
+    "sync-skill": "node scripts/sync-skill.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src",
     "test": "vitest run",

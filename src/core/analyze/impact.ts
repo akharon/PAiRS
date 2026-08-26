@@ -17,7 +17,14 @@ import type { CodeStore } from '../../store/graph/codeStore';
 import type { EdgeKind, EdgeConfidence, SymbolRecord } from '../indexer/types';
 
 /** Edge kinds that constitute a dependency for impact purposes. */
-export const IMPACT_EDGE_KINDS: readonly EdgeKind[] = ['CALLS', 'READS', 'WRITES', 'IMPLEMENTS', 'EXTENDS', 'REFERENCES'];
+export const IMPACT_EDGE_KINDS = [
+  'CALLS',
+  'READS',
+  'WRITES',
+  'IMPLEMENTS',
+  'EXTENDS',
+  'REFERENCES',
+] as const satisfies readonly EdgeKind[];
 
 export interface ImpactNode {
   symbol: SymbolRecord;
