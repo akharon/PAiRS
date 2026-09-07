@@ -34,7 +34,7 @@
  *    migration code for it).
  */
 
-import type { DeadCodeCandidate, DeadCodeFilter, EdgeKind, EdgeRecord, FileDep, FileRecord, FileExtraction, HotspotQuery, IndexStats, NamedFileRecord, SymbolRecord, AmbiguousSymbol } from '../../core/indexer/types';
+import type { DeadCodeCandidate, DeadCodeFilter, EdgeKind, EdgeRecord, FileDep, FileRecord, FileExtraction, HotspotQuery, IndexStats, NamedFileRecord, SymbolKind, SymbolRecord, AmbiguousSymbol } from '../../core/indexer/types';
 
 /**
  * Blank out SQL string literals and comments so keyword scans (`query()`'s
@@ -169,6 +169,14 @@ export interface CodeStore {
   outline(path: string): Promise<SymbolRecord[]>;
   /** Direct children of a symbol (method → containing impl block), ordered by startLine. */
   membersOf(parentId: number): Promise<SymbolRecord[]>;
+  /**
+   * Intent-shaped retrieval (grep_symbols, Step 6.1): matches `pattern` — a
+   * regex when `isRegex`, else a case-insensitive substring — against
+   * symbol name, qualified name, signature, and doc text. For the "I don't
+   * know the exact symbol name" case: a plain SQL scan over columns that are
+   * already indexed, not a new index or embedding store.
+   */
+  grepSymbols(pattern: string, opts?: { isRegex?: boolean; kinds?: SymbolKind[]; pathPrefix?: string; limit?: number }): Promise<SymbolRecord[]>;
 
   // -- Graph queries -----------------------------------------------------------
   /** Edges pointing AT these symbols (impact/who-calls, direction='callers'). */

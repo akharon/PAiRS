@@ -168,6 +168,91 @@ function isSelfReceiverMemberAccess(node: Node): boolean {
   return receiver.type === 'identifier' && /^(this|self|Self|cls)$/.test(receiver.text);
 }
 
+/**
+ * TypeScript/JavaScript only (grammar `typescript`): the declared type name
+ * of a `member_expression` call's receiver, when the receiver is a bare
+ * identifier bound as a parameter or a `const`/`let` with a written type
+ * annotation somewhere in an enclosing scope — `function f(x: Widget) {
+ * x.foo() }` or `const w: Widget = ...; w.foo()`. Returns null for anything
+ * else (untyped bindings, property chains, `any`/generic-looking names),
+ * since those give the resolver no more evidence than a bare method call.
+ *
+ * Walks outward through enclosing block/function scopes rather than doing a
+ * whole-file scope analysis — good enough for the common case (the
+ * declaration lives in the same function or an ancestor) without building a
+ * real symbol table.
+ */
+function tsReceiverDeclaredType(node: Node): string | null {
+  const parent = node.parent;
+  if (!parent) return null;
+  const receiver = parent.childForFieldName('object');
+  if (!receiver || receiver.type !== 'identifier') return null;
+  const receiverName = receiver.text;
+
+  const typeNameOf = (typeAnnotation: Node | null): string | null => {
+    if (!typeAnnotation) return null;
+    // `type_annotation` wraps `: Foo` — its one named child is the type node.
+    const typeNode = typeAnnotation.namedChild(0);
+    if (!typeNode || typeNode.type !== 'type_identifier') return null;
+    return typeNode.text;
+  };
+
+  // Function-like node types across the grammar's several call shapes
+  // (declarations, arrow functions, methods, function expressions).
+  const isFunctionLike = (n: Node): boolean =>
+    /^(function_declaration|arrow_function|function_expression|method_definition|generator_function_declaration)$/.test(n.type);
+
+  for (let scope: Node | null = node.parent; scope !== null; scope = scope.parent) {
+    if (!isFunctionLike(scope)) continue;
+    // Parameters of the enclosing function — `parameters: formal_parameters`
+    // is a SIBLING field of `body`, never an ancestor of the call node
+    // (which lives inside `body`), so it must be read off the function node
+    // directly rather than found by walking further up.
+    const params = scope.childForFieldName('parameters');
+    if (params) {
+      for (const param of params.namedChildren) {
+        if (!param) continue;
+        const pat = param.childForFieldName('pattern');
+        if (pat?.type === 'identifier' && pat.text === receiverName) {
+          const t = typeNameOf(param.childForFieldName('type'));
+          if (t) return t;
+        }
+      }
+    }
+    // `const`/`let` declarations anywhere in the enclosing function body — a
+    // sibling statement earlier in the block, not an ancestor of the call
+    // node, so this needs a subtree scan rather than another parent walk.
+    const body = scope.childForFieldName('body') ?? scope;
+    const found = findVariableDeclaratorType(body, receiverName, typeNameOf);
+    if (found) return found;
+  }
+  return null;
+}
+
+/** Depth-first search for a `variable_declarator` binding `name` with a written type annotation. */
+function findVariableDeclaratorType(
+  root: Node,
+  name: string,
+  typeNameOf: (typeAnnotation: Node | null) => string | null
+): string | null {
+  if (root.type === 'variable_declarator') {
+    const declName = root.childForFieldName('name');
+    if (declName?.type === 'identifier' && declName.text === name) {
+      const t = typeNameOf(root.childForFieldName('type'));
+      if (t) return t;
+    }
+  }
+  for (const child of root.namedChildren) {
+    if (!child) continue;
+    // Don't descend into a nested function-like scope — a same-named local
+    // there is a different binding, not this receiver's declaration.
+    if (/^(function_declaration|arrow_function|function_expression|method_definition)$/.test(child.type)) continue;
+    const found = findVariableDeclaratorType(child, name, typeNameOf);
+    if (found) return found;
+  }
+  return null;
+}
+
 /** Bare final segment of a possibly-qualified reference name (`this.x`/`self.x` → `x`). */
 function bareRefName(name: string): string {
   const cleaned = stripReceiver(name);
@@ -387,6 +472,14 @@ export class ExtractorImpl implements Extractor {
           // query captures only the property identifier and the receiver has
           // to be read off the CST instead (see isSelfReceiverMemberAccess).
           selfReceiver: SELF_RECEIVER_RE.test(ref.name) || isSelfReceiverMemberAccess(ref.node),
+          // TypeScript only (Step 2.3): the receiver's declared type, when it
+          // can be read off a typed parameter or const/let in an enclosing
+          // scope — lets the resolver look the method up on that type
+          // directly instead of capping at the workspace-wide name ladder.
+          receiverType:
+            loaded.lang === 'typescript' && ref.node.type === 'property_identifier'
+              ? (tsReceiverDeclaredType(ref.node) ?? undefined)
+              : undefined,
           inTest: inTestRegion(ref.node),
         });
       }

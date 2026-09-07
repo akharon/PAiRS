@@ -162,6 +162,16 @@ export interface RawRef {
    */
   selfReceiver?: boolean;
   /**
+   * TypeScript/JavaScript only: the declared type name of a method call's
+   * receiver, when it is a bare identifier bound as a parameter or
+   * `const`/`let` with a written type annotation in an enclosing scope
+   * (`function f(x: Widget) { x.foo() }`). Lets the resolver look `foo` up
+   * among `Widget`'s own members before falling back to the fuzzy-capped
+   * workspace-wide name ladder — a genuine precision gain, not just a
+   * relabel, since it can disambiguate even when the name is not unique.
+   */
+  receiverType?: string;
+  /**
    * True when the reference site lies inside a test region — a
    * `#[cfg(test)]`/`mod tests` block or a `#[test]` fn. Test code deliberately
    * depends "upward" (a core unit test driving the real sim integrator), so

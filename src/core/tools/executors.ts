@@ -620,5 +620,86 @@ export function createExecutors(deps: ExecutorDeps): Executors {
         collisionNote
       );
     },
+
+    async grep_symbols(input) {
+      const symbols = await store.grepSymbols(input.pattern, {
+        isRegex: input.isRegex,
+        kinds: input.kinds as SymbolRecord['kind'][] | undefined,
+        pathPrefix: input.pathPrefix,
+        limit: input.limit,
+      });
+      if (symbols.length === 0) return `No symbols match "${input.pattern}"${input.isRegex ? ' (regex)' : ''}.`;
+      return `${symbols.length} symbol(s) match "${input.pattern}"${input.isRegex ? ' (regex)' : ''}:\n` + symbols.map((s) => `  - ${cite(s)}`).join('\n');
+    },
+
+    async context_pack(input) {
+      if (!input.name && !input.path) return 'context_pack needs `name` or `path`.';
+
+      if (input.path && !input.name) {
+        const symbols = await store.outline(input.path);
+        const map = await moduleMap(store);
+        const key = moduleKeyOf(input.path, {});
+        const dependsOn = map.edges.filter((e) => e.from === key).slice(0, input.limit);
+        const dependedOnBy = map.edges.filter((e) => e.to === key).slice(0, input.limit);
+        const lines = [`Context pack for ${input.path} (module ${key}):`];
+        lines.push(symbols.length ? `\n${symbols.length} symbol(s):\n` + symbols.slice(0, input.limit).map((s) => `  - ${cite(s)}`).join('\n') : '\nNo indexed symbols.');
+        lines.push(dependsOn.length ? `\nDepends on:\n` + dependsOn.map((e) => `  - ${e.to}  (×${e.weight})`).join('\n') : '\nDepends on nothing.');
+        lines.push(dependedOnBy.length ? `\nDepended on by:\n` + dependedOnBy.map((e) => `  - ${e.from}  (×${e.weight})`).join('\n') : '\nNothing depends on this module.');
+        return lines.join('\n');
+      }
+
+      const r = await resolveOne(store, input.name!, input.path);
+      if ('message' in r) return r.message;
+      const sym = r.sym;
+
+      const [callerEdges, calleeEdges, hierarchyRes, map] = await Promise.all([
+        store.edgesTo([sym.id], CALL_KINDS),
+        store.edgesFrom([sym.id], CALL_KINDS),
+        hierarchy(store, sym.id, 2),
+        moduleMap(store),
+      ]);
+      const callerIds = callerEdges.slice(0, input.limit).map((e) => e.fromId);
+      const calleeIds = calleeEdges.slice(0, input.limit).map((e) => e.toId);
+      const [callerSyms, calleeSyms] = await Promise.all([store.getMany(callerIds), store.getMany(calleeIds)]);
+      const key = moduleKeyOf(sym.file, {});
+      const dependsOn = map.edges.filter((e) => e.from === key).slice(0, input.limit);
+      const dependedOnBy = map.edges.filter((e) => e.to === key).slice(0, input.limit);
+
+      const lines = [`Context pack for ${cite(sym)}:`];
+      lines.push(
+        callerEdges.length
+          ? `\n${callerEdges.length} caller(s):\n` +
+              callerEdges
+                .slice(0, input.limit)
+                .map((e) => callerSyms.get(e.fromId))
+                .filter((s): s is SymbolRecord => !!s)
+                .map((s) => `  - ${cite(s)}`)
+                .join('\n')
+          : '\nNo callers.'
+      );
+      lines.push(
+        calleeEdges.length
+          ? `\n${calleeEdges.length} callee(s):\n` +
+              calleeEdges
+                .slice(0, input.limit)
+                .map((e) => calleeSyms.get(e.toId))
+                .filter((s): s is SymbolRecord => !!s)
+                .map((s) => `  - ${cite(s)}`)
+                .join('\n')
+          : '\nNo callees.'
+      );
+      if (hierarchyRes && (hierarchyRes.ancestors.length > 0 || hierarchyRes.descendants.length > 0)) {
+        if (hierarchyRes.ancestors.length > 0) {
+          lines.push(`\nExtends/implements:\n` + hierarchyRes.ancestors.slice(0, input.limit).map((a) => `  - ${cite(a.symbol)}`).join('\n'));
+        }
+        if (hierarchyRes.descendants.length > 0) {
+          lines.push(`\nExtended/implemented by:\n` + hierarchyRes.descendants.slice(0, input.limit).map((d) => `  - ${cite(d.symbol)}`).join('\n'));
+        }
+      }
+      lines.push(`\nModule ${key}:`);
+      lines.push(dependsOn.length ? `  depends on: ` + dependsOn.map((e) => e.to).join(', ') : '  depends on nothing.');
+      lines.push(dependedOnBy.length ? `  depended on by: ` + dependedOnBy.map((e) => e.from).join(', ') : '  depended on by nothing.');
+      return lines.join('\n');
+    },
   };
 }

@@ -15,7 +15,7 @@
  * an old index — drop and recreate. The index is derived data, never migrated.
  */
 
-export const SCHEMA_VERSION = 8;
+export const SCHEMA_VERSION = 9;
 
 export const SCHEMA_DDL: readonly string[] = [
   `CREATE TABLE IF NOT EXISTS File(
@@ -67,6 +67,7 @@ export const SCHEMA_DDL: readonly string[] = [
      line INTEGER DEFAULT 0,
      methodCall INTEGER DEFAULT 0,
      selfReceiver INTEGER DEFAULT 0,
+     receiverType TEXT DEFAULT NULL,
      inTest INTEGER DEFAULT 0
    )`,
   // Names a file binds from OUTSIDE the workspace (`import { expect } from

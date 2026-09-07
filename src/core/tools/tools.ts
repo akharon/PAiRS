@@ -206,6 +206,35 @@ export const codeToolSchemas = {
         ),
     }),
   },
+
+  grep_symbols: {
+    description:
+      'Search symbol names, qualified names, signatures, and doc text by substring or ' +
+      'regex, returning graph citations (not file contents). Use when you know roughly ' +
+      "what you're looking for but not the exact symbol name — a plain-text search over " +
+      'the index instead of grep-and-Read over the filesystem.',
+    input: z.object({
+      pattern: z.string().min(1).describe('Substring (default) or regex to match against name/qualified/signature/doc.'),
+      isRegex: z.boolean().default(false).describe('Treat `pattern` as a regular expression instead of a plain substring.'),
+      kinds: z.array(symbolKind).optional().describe('Restrict to these symbol kinds.'),
+      pathPrefix: z.string().optional().describe('Limit to files under this workspace-relative directory.'),
+      limit: z.number().int().min(1).max(100).default(30),
+    }),
+  },
+
+  context_pack: {
+    description:
+      'One assembled bundle for a symbol or file: its definition, direct callers, direct ' +
+      'callees, type hierarchy (if a type), and enclosing module boundary. Composes ' +
+      'find_symbol/who_calls/hierarchy/module_map into a single call — use this instead ' +
+      'of making all of those calls separately when you need broad context on one symbol ' +
+      'or file fast.',
+    input: z.object({
+      name: z.string().min(1).optional().describe('Symbol name (bare or qualified). Provide this or `path`.'),
+      path: z.string().min(1).optional().describe('Workspace-relative file path, for a file-level pack. Provide this or `name`.'),
+      limit: z.number().int().min(1).max(50).default(10).describe('Max items per section (callers, callees, etc).'),
+    }),
+  },
 } as const;
 
 export type CodeToolName = keyof typeof codeToolSchemas;

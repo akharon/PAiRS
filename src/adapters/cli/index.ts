@@ -18,10 +18,23 @@ import { nodeListNamedFiles, nodeListWorkspaceFiles, nodeReadFile, nodeWatchWork
 import { WatchQueue } from '../../core/indexer/watchQueue';
 import { SqliteCodeStore } from '../../store/graph/sqliteCodeStore';
 import { nodeSqlDriver } from '../../store/graph/sqliteDriver';
-import { impact, IMPACT_EDGE_KINDS } from '../../core/analyze/impact';
+import { IMPACT_EDGE_KINDS } from '../../core/analyze/impact';
 import { createExecutors } from '../../core/tools/executors';
-import { codeToolSchemas, type CodeToolName } from '../../core/tools/tools';
-import type { EdgeKind } from '../../core/indexer/types';
+import { codeToolSchemas, type CodeToolInput, type CodeToolName } from '../../core/tools/tools';
+import {
+  jsonAnalyze,
+  jsonContextPack,
+  jsonFileDeps,
+  jsonFindSymbol,
+  jsonGetSymbol,
+  jsonGrepSymbols,
+  jsonHierarchy,
+  jsonImpact,
+  jsonModuleMap,
+  jsonOutline,
+  jsonRenameSymbol,
+  jsonWhoCalls,
+} from './json';
 
 const MAX_READ_BYTES = 1024 * 1024;
 
@@ -37,6 +50,12 @@ const TOOL_ARG_SPECS: Record<CodeToolName, string[]> = {
   module_map: ['boundary'],
   analyze: ['kind', 'pathPrefix'],
   rename_symbol: ['name', 'newName', 'path', 'includeFuzzy'],
+  grep_symbols: ['pattern', 'pathPrefix'],
+  // No positional `path`: context_pack takes EITHER name or path, and `name`
+  // sits first, so `pairs context_pack somefile.ts` would try to resolve
+  // "somefile.ts" as a symbol name. Use --path to pass a file instead — see
+  // the --path handling below.
+  context_pack: ['name', 'limit'],
 };
 
 /** Fields that are numbers in the zod schema — CLI positionals arrive as strings. */
@@ -45,35 +64,39 @@ const NUMERIC_FIELDS = new Set(['depth', 'limit', 'offset']);
 /** Fields that are booleans in the zod schema — CLI positionals arrive as strings. */
 const BOOLEAN_FIELDS = new Set(['includeFuzzy', 'includeTests']);
 
-/**
- * `pairs impact --json`'s structured output — a compatibility contract with
- * scripts that depended on the pre-existing `case 'impact':` shape. The
- * ambiguous/miss shapes come straight from `store.lookup`, which distinguishes
- * them more richly than executors.ts's `resolveOne` (that helper collapses
- * both into one prose message, so it can't reproduce this).
- */
-async function renderImpactJson(
+/** Dispatches to the per-tool JSON builder in ./json — one shape per tool, built from the same store/analyze calls the prose executors use. */
+async function renderToolJson(
   store: SqliteCodeStore,
-  input: { name: string; depth: number; includeTests?: boolean; kinds?: readonly EdgeKind[] }
-): Promise<string> {
-  const hit = await store.lookup(input.name);
-  if (!Array.isArray(hit)) {
-    // AmbiguousSymbol — report candidates so the caller can qualify.
-    return JSON.stringify({ ambiguous: hit }, null, 2);
+  root: string,
+  toolName: CodeToolName,
+  data: unknown
+): Promise<unknown> {
+  switch (toolName) {
+    case 'find_symbol':
+      return jsonFindSymbol(store, data as CodeToolInput<'find_symbol'>);
+    case 'get_symbol':
+      return jsonGetSymbol(store, data as CodeToolInput<'get_symbol'>);
+    case 'outline':
+      return jsonOutline(store, data as CodeToolInput<'outline'>);
+    case 'impact':
+      return jsonImpact(store, data as CodeToolInput<'impact'>);
+    case 'hierarchy':
+      return jsonHierarchy(store, data as CodeToolInput<'hierarchy'>);
+    case 'who_calls':
+      return jsonWhoCalls(store, data as CodeToolInput<'who_calls'>);
+    case 'file_deps':
+      return jsonFileDeps(store, data as CodeToolInput<'file_deps'>);
+    case 'module_map':
+      return jsonModuleMap(store, data as CodeToolInput<'module_map'>);
+    case 'analyze':
+      return jsonAnalyze(store, data as CodeToolInput<'analyze'>);
+    case 'rename_symbol':
+      return jsonRenameSymbol(store, root, data as CodeToolInput<'rename_symbol'>);
+    case 'grep_symbols':
+      return jsonGrepSymbols(store, data as CodeToolInput<'grep_symbols'>);
+    case 'context_pack':
+      return jsonContextPack(store, data as CodeToolInput<'context_pack'>);
   }
-  if (hit.length === 0) {
-    return JSON.stringify({ dependants: [], note: 'no such symbol' }, null, 2);
-  }
-  // Same empty-array rule as the prose path: [] means "unrestricted", never
-  // "no kinds" — otherwise --json --kinds would emit an empty dependant list.
-  const result = await impact(
-    store,
-    hit[0]!.id,
-    input.depth,
-    input.kinds?.length ? input.kinds : undefined,
-    input.includeTests ?? true
-  );
-  return JSON.stringify(result, null, 2);
 }
 
 /** Commands that only ever read the graph — safe to serve from a snapshot copy. */
@@ -123,13 +146,18 @@ async function main(): Promise<void> {
   const executors = createExecutors({ store, root, readSource });
 
   try {
-    // --json is stripped here (same place as --include-fuzzy) so it's
-    // available to every tool the generic dispatch handles, but today only
-    // `impact` has a defined structured shape to emit — see renderImpactJson.
-    // Every other tool keeps rendering prose regardless of the flag.
+    // JSON is the CLI's default output (Step 5): a script or another agent
+    // process invoking `pairs` should get parseable structured data without
+    // having to remember a flag. `--naked` opts into the original prose
+    // rendering (executors.ts) instead — the name signals "no JSON wrapper",
+    // not "less output". `--json` is kept as a harmless no-op alias so
+    // existing `pairs impact --json` invocations keep working unchanged now
+    // that JSON is the default anyway.
+    const nakedIdx = rest.indexOf('--naked');
+    const naked = nakedIdx !== -1;
+    if (naked) rest.splice(nakedIdx, 1);
     const jsonIdx = rest.indexOf('--json');
-    const asJson = jsonIdx !== -1;
-    if (asJson) rest.splice(jsonIdx, 1);
+    if (jsonIdx !== -1) rest.splice(jsonIdx, 1);
 
     if ((codeToolSchemas as Record<string, unknown>)[command] !== undefined) {
       const toolName = command as CodeToolName;
@@ -151,6 +179,26 @@ async function main(): Promise<void> {
         if (idx !== -1) {
           rest.splice(idx, 1);
           raw.preview = true;
+        }
+      }
+      if (toolName === 'grep_symbols') {
+        const idx = rest.indexOf('--regex');
+        if (idx !== -1) {
+          rest.splice(idx, 1);
+          raw.isRegex = true;
+        }
+      }
+      if (toolName === 'context_pack') {
+        const idx = rest.indexOf('--path');
+        if (idx !== -1) {
+          const value = rest[idx + 1];
+          if (value === undefined || value.startsWith('--')) {
+            process.stderr.write('--path needs a workspace-relative file path.\n');
+            process.exitCode = 1;
+            return;
+          }
+          rest.splice(idx, 2);
+          raw.path = value;
         }
       }
       // `kinds` is a list, so it cannot ride the positional mapping below
@@ -196,27 +244,25 @@ async function main(): Promise<void> {
       }
       const parsed = codeToolSchemas[toolName].input.safeParse(raw);
       if (!parsed.success) {
-        // [--json] only applies to `impact` — see the note where asJson is handled below.
-        const jsonSuffix =
-          toolName === 'impact' ? ' [--kinds CALLS,READS] [--json]' : toolName === 'find_symbol' ? ' [--preview]' : '';
-        process.stderr.write(`Usage: pairs ${toolName} ${fields.map((f) => `<${f}>`).join(' ')}${jsonSuffix}\n`);
+        const suffix =
+          toolName === 'impact'
+            ? ' [--kinds CALLS,READS] [--naked]'
+            : toolName === 'find_symbol'
+              ? ' [--preview] [--naked]'
+              : toolName === 'grep_symbols'
+                ? ' [--regex] [--naked]'
+                : toolName === 'context_pack'
+                  ? ' [--path <file>] [--naked]'
+                  : ' [--naked]';
+        process.stderr.write(`Usage: pairs ${toolName} ${fields.map((f) => `<${f}>`).join(' ')}${suffix}\n`);
         process.stderr.write(`${parsed.error.message}\n`);
         process.exitCode = 1;
-      } else if (asJson && toolName === 'impact') {
-        // Compatibility contract: this must emit BYTE-IDENTICAL JSON to the
-        // pre-existing `case 'impact':` shape below, including its own
-        // ambiguous/miss shapes — `resolveOne` (used by the prose path)
-        // collapses both into one message string, so it can't reproduce them.
-        process.stdout.write(`${await renderImpactJson(store, parsed.data as { name: string; depth: number; includeTests?: boolean; kinds?: readonly EdgeKind[] })}\n`);
-      } else {
-        // `--json` has a defined structured shape ONLY for `impact` today (see
-        // renderImpactJson above). A silently-ignored flag is worse than an
-        // error for an agent: it asks for JSON, gets prose, and either
-        // misparses it or burns a turn discovering the flag did nothing — so
-        // say so on stderr rather than failing silently.
-        if (asJson) process.stderr.write('--json is only supported for `impact`; printing text.\n');
+      } else if (naked) {
         const out = await (executors[toolName] as (input: unknown) => Promise<string>)(parsed.data);
         process.stdout.write(`${out}\n`);
+      } else {
+        const data = await renderToolJson(store, root, toolName, parsed.data);
+        process.stdout.write(`${JSON.stringify(data, null, 2)}\n`);
       }
       return;
     }
@@ -322,25 +368,27 @@ async function main(): Promise<void> {
         break;
       }
       case 'files': {
-        // pairs files [pattern] [--paths] — list/search indexed non-source filenames.
+        // pairs files [pattern] [--paths] [--naked] — list/search indexed non-source filenames.
         // pattern is a filename glob (*.txt, Pic*.svg); --paths also matches full paths.
         const withPaths = rest.includes('--paths');
         const pattern = rest.find((a) => a !== '--paths');
         const files = await store.findNamedFiles(pattern, { withPaths });
-        if (files.length === 0) {
-          process.stdout.write('No matching files.\n');
+        if (naked) {
+          if (files.length === 0) {
+            process.stdout.write('No matching files.\n');
+            break;
+          }
+          process.stdout.write(files.map((f) => f.path).join('\n') + '\n');
           break;
         }
-        process.stdout.write(files.map((f) => f.path).join('\n') + '\n');
+        process.stdout.write(`${JSON.stringify({ pattern: pattern ?? null, files }, null, 2)}\n`);
         break;
       }
       default:
-        // [--json] scoped to impact: it's the only tool with a defined
-        // structured shape (see renderImpactJson) — every other tool ignores
-        // the flag (with a stderr warning, not silently).
+        // Every tool defaults to JSON output (see renderToolJson above);
+        // --naked switches to the original prose rendering.
         process.stderr.write(
-          `Usage: pairs <index|query|stats|watch|files|read|${Object.keys(codeToolSchemas).join('|')}>\n` +
-            `       pairs impact <name> [depth] [--json]\n`
+          `Usage: pairs <index|query|stats|watch|files|read|${Object.keys(codeToolSchemas).join('|')}> [...args] [--naked]\n`
         );
         process.exitCode = 1;
     }

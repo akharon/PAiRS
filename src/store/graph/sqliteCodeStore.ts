@@ -522,7 +522,8 @@ export class SqliteCodeStore implements CodeStore {
         extraction.path,
         externalNames,
         ref.selfReceiver ?? false,
-        callerQualified
+        callerQualified,
+        ref.receiverType ?? null
       );
       if (resolved === 'unresolved') {
         pending.push(ref);
@@ -566,8 +567,8 @@ export class SqliteCodeStore implements CodeStore {
 
     if (pending.length > 0) {
       const insPending = this.stmt(
-        `INSERT INTO PendingRef(fileId, fromSymbolId, name, qualifiedName, kind, line, methodCall, selfReceiver, inTest)
-         VALUES(?,?,?,?,?,?,?,?,?)`
+        `INSERT INTO PendingRef(fileId, fromSymbolId, name, qualifiedName, kind, line, methodCall, selfReceiver, receiverType, inTest)
+         VALUES(?,?,?,?,?,?,?,?,?,?)`
       );
       for (const ref of pending) {
         insPending.run(
@@ -579,6 +580,7 @@ export class SqliteCodeStore implements CodeStore {
           ref.line,
           ref.methodCall === true ? 1 : 0,
           ref.selfReceiver === true ? 1 : 0,
+          ref.receiverType ?? null,
           ref.inTest === true ? 1 : 0
         );
       }
@@ -630,16 +632,33 @@ export class SqliteCodeStore implements CodeStore {
     fromPath: string | null = null,
     externalNames?: ReadonlySet<string>,
     selfReceiver = false,
-    callerQualified: string | null = null
+    callerQualified: string | null = null,
+    receiverType: string | null = null,
+    /**
+     * True only when every file in the workspace has already declared its
+     * symbols — i.e. during resolvePending's full pass, never during
+     * applyExtraction's inline per-file resolve. Full-index runs files
+     * through applyExtraction IN PARALLEL, so "unique workspace-wide" is
+     * meaningless mid-pass: a method call can land on whichever same-named
+     * method happened to index first, before its true rival (or the
+     * receiver's real declared type) exists yet — and unlike a parked ref, a
+     * wrongly `resolved` edge is never revisited. Both the Step 2.1
+     * uniqueness gate and the Step 2.3 declared-type rung below require this.
+     */
+    fullPass = false
   ): { ids: number[]; confidence: 'resolved' | 'fuzzy' } | 'unresolved' {
     const idx = this.loadSymbolIndex();
 
     /**
      * Confidence gate (R1: `resolved` must be trustworthy — rules only fail CI
      * on confirmed findings):
-     *  1. A bare METHOD call (`x.foo()`) caps at `fuzzy` however few candidates
-     *     share the name — the receiver's static type is unknown and the true
-     *     target is often outside the graph (derive impls, trait defaults).
+     *  1. A bare METHOD call (`x.foo()`) caps at `fuzzy` unless its one
+     *     candidate's name is unique workspace-wide (`idx.byName` holding a
+     *     single entry for that name) — the receiver's static type is still
+     *     unknown, but a name no other symbol shares cannot land on a
+     *     different target than the one candidate, so `resolved` is safe.
+     *     Any other case (multiple namesakes anywhere) stays capped: the true
+     *     target may be outside the graph (derive impls, trait defaults).
      *  2. A resolution landing in a DIFFERENT crate caps at `fuzzy` unless a
      *     `use` specifier corroborates it. Same-named symbols across sibling
      *     crates otherwise resolve "confirmed" onto the wrong crate: on ripgrep
@@ -647,7 +666,10 @@ export class SqliteCodeStore implements CodeStore {
      */
     const gate = (out: { ids: number[]; confidence: 'resolved' | 'fuzzy' }): { ids: number[]; confidence: 'resolved' | 'fuzzy' } => {
       if (out.confidence === 'fuzzy') return out;
-      if (methodCall) return { ids: out.ids, confidence: 'fuzzy' };
+      if (methodCall) {
+        const uniqueWorkspaceWide = fullPass && out.ids.length === 1 && (idx.byName.get(name)?.length ?? 0) === 1;
+        if (!uniqueWorkspaceWide) return { ids: out.ids, confidence: 'fuzzy' };
+      }
       if (fromPath) {
         const crateOf = (p: string): string => {
           const segs = p.split('/');
@@ -696,6 +718,40 @@ export class SqliteCodeStore implements CodeStore {
           if (candidates.length === 1) return { ids: [...candidates], confidence: 'resolved' };
           return { ids: [...candidates], confidence: 'fuzzy' };
         }
+      }
+    }
+
+    // A plain (non-self) method call that could benefit from full-workspace
+    // knowledge — either Step 2.1's uniqueness gate or Step 2.3's declared-
+    // type rung — is parked during the inline per-file pass rather than
+    // resolved fuzzy right away, so it gets one real shot at `resolved` once
+    // resolvePending's full pass runs with fullPass=true. Resolving it fuzzy
+    // now would be final: an edge, once written, is never revisited.
+    if (methodCall && !fullPass) return 'unresolved';
+
+    // Rung 0.5: declared local type (Step 2.3, TypeScript only). A method
+    // call whose receiver is a parameter or `const`/`let` with a written
+    // type annotation (`function f(x: Widget) { x.foo() }`) has a known
+    // static type, so looking `foo` up among that type's own members is a
+    // genuine disambiguation — unlike Rung 0 this doesn't require the
+    // receiver to BE the enclosing type, and unlike the Step 2.1 workspace
+    // uniqueness gate it can resolve a name that is not unique workspace-wide,
+    // as long as the type has exactly one member by that name.
+    //
+    // Only trusted once every file has declared (see `fullPass`) — during the
+    // parallel inline pass, "type known" / "type has no such member" are both
+    // unreliable: the type's own file may simply not have indexed yet.
+    if (methodCall && receiverType && fullPass) {
+      const typeKnown = idx.byQualified.has(receiverType) || idx.byName.has(receiverType);
+      if (typeKnown) {
+        const candidates = idx.byQualified.get(`${receiverType}.${name}`);
+        if (candidates !== undefined) {
+          return { ids: [...candidates], confidence: candidates.length === 1 ? 'resolved' : 'fuzzy' };
+        }
+        // Type is known but has no such member: annotation may be stale or
+        // the method is inherited — fall through to the ordinary ladder.
+      } else {
+        return 'unresolved';
       }
     }
 
@@ -772,14 +828,21 @@ export class SqliteCodeStore implements CodeStore {
     return 'unresolved';
   }
 
+  /**
+   * `fullPass` defaults true: every call site to this method runs after the
+   * rest of the workspace has already declared (either the full-index worker
+   * pool has finished, or — for a single-file incremental re-index — every
+   * OTHER file was already indexed in a prior run). Only applyExtraction's
+   * inline resolve, mid-parallel-pass, needs `fullPass: false`.
+   */
   async resolvePending(namesHint?: string[], opts?: { retireUnresolved?: boolean }): Promise<number> {
     const rows = namesHint?.length
       ? this.all(
-          `SELECT id, fileId, fromSymbolId, name, qualifiedName, kind, line, methodCall, selfReceiver, inTest
+          `SELECT id, fileId, fromSymbolId, name, qualifiedName, kind, line, methodCall, selfReceiver, receiverType, inTest
            FROM PendingRef WHERE name IN (${placeholders(namesHint.length)})`,
           ...namesHint
         )
-      : this.all(`SELECT id, fileId, fromSymbolId, name, qualifiedName, kind, line, methodCall, selfReceiver, inTest FROM PendingRef`);
+      : this.all(`SELECT id, fileId, fromSymbolId, name, qualifiedName, kind, line, methodCall, selfReceiver, receiverType, inTest FROM PendingRef`);
     if (rows.length === 0) return 0;
 
     const idx = this.loadSymbolIndex();
@@ -871,7 +934,9 @@ export class SqliteCodeStore implements CodeStore {
         fromPath,
         externalNames,
         Boolean(r.selfReceiver),
-        callerQualified
+        callerQualified,
+        r.receiverType ? String(r.receiverType) : null,
+        true
       );
       if (resolved === 'unresolved') {
         // Full-index pass: every file has declared, so this names something
@@ -1004,6 +1069,56 @@ export class SqliteCodeStore implements CodeStore {
 
   async membersOf(parentId: number): Promise<SymbolRecord[]> {
     return this.all(`SELECT ${SYMBOL_COLS} FROM Symbol s WHERE s.parentId = ? ORDER BY s.startLine`, parentId).map(toSymbolRecord);
+  }
+
+  async grepSymbols(
+    pattern: string,
+    opts?: { isRegex?: boolean; kinds?: SymbolKind[]; pathPrefix?: string; limit?: number }
+  ): Promise<SymbolRecord[]> {
+    const conds: string[] = [];
+    const params: unknown[] = [];
+    if (opts?.kinds?.length) {
+      conds.push(`s.kind IN (${placeholders(opts.kinds.length)})`);
+      params.push(...opts.kinds);
+    }
+    if (opts?.pathPrefix) {
+      conds.push(`s.file LIKE ? ESCAPE '\\'`);
+      params.push(`${opts.pathPrefix.replace(/[\\%_]/g, (c) => `\\${c}`)}%`);
+    }
+    const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+    const rows = this.all(`SELECT ${SYMBOL_COLS} FROM Symbol s ${where} ORDER BY s.file, s.startLine`, ...params);
+    const limit = opts?.limit ?? 50;
+    // No native regex/substring index over name/qualified/signature/doc — the
+    // Symbol table is already small enough (loadSymbolIndex mirrors the whole
+    // thing in memory elsewhere in this file) that a JS filter over the SQL
+    // pre-filter above is simpler and no slower than a LIKE-based approximation
+    // that would then need the same JS pass to apply regex semantics anyway.
+    let matcher: (text: string) => boolean;
+    if (opts?.isRegex) {
+      let re: RegExp;
+      try {
+        re = new RegExp(pattern, 'i');
+      } catch (err) {
+        throw new Error(`Invalid regex: ${(err as Error).message}`);
+      }
+      matcher = (text) => re.test(text);
+    } else {
+      const needle = pattern.toLowerCase();
+      matcher = (text) => text.toLowerCase().includes(needle);
+    }
+    const out: SymbolRecord[] = [];
+    for (const r of rows) {
+      const rec = toSymbolRecord(r);
+      // Matched per-field, not one joined string: a regex like `^getFoo$`
+      // must anchor to a single field (the name), not to the start/end of a
+      // multi-line join of name+qualified+signature+doc.
+      const fields = [rec.name, rec.qualified, rec.signature ?? '', rec.doc ?? ''];
+      if (fields.some(matcher)) {
+        out.push(rec);
+        if (out.length >= limit) break;
+      }
+    }
+    return out;
   }
 
   // -- Graph queries -----------------------------------------------------------

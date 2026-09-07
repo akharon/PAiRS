@@ -57,6 +57,11 @@ function selfCall(name: string, fromIndex: number): RawRef {
   return { fromIndex, name, qualifiedName: null, kind: 'CALLS', line: 1, methodCall: true, selfReceiver: true };
 }
 
+/** A `x.name()` call whose receiver `x` has a written declared type (Step 2.3, TS only). */
+function typedReceiverCall(name: string, receiverType: string): RawRef {
+  return { fromIndex: 0, name, qualifiedName: null, kind: 'CALLS', line: 1, methodCall: true, receiverType };
+}
+
 describe('resolveOneRef ladder', () => {
   let store: CodeStore;
 
@@ -71,9 +76,19 @@ describe('resolveOneRef ladder', () => {
     await store.applyExtraction(extraction('util.rs', [sym('helper', 'helper', 'function')]));
   });
 
-  /** Confidence of the single CALLS edge out of `file`, or 'unresolved'. */
+  /**
+   * Confidence of the single CALLS edge out of `file`, or 'unresolved'.
+   * Follows applyExtraction with a resolvePending pass: a plain method call
+   * always parks during applyExtraction's inline resolve now (fullPass is
+   * only true for resolvePending — see resolveOneRef), since full-index runs
+   * files in parallel and "unique/known workspace-wide" is unreliable until
+   * every file has declared. These tests set up the rest of the workspace in
+   * beforeAll, so by the time resolvePending runs here everything relevant is
+   * already known — the same shape a real fullIndex always resolves through.
+   */
   async function confidenceOf(file: string, ref: RawRef): Promise<EdgeConfidence | 'unresolved'> {
     await store.applyExtraction(extraction(file, [], [ref]));
+    await store.resolvePending();
     const rows = await store.query(
       `SELECT e.confidence AS conf FROM Edge e JOIN Symbol a ON a.id = e.src WHERE e.kind = 'CALLS' AND a.qualified = '${file}'`
     );
@@ -100,13 +115,23 @@ describe('resolveOneRef ladder', () => {
     expect(await confidenceOf('d.rs', call('new', 'Vec3::new'))).toBe('unresolved');
   });
 
-  // R1 leak fix: a bare METHOD call (`x.helper()`) is capped at fuzzy even
-  // when only one workspace symbol shares the name — the receiver's type is
-  // unknown and the true target is often a derive impl / stdlib method not in
-  // the graph at all. On ripgrep, `.clone()` in globset resolved "confirmed"
-  // onto ignore's `Error::clone`, leaking 207 false confirmed layering
-  // violations into `pairs check`.
-  it('caps a bare method call at fuzzy even with a unique name match', async () => {
+  // Step 2.1: a bare METHOD call (`x.helper()`) resolves when its one
+  // candidate's name is unique across the whole workspace — no other symbol
+  // anywhere shares the name, so the receiver's unknown type cannot steer
+  // the call onto a different target. This does reopen part of the R1 leak
+  // (a common name like `.clone()` that happens to be workspace-unique would
+  // also resolve here) — accepted per Step 2.1, and guarded against
+  // regressing by the real-corpus fuzzy-rate ratchet in precision.test.ts
+  // rather than a name blocklist.
+  it('resolves a bare method call when its one candidate is unique workspace-wide', async () => {
+    await store.applyExtraction(extraction('m.rs', [sym('helper', 'helper', 'function')]));
+    expect(await confidenceOf('m.rs', { ...call('helper', null), methodCall: true })).toBe('resolved');
+  });
+
+  // Still capped when more than one workspace symbol shares the bare name —
+  // uniqueness, not the presence of a candidate, is what justifies trust.
+  it('caps a bare method call at fuzzy when the name is not unique workspace-wide', async () => {
+    await store.applyExtraction(extraction('other.rs', [sym('helper', 'Other::helper')]));
     expect(await confidenceOf('m.rs', { ...call('helper', null), methodCall: true })).toBe('fuzzy');
   });
 
@@ -179,11 +204,31 @@ describe('resolveOneRef ladder', () => {
 
   // The shadowing rung must not swallow the method-call cap: there the
   // receiver's static type is unknown, so a same-file namesake is coincidence
-  // rather than lexical scope.
-  it('still caps a same-file method call at fuzzy', async () => {
+  // rather than lexical scope. It still falls through to the ordinary
+  // (Step 2.1 gated) ladder, so a same-file name that is also unique
+  // workspace-wide resolves there rather than staying fuzzy.
+  it('does not resolve a same-file method call via the shadowing rung, but the ordinary ladder still can', async () => {
     await store.applyExtraction(
       extraction('src/recv.rs', [sym('flush', 'Buf::flush')], [{ ...call('flush', null), methodCall: true }])
     );
+    await store.resolvePending();
+    const rows = await store.query(
+      `SELECT e.confidence AS conf FROM Edge e JOIN Symbol a ON a.id = e.src
+       WHERE e.kind = 'CALLS' AND a.qualified = 'src/recv.rs'`
+    );
+    expect(String(rows[0]!.conf)).toBe('resolved');
+  });
+
+  // Same-file method call whose name is NOT unique workspace-wide: the
+  // shadowing rung is skipped (methodCall excludes it) and the ordinary
+  // ladder's Step 2.1 gate caps it at fuzzy since more than one workspace
+  // symbol shares the name.
+  it('caps a same-file method call at fuzzy when the name is not unique workspace-wide', async () => {
+    await store.applyExtraction(extraction('other.rs', [sym('flush', 'Other::flush')]));
+    await store.applyExtraction(
+      extraction('src/recv.rs', [sym('flush', 'Buf::flush')], [{ ...call('flush', null), methodCall: true }])
+    );
+    await store.resolvePending();
     const rows = await store.query(
       `SELECT e.confidence AS conf FROM Edge e JOIN Symbol a ON a.id = e.src
        WHERE e.kind = 'CALLS' AND a.qualified = 'src/recv.rs'`
@@ -214,6 +259,7 @@ describe('resolveOneRef ladder', () => {
     await store.applyExtraction(extraction('src/other.ts', [sym('Other', 'Other', 'class'), sym('helper', 'Other.helper', 'method')]));
     const callerSym = sym('greet', 'Lonely.greet', 'method');
     await store.applyExtraction(extraction('src/lonely.ts', [sym('Lonely', 'Lonely', 'class'), callerSym], [selfCall('helper', 2)]));
+    await store.resolvePending();
     const rows = await store.query(
       `SELECT b.qualified AS dst, e.confidence AS conf FROM Edge e
        JOIN Symbol a ON a.id = e.src JOIN Symbol b ON b.id = e.dst
@@ -229,6 +275,7 @@ describe('resolveOneRef ladder', () => {
     await store.applyExtraction(
       extraction('src/plain.ts', [], [{ ...call('helper', null), methodCall: true, selfReceiver: false }])
     );
+    await store.resolvePending();
     const rows = await store.query(
       `SELECT e.confidence AS conf FROM Edge e JOIN Symbol a ON a.id = e.src WHERE e.kind = 'CALLS' AND a.qualified = 'src/plain.ts'`
     );
@@ -248,6 +295,42 @@ describe('resolveOneRef ladder', () => {
     );
     expect(rows.map((r) => String(r.dst))).toEqual(['Greeter::helper']);
     expect(String(rows[0]!.conf)).toBe('resolved');
+  });
+
+  // Step 2.3: a method call whose receiver has a declared type resolves to
+  // that type's own member, even though `render` is not unique workspace-wide
+  // (a same-named method exists on an unrelated type) — the Step 2.1
+  // workspace-uniqueness gate alone could not resolve this case.
+  it('resolves a typed-receiver method call to that type’s own member, even when the name is not workspace-unique', async () => {
+    await store.applyExtraction(
+      extraction('src/other-widget.ts', [sym('OtherWidget', 'OtherWidget', 'class'), sym('render', 'OtherWidget.render', 'method')])
+    );
+    await store.applyExtraction(
+      extraction('src/widget.ts', [sym('Widget', 'Widget', 'class'), sym('render', 'Widget.render', 'method')])
+    );
+    await store.applyExtraction(extraction('src/app.ts', [], [typedReceiverCall('render', 'Widget')]));
+    await store.resolvePending();
+    const rows = await store.query(
+      `SELECT b.qualified AS dst, e.confidence AS conf FROM Edge e
+       JOIN Symbol a ON a.id = e.src JOIN Symbol b ON b.id = e.dst
+       WHERE e.kind = 'CALLS' AND a.qualified = 'src/app.ts'`
+    );
+    expect(rows.map((r) => String(r.dst))).toEqual(['Widget.render']);
+    expect(String(rows[0]!.conf)).toBe('resolved');
+  });
+
+  // No member by that name on the declared type: falls through to the
+  // ordinary (capped) ladder rather than treating the annotation as proof of
+  // an edge that doesn't exist.
+  it('falls through to the ordinary ladder when the declared type has no matching member', async () => {
+    await store.applyExtraction(extraction('src/empty.ts', [sym('Empty', 'Empty', 'class')]));
+    await store.applyExtraction(extraction('src/app2.ts', [], [typedReceiverCall('missing', 'Empty')]));
+    await store.resolvePending();
+    const rows = await store.query(
+      `SELECT e.confidence AS conf FROM Edge e JOIN Symbol a ON a.id = e.src WHERE e.kind = 'CALLS' AND a.qualified = 'src/app2.ts'`
+    );
+    // No workspace symbol named `missing` at all → unresolved (parked), not an edge.
+    expect(rows.length).toBe(0);
   });
 });
 
