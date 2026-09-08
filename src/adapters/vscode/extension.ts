@@ -36,6 +36,7 @@ import type { Indexer } from '../../core/indexer/codeIndexer';
 import { moduleMap } from '../../core/analyze/moduleMap';
 import { moduleMapHtml } from '../../core/analyze/moduleMapHtml';
 import { createExecutors } from '../../core/tools/executors';
+import { collectDiffHunks } from '../../platform/gitDiff';
 import { codeToolSchemas } from '../../core/tools/tools';
 import type { CodeToolInput, CodeToolName } from '../../core/tools/tools';
 import { writeSkillFiles } from './skills';
@@ -134,7 +135,14 @@ function registerLmTools(ws: Workspace): vscode.Disposable[] {
       return null;
     }
   };
-  const executors = createExecutors({ store: ws.store, root: ws.root, readSource });
+  // diff_impact needs git; the pure core must not shell out itself, so the
+  // adapter injects it here exactly as the CLI does.
+  const executors = createExecutors({
+    store: ws.store,
+    root: ws.root,
+    readSource,
+    collectDiff: (src) => collectDiffHunks(ws.root, src),
+  });
   const disabled = new Set(vscode.workspace.getConfiguration('pairs').get<string[]>('disabledTools', []));
   const disposables: vscode.Disposable[] = [];
   for (const [name, schema] of Object.entries(codeToolSchemas)) {

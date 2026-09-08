@@ -417,3 +417,65 @@ describe('moduleMap clustering', () => {
     expect(map.driftRatio).toBe(0);
   });
 });
+
+/**
+ * diff_impact's rendering, with the diff source stubbed — the executor must
+ * never shell out to git itself, so injecting hunks is the whole contract.
+ */
+describe('diff_impact executor', () => {
+  let store: SqliteCodeStore;
+  const args = { rev: undefined, staged: false, depth: 3, limit: 50, offset: 0, includeTests: true } as const;
+
+  beforeAll(async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pairs-diffexec-'));
+    store = await SqliteCodeStore.open(path.join(dir, 'g.db'), nodeSqlDriver);
+    const at = (name: string, start: number, end: number): NewSymbol => ({
+      name, qualified: name, kind: 'function', lang: 'rust', startLine: start, endLine: end,
+      signature: '()', doc: null, exported: true, parentIndex: null,
+    });
+    await store.applyExtraction({
+      path: 'core.rs', lang: 'rust', mtimeMs: 1, size: 1, hash: 'h1', crate: null, parseError: false,
+      symbols: [at('coremod', 1, 1), at('target', 10, 20)], refs: [], uses: [],
+    });
+    await store.applyExtraction({
+      path: 'caller.rs', lang: 'rust', mtimeMs: 1, size: 1, hash: 'h2', crate: null, parseError: false,
+      symbols: [at('callermod', 1, 1), at('caller', 5, 15)],
+      refs: [{ fromIndex: 1, name: 'target', qualifiedName: null, kind: 'CALLS', line: 7 }], uses: [],
+    });
+    await store.resolvePending(undefined, { retireUnresolved: true });
+  });
+
+  it('reports the dependants of a changed symbol', async () => {
+    const x = createExecutors({ store, collectDiff: async () => [{ path: 'core.rs', startLine: 12, endLine: 12 }] });
+    const out = await x.diff_impact({ ...args });
+    expect(out).toContain('1 changed symbol(s)');
+    expect(out).toContain('target');
+    expect(out).toContain('caller');
+    expect(out).toContain('file(s) to re-check');
+  });
+
+  it('says so plainly when the diff is empty', async () => {
+    const x = createExecutors({ store, collectDiff: async () => [] });
+    expect(await x.diff_impact({ ...args })).toContain('No changes');
+  });
+
+  it('surfaces a hunk that matched no symbol instead of implying safety', async () => {
+    const x = createExecutors({ store, collectDiff: async () => [{ path: 'core.rs', startLine: 25, endLine: 25 }] });
+    const out = await x.diff_impact({ ...args });
+    expect(out).toContain('matched no indexed symbol');
+    expect(out).toContain('core.rs:25-25');
+  });
+
+  it('reports an unavailable diff source rather than an empty blast radius', async () => {
+    const x = createExecutors({ store });
+    expect(await x.diff_impact({ ...args })).toContain('unavailable');
+  });
+
+  it('surfaces a git failure as a message, not a throw', async () => {
+    const x = createExecutors({
+      store,
+      collectDiff: async () => { throw new Error('not a git repository'); },
+    });
+    expect(await x.diff_impact({ ...args })).toContain('not a git repository');
+  });
+});

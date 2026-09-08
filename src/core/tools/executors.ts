@@ -12,6 +12,8 @@
 import type { CodeStore } from '../../store/graph/codeStore';
 import type { AmbiguousSymbol, DeadCodeCandidate, EdgeKind, SymbolRecord } from '../indexer/types';
 import { impact } from '../analyze/impact';
+import { diffImpact } from '../analyze/diffImpact';
+import type { DiffHunk } from '../analyze/diffImpact';
 import { hierarchy } from '../analyze/hierarchy';
 import { moduleMap, moduleKeyOf } from '../analyze/moduleMap';
 import type { ModuleMap } from '../analyze/moduleMap';
@@ -29,6 +31,14 @@ export interface ExecutorDeps {
    * `preview` degrades to doc-only — never to an error.
    */
   readSource?: (relPath: string) => string | null;
+  /**
+   * Returns the changed line ranges of the current diff. Injected for the same
+   * reason as readSource: core must not shell out to git (R10), and
+   * diff_impact stays testable without a repository. When absent, diff_impact
+   * reports that it is unavailable rather than answering "nothing changed" —
+   * an empty blast radius from a missing diff source would read as "safe".
+   */
+  collectDiff?: (src: { rev?: string; staged?: boolean }) => Promise<DiffHunk[]>;
 }
 
 export type Executors = {
@@ -469,6 +479,64 @@ export function createExecutors(deps: ExecutorDeps): Executors {
       // An agent must never mistake a filtered list for a complete one.
       const hiddenNote = res.hiddenTestEdges > 0 ? `\n(… ${res.hiddenTestEdges} test-file edge(s) hidden; pass includeTests to see them)` : '';
       return `${res.dependants.length} dependant(s)${kindNote} of ${res.seed.qualified || res.seed.name}${trunc}:\n${body}${note}${hiddenNote}`;
+    },
+
+    async diff_impact(input) {
+      if (!deps.collectDiff) return 'diff_impact is unavailable here (no diff source configured).';
+      let hunks: DiffHunk[];
+      try {
+        hunks = await deps.collectDiff({ rev: input.rev, staged: input.staged });
+      } catch (err) {
+        return `Could not read the diff: ${(err as Error).message}`;
+      }
+      if (hunks.length === 0) {
+        const what = input.rev ? `\`${input.rev}\`` : input.staged ? 'the index' : 'the working tree';
+        return `No changes in ${what} — nothing to analyze.`;
+      }
+      const kinds = input.kinds?.length ? input.kinds : undefined;
+      const kindNote = kinds ? ` via ${kinds.join('/')} only` : '';
+      const res = await diffImpact(store, hunks, input.depth, kinds, input.includeTests);
+
+      const lines: string[] = [];
+      lines.push(
+        `${res.changed.length} changed symbol(s) across ${new Set(res.changed.map((c) => c.symbol.file)).size} file(s):`
+      );
+      for (const c of res.changed) lines.push(`  * ${cite(c.symbol)}`);
+
+      if (res.dependants.length === 0) {
+        lines.push(`\nNothing depends on the changed symbols within ${input.depth} hop(s)${kindNote}.`);
+      } else {
+        const external = res.dependants.filter((d) => !d.alsoChanged);
+        const { page, note } = paginate(external, input.limit, input.offset);
+        const trunc = res.truncated ? ` (walk truncated at depth ${input.depth})` : '';
+        lines.push(`\n${external.length} dependant(s)${kindNote} outside the change${trunc}:`);
+        // seedCount is the payload a per-symbol impact call cannot give: a
+        // dependant reached from several changed symbols is one review, not N.
+        lines.push(
+          page
+            .map((d) => {
+              const shared = d.viaSeeds.length > 1 ? `  [via ${d.viaSeeds.length} changed symbols]` : '';
+              return `  - d${d.depth} ${cite(d.symbol)}${d.confidence === 'fuzzy' ? '  [fuzzy]' : ''}${shared}`;
+            })
+            .join('\n') + note
+        );
+        lines.push(`\n${res.affectedFiles.length} file(s) to re-check:`);
+        for (const f of res.affectedFiles.slice(0, input.limit)) lines.push(`  ${f}`);
+      }
+
+      if (res.unattributed.length > 0) {
+        // Never fold this into the dependant count: these are changes the walk
+        // could not reason about at all, so "0 dependants" plus a silent
+        // unattributed hunk would be a false all-clear.
+        lines.push(`\n${res.unattributed.length} changed hunk(s) matched no indexed symbol (review by hand):`);
+        for (const u of res.unattributed.slice(0, input.limit)) {
+          lines.push(`  ${u.path}:${u.startLine}-${u.endLine} [${u.reason}]`);
+        }
+      }
+      if (res.hiddenTestEdges > 0) {
+        lines.push(`\n(… ${res.hiddenTestEdges} test-file edge(s) hidden; pass includeTests to see them)`);
+      }
+      return lines.join('\n');
     },
 
     async hierarchy(input) {

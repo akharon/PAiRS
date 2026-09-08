@@ -12,6 +12,8 @@
 import type { CodeStore } from '../../store/graph/codeStore';
 import type { AmbiguousSymbol, DeadCodeCandidate, EdgeKind, SymbolKind, SymbolRecord } from '../../core/indexer/types';
 import { impact } from '../../core/analyze/impact';
+import { diffImpact } from '../../core/analyze/diffImpact';
+import type { DiffHunk } from '../../core/analyze/diffImpact';
 import { hierarchy } from '../../core/analyze/hierarchy';
 import { moduleMap, moduleKeyOf } from '../../core/analyze/moduleMap';
 import { planRename, applyPlan } from '../../core/tools/rename';
@@ -92,6 +94,39 @@ export async function jsonImpact(
     truncated: res.truncated,
     hiddenTestEdges: res.hiddenTestEdges,
     dependants: page,
+  };
+}
+
+export async function jsonDiffImpact(
+  store: CodeStore,
+  collectDiff: (src: { rev?: string; staged?: boolean }) => Promise<DiffHunk[]>,
+  input: CodeToolInput<'diff_impact'>
+): Promise<unknown> {
+  let hunks: DiffHunk[];
+  try {
+    hunks = await collectDiff({ rev: input.rev, staged: input.staged });
+  } catch (err) {
+    return { changed: [], dependants: [], message: `Could not read the diff: ${(err as Error).message}` };
+  }
+  if (hunks.length === 0) {
+    return { changed: [], dependants: [], affectedFiles: [], unattributed: [], total: 0, message: 'No changes to analyze.' };
+  }
+  const kinds = input.kinds?.length ? input.kinds : undefined;
+  const res = await diffImpact(store, hunks, input.depth, kinds, input.includeTests);
+  // Paginate the out-of-change dependants only; a symbol already in the diff
+  // is not a review item, so it must not consume the caller's budget.
+  const external = res.dependants.filter((d) => !d.alsoChanged);
+  const { page, total, hasMore, nextOffset } = paginate(external, input.limit, input.offset);
+  return {
+    changed: res.changed,
+    total,
+    hasMore,
+    nextOffset,
+    truncated: res.truncated,
+    hiddenTestEdges: res.hiddenTestEdges,
+    dependants: page,
+    affectedFiles: res.affectedFiles,
+    unattributed: res.unattributed,
   };
 }
 

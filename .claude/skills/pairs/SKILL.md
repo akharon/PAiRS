@@ -24,6 +24,14 @@ Copilot has direct access to PAiRS tools — use these for navigation and refact
   etc.) to slice by edge type when you only want callers or only data access;
   the header states the restriction, so a filtered empty result is never
   mistaken for "nothing depends on this".
+- **diff_impact** — blast radius of the CURRENT CHANGE, in one call. Maps the git
+  diff's changed line ranges to the symbols containing them, then walks every
+  dependant of all of them in one merged pass. Use this INSTEAD of reading the
+  diff and then calling `impact` once per changed function: a dependant reached
+  from several changed symbols is reported once, tagged with how many reach it.
+  Answers "what do I re-test / re-review for this change". Changed lines that
+  sit in no symbol (imports, module-level code, unindexed files) are listed
+  separately, so an empty dependant list is never a false all-clear.
 - **hierarchy** — inheritance tree: what a type EXTENDS/IMPLEMENTS (ancestors)
   and what EXTENDS/IMPLEMENTS it (descendants). Call before changing a base
   class/interface to see every subclass affected.
@@ -48,6 +56,7 @@ For automation and CI/CD, use `pairs` commands:
 - `pairs find_symbol <name> [--preview]` — locate a definition. `--preview` adds the doc line and first body lines, which usually removes the follow-up Read.
 - `pairs get_symbol <name>` — full declaration: signature, doc, a body excerpt, and members.
 - `pairs impact <name> [depth] [--kinds CALLS,READS] [--json]` — blast radius (same as the tool above). `--kinds` restricts the walk to specific edge kinds. Prints prose like every other CLI tool by default; pass `--json` for the structured result (breaking change from the old bare-JSON default — update any script that parsed `pairs impact` output directly).
+- `pairs diff_impact [--rev <range>] [--staged] [--depth N] [--kinds CALLS,READS]` — blast radius of the current change. No args diffs the working tree; `--rev main...HEAD` a range; `--staged` the index.
 - `pairs query '<sql>'` — raw read-only SQL for anything not covered above.
 - `pairs stats` — index size and resolution quality.
 - `pairs index` — full re-index (rarely needed; extension keeps it live).

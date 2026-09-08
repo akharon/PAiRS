@@ -22,6 +22,7 @@ const DISPLAY = {
   get_symbol: { name: 'pairs_get_symbol', displayName: 'PAiRS: get full declaration', toolReferenceName: 'pairsGetSymbol' },
   outline: { name: 'pairs_outline', displayName: 'PAiRS: file outline', toolReferenceName: 'pairsOutline' },
   impact: { name: 'pairs_impact', displayName: 'PAiRS: change impact (blast radius)', toolReferenceName: 'pairsImpact' },
+  diff_impact: { name: 'pairs_diff_impact', displayName: 'PAiRS: impact of the current diff', toolReferenceName: 'pairsDiffImpact' },
   hierarchy: { name: 'pairs_hierarchy', displayName: 'PAiRS: inheritance hierarchy', toolReferenceName: 'pairsHierarchy' },
   who_calls: { name: 'pairs_who_calls', displayName: 'PAiRS: call graph (callers/callees)', toolReferenceName: 'pairsWhoCalls' },
   file_deps: { name: 'pairs_file_deps', displayName: 'PAiRS: file dependencies', toolReferenceName: 'pairsFileDeps' },

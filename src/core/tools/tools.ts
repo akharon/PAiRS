@@ -97,6 +97,33 @@ export const codeToolSchemas = {
     }),
   },
 
+  diff_impact: {
+    description:
+      'Blast radius of the CURRENT CHANGE: maps the git diff\'s changed line ranges to ' +
+      'the symbols containing them, then walks every dependant of all of them in one ' +
+      'merged pass. Use INSTEAD of reading the diff and then calling `impact` once per ' +
+      'changed function — dependants reached from several changed symbols appear once, ' +
+      'tagged with which ones reach them. Answers "what do I need to re-test / re-review ' +
+      'for this change". Changed lines that sit in no symbol (imports, module-level code, ' +
+      'unindexed files) are reported separately, never silently dropped. Defaults to the ' +
+      'unstaged working tree; pass `rev` for a revision or range like "main...HEAD".',
+    input: z.object({
+      rev: z
+        .string()
+        .optional()
+        .describe('Git revision or range to diff, e.g. "HEAD" or "main...HEAD". Omit for uncommitted working-tree changes.'),
+      staged: z.boolean().default(false).describe('Diff the index (`git diff --staged`) instead of the working tree. Ignored when `rev` is set.'),
+      depth: z.number().int().min(1).max(6).default(3).describe('Transitive hops to walk from each changed symbol.'),
+      limit: z.number().int().min(1).max(200).default(50),
+      offset,
+      includeTests: z.boolean().default(true).describe('Include dependants reached only through test files.'),
+      kinds: z
+        .array(z.enum(IMPACT_EDGE_KINDS))
+        .optional()
+        .describe('Restrict the walk to these dependency edge kinds. Omit for all kinds.'),
+    }),
+  },
+
   hierarchy: {
     description:
       'Inheritance/interface tree around a type: what it EXTENDS/IMPLEMENTS ' +

@@ -20,10 +20,12 @@ import { SqliteCodeStore } from '../../store/graph/sqliteCodeStore';
 import { nodeSqlDriver } from '../../store/graph/sqliteDriver';
 import { IMPACT_EDGE_KINDS } from '../../core/analyze/impact';
 import { createExecutors } from '../../core/tools/executors';
+import { collectDiffHunks } from '../../platform/gitDiff';
 import { codeToolSchemas, type CodeToolInput, type CodeToolName } from '../../core/tools/tools';
 import {
   jsonAnalyze,
   jsonContextPack,
+  jsonDiffImpact,
   jsonFileDeps,
   jsonFindSymbol,
   jsonGetSymbol,
@@ -44,6 +46,9 @@ const TOOL_ARG_SPECS: Record<CodeToolName, string[]> = {
   get_symbol: ['name', 'path'],
   outline: ['path'],
   impact: ['name', 'path', 'depth', 'includeTests'],
+  // No positional `rev`: it is optional and every other field is a flag, so a
+  // bare `pairs diff_impact` must mean "the working tree", not a missing arg.
+  diff_impact: [],
   hierarchy: ['name', 'path', 'depth'],
   who_calls: ['name', 'direction', 'path', 'includeTests'],
   file_deps: ['path', 'direction'],
@@ -80,6 +85,8 @@ async function renderToolJson(
       return jsonOutline(store, data as CodeToolInput<'outline'>);
     case 'impact':
       return jsonImpact(store, data as CodeToolInput<'impact'>);
+    case 'diff_impact':
+      return jsonDiffImpact(store, (src) => collectDiffHunks(root, src), data as CodeToolInput<'diff_impact'>);
     case 'hierarchy':
       return jsonHierarchy(store, data as CodeToolInput<'hierarchy'>);
     case 'who_calls':
@@ -143,7 +150,12 @@ async function main(): Promise<void> {
       return null;
     }
   };
-  const executors = createExecutors({ store, root, readSource });
+  const executors = createExecutors({
+    store,
+    root,
+    readSource,
+    collectDiff: (src) => collectDiffHunks(root, src),
+  });
 
   try {
     // JSON is the CLI's default output (Step 5): a script or another agent
@@ -205,7 +217,7 @@ async function main(): Promise<void> {
       // (it would have to sit after includeTests and be unreachable). Spliced
       // out here, before that loop, or the flag and its value would be eaten
       // as positionals.
-      if (toolName === 'impact') {
+      if (toolName === 'impact' || toolName === 'diff_impact') {
         const idx = rest.indexOf('--kinds');
         if (idx !== -1) {
           const value = rest[idx + 1];
@@ -235,6 +247,35 @@ async function main(): Promise<void> {
           raw.kinds = requested;
         }
       }
+      if (toolName === 'diff_impact') {
+        const stagedIdx = rest.indexOf('--staged');
+        if (stagedIdx !== -1) {
+          rest.splice(stagedIdx, 1);
+          raw.staged = true;
+        }
+        const revIdx = rest.indexOf('--rev');
+        if (revIdx !== -1) {
+          const value = rest[revIdx + 1];
+          if (value === undefined || value.startsWith('--')) {
+            process.stderr.write('--rev needs a git revision or range, e.g. --rev main...HEAD\n');
+            process.exitCode = 1;
+            return;
+          }
+          rest.splice(revIdx, 2);
+          raw.rev = value;
+        }
+        const depthIdx = rest.indexOf('--depth');
+        if (depthIdx !== -1) {
+          const value = rest[depthIdx + 1];
+          if (value === undefined || value.startsWith('--')) {
+            process.stderr.write('--depth needs a number of hops, e.g. --depth 2\n');
+            process.exitCode = 1;
+            return;
+          }
+          rest.splice(depthIdx, 2);
+          raw.depth = Number(value);
+        }
+      }
       for (let i = 0; i < fields.length && i < rest.length; i++) {
         const field = fields[i]!;
         const value = rest[i]!;
@@ -247,6 +288,8 @@ async function main(): Promise<void> {
         const suffix =
           toolName === 'impact'
             ? ' [--kinds CALLS,READS] [--naked]'
+            : toolName === 'diff_impact'
+              ? ' [--rev <range>] [--staged] [--depth N] [--kinds CALLS,READS] [--naked]'
             : toolName === 'find_symbol'
               ? ' [--preview] [--naked]'
               : toolName === 'grep_symbols'

@@ -18,6 +18,7 @@ cd your-project
 pairs index                 # builds .pairs/index.db (SQLite, safe to .gitignore)
 pairs find_symbol login     # where is it defined?
 pairs impact login          # what breaks if I change it?
+pairs diff_impact           # what does my current, uncommitted change break?
 pairs rename_symbol login signIn --naked   # renames every reference site, one atomic pass
 ```
 
@@ -53,7 +54,7 @@ Bottom-right shows `pairs <N> sym · <P>% fuzzy` — total indexed symbols and t
 
 ### Copilot agent-mode tools
 
-PAiRS registers its analysis functions as native VS Code Language Model Tools, so **GitHub Copilot in agent mode can call them directly** (no MCP server needed) — `find_symbol`, `get_symbol`, `outline`, `impact`, `hierarchy`, `who_calls`, `file_deps`, `module_map`, `analyze`, `rename_symbol`. See §5 for what each does.
+PAiRS registers its analysis functions as native VS Code Language Model Tools, so **GitHub Copilot in agent mode can call them directly** (no MCP server needed) — `find_symbol`, `get_symbol`, `outline`, `impact`, `diff_impact`, `hierarchy`, `who_calls`, `file_deps`, `module_map`, `analyze`, `rename_symbol`. See §5 for what each does.
 
 ### Claude Code integration
 
@@ -90,6 +91,7 @@ These are the same operations, exposed as VS Code Language Model Tools (Copilot,
 | `grep_symbols` | Search names/qualified names/signatures/doc text by substring or regex (CLI: `--regex`) — for "I don't know the exact symbol name" instead of grep-and-Read. |
 | `context_pack` | One bundle for a symbol or file (CLI: `--path <file>` for the latter): definition, direct callers, direct callees, type hierarchy, and enclosing module boundary — replaces several separate calls when you need broad context fast. |
 | `impact` | Everything that transitively depends on a symbol ("blast radius"). Call before changing/removing it. Pass `kinds: ["CALLS"]` (CLI: `--kinds CALLS,READS`) to slice by edge type. |
+| `diff_impact` | Blast radius of the **current change**: maps the git diff's changed line ranges to the symbols containing them, then walks all of their dependants in one merged pass. Use instead of reading the diff and calling `impact` per changed function — a dependant reached from several changed symbols appears once, tagged with how many reach it. Defaults to the working tree; `--rev main...HEAD` for a range, `--staged` for the index. Changed lines inside no symbol (imports, module-level code, unindexed files) are listed separately, never silently dropped. |
 | `hierarchy` | Type ancestors (extends/implements) and descendants. |
 | `who_calls` | Direct callers or callees, one hop. |
 | `file_deps` | File-level importers or imports, optionally transitive. |
