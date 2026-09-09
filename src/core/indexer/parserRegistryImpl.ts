@@ -35,6 +35,7 @@ const GRAMMAR_FILE: Readonly<Record<CodeLang, string>> = {
   rust: 'tree-sitter-rust.wasm',
   css: 'tree-sitter-css.wasm',
   html: 'tree-sitter-html.wasm',
+  gdscript: 'tree-sitter-gdscript.wasm',
 };
 
 export interface QuerySource {

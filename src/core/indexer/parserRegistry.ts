@@ -41,6 +41,7 @@ export const EXT_TO_LANG: Readonly<Record<string, CodeLang>> = {
   '.css': 'css',
   '.html': 'html',
   '.htm': 'html',
+  '.gd': 'gdscript',
 };
 
 /** Null when the extension is not indexed (config exclusions handled elsewhere). */

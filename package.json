@@ -119,7 +119,8 @@
                   "dart",
                   "rust",
                   "css",
-                  "html"
+                  "html",
+                  "gdscript"
                 ]
               }
             },
@@ -500,6 +501,8 @@
     "eslint": "^9.39.5",
     "gpt-tokenizer": "^3.4.0",
     "sharp": "^0.35.3",
+    "tree-sitter-cli": "^0.27.0",
+    "tree-sitter-gdscript": "^6.1.0",
     "tree-sitter-wasms": "^0.1.0",
     "typescript": "^5.5.0",
     "typescript-eslint": "^8.64.0",

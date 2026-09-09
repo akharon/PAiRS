@@ -4,7 +4,7 @@
 
 PAiRS parses your workspace into a queryable code graph (symbols, calls, imports, type hierarchy). It ships as a VS Code extension and a standalone `pairs` CLI that share the same index, so navigation and refactoring-safety checks all see the same graph.
 
-Supported languages: C, C++, Python, JavaScript, TypeScript, Java, Go, Ruby, Dart, Rust, CSS, HTML.
+Supported languages: C, C++, Python, JavaScript, TypeScript, Java, Go, Ruby, Dart, Rust, CSS, HTML, GDScript.
 
 **The one thing neither Copilot's built-in graph nor most agent code-search tools do: PAiRS can write.** `rename_symbol` renames a symbol and every reference site the graph can verify — callers, readers, writers, implementers — in one atomic pass, and aborts untouched (no partial edit) if any site can't be matched safely. Every edge it walks carries a confidence label (`resolved` / `fuzzy` / `unresolved`), so a rename backed only by name-matched guesses is refused unless you explicitly opt in with `includeFuzzy`. Read-only graph queries tell an agent what's true; `rename_symbol` is the one PAiRS command that changes what's true, with the graph itself as the safety check.
 

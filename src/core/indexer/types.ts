@@ -20,9 +20,9 @@
  * §5). Unvalidated languages parse and populate the graph; their
  * unresolved_ratio is simply not part of the v1 exit bar.
  */
-export type CodeLang = 'c' | 'cpp' | 'python' | 'javascript' | 'typescript' | 'java' | 'go' | 'ruby' | 'dart' | 'rust' | 'css' | 'html';
+export type CodeLang = 'c' | 'cpp' | 'python' | 'javascript' | 'typescript' | 'java' | 'go' | 'ruby' | 'dart' | 'rust' | 'css' | 'html' | 'gdscript';
 
-export const CODE_LANGS: readonly CodeLang[] = ['c', 'cpp', 'python', 'javascript', 'typescript', 'java', 'go', 'ruby', 'dart', 'rust', 'css', 'html'];
+export const CODE_LANGS: readonly CodeLang[] = ['c', 'cpp', 'python', 'javascript', 'typescript', 'java', 'go', 'ruby', 'dart', 'rust', 'css', 'html', 'gdscript'];
 
 /** v1 exit criteria (precision bench, golden corpus) cover Rust only. */
 export const V1_VALIDATED_LANGS: readonly CodeLang[] = ['rust'];

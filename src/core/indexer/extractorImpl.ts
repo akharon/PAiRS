@@ -35,6 +35,7 @@ const QUALIFIER_SEP: Readonly<Record<CodeLang, string>> = {
   rust: '::',
   css: '.',
   html: '.',
+  gdscript: '.',
 };
 
 const DEF_CAPTURE_TO_KIND: Readonly<Record<string, SymbolKind>> = {

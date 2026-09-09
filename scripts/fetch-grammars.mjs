@@ -9,6 +9,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
 
 const scriptsDir = fileURLToPath(new URL('.', import.meta.url));
 const root = path.join(scriptsDir, '..');
@@ -34,6 +35,30 @@ const GRAMMARS = {
   html: 'tree-sitter-html.wasm',
 };
 
+// GDScript has no prebuilt wasm in tree-sitter-wasms (only a native node
+// addon is published to npm), so it's compiled from the tree-sitter-gdscript
+// devDependency's source via tree-sitter-cli at build time instead of
+// copied. Cached in node_modules/.cache so repeat builds (no grammar change)
+// don't re-invoke the wasi-sdk/binaryen toolchain tree-sitter-cli downloads
+// on first use.
+const GDSCRIPT_WASM = 'tree-sitter-gdscript.wasm';
+
+async function buildGdscriptWasm() {
+  const cacheDir = path.join(root, 'node_modules', '.cache', 'pairs-grammars');
+  const cached = path.join(cacheDir, GDSCRIPT_WASM);
+  const grammarDir = path.dirname(fileURLToPath(new URL(import.meta.resolve('tree-sitter-gdscript/package.json'))));
+
+  const cachedStat = await fs.stat(cached).catch(() => null);
+  const grammarStat = await fs.stat(path.join(grammarDir, 'src', 'parser.c')).catch(() => null);
+  if (!cachedStat || !grammarStat || cachedStat.mtimeMs < grammarStat.mtimeMs) {
+    await fs.mkdir(cacheDir, { recursive: true });
+    execFileSync('npx', ['--yes', 'tree-sitter-cli', 'build', '--wasm', '-o', cached, grammarDir], {
+      stdio: 'inherit',
+    });
+  }
+  return cached;
+}
+
 export async function copyGrammarsAndQueries() {
   await fs.mkdir(outDir, { recursive: true });
   await fs.mkdir(queriesOutDir, { recursive: true });
@@ -42,6 +67,9 @@ export async function copyGrammarsAndQueries() {
   for (const file of Object.values(GRAMMARS)) {
     await fs.copyFile(path.join(wasmsDir, file), path.join(outDir, file));
   }
+
+  const gdscriptWasm = await buildGdscriptWasm();
+  await fs.copyFile(gdscriptWasm, path.join(outDir, GDSCRIPT_WASM));
 
   const runtimeWasm = path.join(root, 'node_modules', 'web-tree-sitter', 'tree-sitter.wasm');
   await fs.copyFile(runtimeWasm, path.join(outDir, 'tree-sitter.wasm'));

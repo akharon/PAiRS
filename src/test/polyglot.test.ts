@@ -169,6 +169,22 @@ const CASES: Record<CodeLang, LangCase> = {
       'rust/b/main.rs': `use crate::a::helper::helper_rs;\npub fn run_rs() -> String { helper_rs() }\n`,
     },
   },
+  // GDScript has no relative-import syntax: `preload`/`load` take a
+  // `res://`-rooted resource path (project-root-relative, not relative to the
+  // importing file), which is structurally like Java's package name or Go's
+  // module path — not a specifier importPath.ts's file-path resolver
+  // understands. helperGd() is called directly (GDScript classes loaded via
+  // preload don't need an explicit import to call top-level functions once
+  // instantiated elsewhere), so the CALLS edge still resolves by bare name.
+  gdscript: {
+    aPath: 'gdscript/a/helper.gd',
+    bPath: 'gdscript/b/main.gd',
+    files: {
+      'gdscript/a/helper.gd': `func helperGd():\n\treturn "hi"\n`,
+      'gdscript/b/main.gd': `const Helper = preload("res://gdscript/a/helper.gd")\n\nfunc runGd():\n\treturn helperGd()\n`,
+    },
+    knownGap: { DEPENDS_ON: "GDScript's preload/load take a res://-rooted resource path, not a specifier relative to the importing file — importPath.ts resolves file-path specifiers only." },
+  },
 };
 
 describe('polyglot cross-file contract', () => {

@@ -171,6 +171,19 @@ impl Greeter {
 <link rel="stylesheet" href="style.css">
 <script src="app.js"></script>
 `,
+  gdscript: `
+extends Node
+
+func helper(name):
+	return "hi " + name
+
+func greet(name):
+	return helper(name)
+
+class Greeter:
+	func greet(name):
+		return greet(name)
+`,
 };
 
 const EXT: Record<CodeLang, string> = {
@@ -186,6 +199,7 @@ const EXT: Record<CodeLang, string> = {
   rust: 'greeter.rs',
   css: 'greeter.css',
   html: 'greeter.html',
+  gdscript: 'greeter.gd',
 };
 
 const EXPECTED_NAMES: Record<CodeLang, string[]> = {
@@ -201,6 +215,7 @@ const EXPECTED_NAMES: Record<CodeLang, string[]> = {
   rust: ['greet', 'helper'],
   css: ['.greeter', '#helper, .card'],
   html: ['greeter', 'helper'],
+  gdscript: ['greet', 'helper'],
 };
 
 /** CSS/HTML have no call expressions — skip the generic "has calls" assertion for these. */
