@@ -27,12 +27,20 @@ class HeaderTarget:
 
 def discover_headers(compdb: CompileDatabase, project_root: Path) -> list[HeaderTarget]:
     """For every .cpp in the compile database, parse it and record which project-local
-    headers it pulls in (directly or transitively). The FIRST .cpp (in compdb order)
-    that reaches a given header wins as that header's --via file.
+    headers it pulls in (directly or transitively).
+
+    Picking the --via file matters beyond "any TU that can parse the header": the
+    free-function analysis needs a TU that actually contains a method's out-of-line
+    *definition*, not just its declaration (a TU that only sees the header via a
+    transitive #include has the declaration but not the body, so the analyzer correctly
+    treats every method as "no definition visible" and finds nothing — a real bug this
+    was written to fix). The idiomatic .cpp that implements a header shares its basename
+    (widget.h <-> widget.cpp), so that pairing is preferred when it exists among the
+    includers; otherwise the first includer (in compdb order) is used, same as before.
     """
     project_root = project_root.resolve()
     index = Index.create()
-    header_to_via: dict[Path, Path] = {}
+    header_to_includers: dict[Path, list[Path]] = {}
 
     for source_file in compdb.files():
         args = compdb.args_for(source_file)
@@ -50,6 +58,16 @@ def discover_headers(compdb: CompileDatabase, project_root: Path) -> list[Header
                 continue
             if project_root not in header_path.parents and header_path.parent != project_root:
                 continue  # system/third-party header, not ours to rewrite
-            header_to_via.setdefault(header_path, source_file)
+            header_to_includers.setdefault(header_path, []).append(source_file)
 
-    return [HeaderTarget(header=h, via=v) for h, v in sorted(header_to_via.items())]
+    targets = []
+    for header_path, includers in header_to_includers.items():
+        via = _pick_via(header_path, includers)
+        targets.append(HeaderTarget(header=header_path, via=via))
+
+    return sorted(targets, key=lambda t: t.header)
+
+
+def _pick_via(header_path: Path, includers: list[Path]) -> Path:
+    same_basename = [c for c in includers if c.stem == header_path.stem]
+    return same_basename[0] if same_basename else includers[0]

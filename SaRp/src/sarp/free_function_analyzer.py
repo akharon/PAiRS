@@ -182,9 +182,16 @@ def _span_of(cursor: Cursor) -> SourceSpan:
 def _touches_instance_state(body: Cursor, method: Cursor) -> bool:
     for node in _walk(body):
         if node.kind == CursorKind.MEMBER_REF_EXPR:
+            # Implicit-`this` field access (`x_`) AND implicit-`this` member-function
+            # calls (`helper()`, called without `this->`) both surface as
+            # MEMBER_REF_EXPR — libclang doesn't distinguish them by cursor kind, only
+            # by what `referenced` resolves to.
             referenced = node.referenced
             if referenced is not None and referenced.kind == CursorKind.FIELD_DECL:
                 return True
+            if referenced is not None and referenced.kind == CursorKind.CXX_METHOD:
+                if not referenced.is_static_method():
+                    return True
         if node.kind == CursorKind.DECL_REF_EXPR:
             referenced = node.referenced
             if referenced is not None and referenced.kind == CursorKind.CXX_METHOD:
