@@ -49,6 +49,23 @@ class CallSite:
     line: int
     column: int
     source_line: str
+    call_start_offset: int
+    call_end_offset: int
+    """Span of the whole call expression, e.g. `c.sumTwo(2, 3)` or `cp->sumTwo(1, 2)`."""
+    object_start_offset: int
+    object_end_offset: int
+    """Span of just the object sub-expression, e.g. `c` or `cp` (no `.`/`->`/method name)."""
+    object_is_pointer: bool
+    """True for `cp->method(...)` (needs `*cp` when passed to the free function's
+    reference parameter); false for `c.method(...)` (passed as-is)."""
+    arg_spans: list[tuple[int, int]]
+    """Start/end offsets of each argument expression, in call order."""
+    rewritable: bool
+    """False when this call site's source spans can't be trusted for a text rewrite —
+    e.g. the call sits inside a macro expansion (assert(...), a custom logging macro,
+    etc.), where libclang's cursor extents can collapse to empty/degenerate ranges.
+    Such sites are still reported (their line/source_line are accurate), just never
+    auto-rewritten."""
 
 
 @dataclass

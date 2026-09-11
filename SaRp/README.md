@@ -14,26 +14,30 @@ patterns that need real semantic analysis, not just text/syntax matching:
    `struct Impl` (defined in the `.cpp`), replaced by a single
    `std::unique_ptr<Impl> impl_` member in the header, and rewrite both files.
 
-Both analyses use [libclang](https://clang.llvm.org/docs/Tooling.html) to build a real
-AST from your project's `compile_commands.json` — not tree-sitter or regex — because
-correctly answering "does this only need an incomplete type" or "does this method
-touch instance state" requires actual semantic resolution (overload resolution, type
-completeness, access checking), not syntax.
+All three analyses use [libclang](https://clang.llvm.org/docs/Tooling.html) to build a
+real AST from your project's `compile_commands.json` — not tree-sitter or regex —
+because correctly answering "does this only need an incomplete type" or "does this
+method touch instance state" requires actual semantic resolution (overload resolution,
+type completeness, access checking), not syntax.
 
 ## Why not just automate everything?
 
-Both refactors are conservative by design:
+All three refactors are conservative by design:
 
 - **Forward-decl** only ever proposes a rewrite when it's certain: if *any* usage of a
   type across the class needs the complete type (by value, member access, sizeof), the
   `#include` is kept. `rename_symbol`-style "abort untouched if anything looks unsafe"
   — no partial edits.
-- **Free-function** conversion rewrites the declaration and definition, but **never**
-  touches call sites automatically. Finding and atomically rewriting every
-  `obj.method(x)` → `method(obj, x)` call site across an entire project is a much
-  larger, riskier operation than this tool currently attempts. Instead, `--apply`
-  prints every call site that needs a manual update, with file:line and the source
-  line itself.
+- **Free-function** conversion rewrites the declaration and definition; call sites
+  (`obj.method(x)`) are found project-wide and, with `--rewrite-call-sites`, rewritten
+  to `method(obj, x)` / `method(*obj, x)` — but only sites whose source spans can be
+  trusted for a mechanical text edit. A call site sitting inside a macro expansion
+  (`assert(obj.method(x))`, a custom logging macro, etc.) is never auto-rewritten,
+  because libclang's cursor extents for macro-expanded code can be
+  empty/degenerate — trusting them corrupted a test file during development, which is
+  exactly the failure mode this check exists to prevent. Such sites are still reported
+  by file:line for a manual update. Without `--rewrite-call-sites`, `--apply` only
+  touches the declaration/definition and reports every call site as before.
 - **Full pimpl** only offers a class as a candidate when the rewrite can be applied by
   pure text substitution with no risk of changing behavior: every private member must
   be a data field (no private methods), no protected members, no member-initializer-list
@@ -82,6 +86,10 @@ bodies, and will silently report zero candidates.
 ```bash
 sarp --compile-commands build/compile_commands.json \
     free-function src/calculator.h --via src/calculator.cpp --apply
+
+# Also rewrite obj.method(x) call sites, project-wide, to method(obj, x):
+sarp --compile-commands build/compile_commands.json \
+    free-function src/calculator.h --via src/calculator.cpp --apply --rewrite-call-sites
 ```
 
 `full-pimpl` follows the same `--via` rule as `free-function` — it needs to see method
@@ -141,7 +149,7 @@ Forward-decl candidates in src/widget.h:
 
 ```
 $ sarp --compile-commands build/compile_commands.json \
-    free-function src/calculator.h --via src/calculator.cpp --apply
+    free-function src/calculator.h --via src/calculator.cpp --apply --rewrite-call-sites
 
 Free-function candidates in src/calculator.h:
   line 8: Calculator::sumTwo -> free function (body references no instance fields or non-static member calls; usable via public API only)
@@ -151,6 +159,18 @@ Free-function candidates in src/calculator.h:
     Rewrote src/calculator.cpp
     Patch saved to src/calculator.cpp.sarp.patch (revert: patch -R < calculator.cpp.sarp.patch)
     Committed as 9f8e7d6c5b4a (revert: git revert 9f8e7d6c5b4a)
+    Rewrote 1 call site(s) to free-function syntax:
+      src/main.cpp
+        Patch saved to src/main.cpp.sarp.patch (revert: patch -R < main.cpp.sarp.patch)
+        Committed as a1b2c3d4e5f6 (revert: git revert a1b2c3d4e5f6)
+```
+`src/main.cpp:9` goes from `calc.sumTwo(2, 3)` to `sumTwo(calc, 2, 3)` — verified end to
+end against a real CMake project (the whole project still builds and runs correctly
+after the rewrite).
+
+Without `--rewrite-call-sites`, the same command instead prints each call site for a
+manual update:
+```
     WARNING: 1 call site(s) need manual updates (old obj.sumTwo(...) syntax will not compile):
       src/main.cpp:9  std::cout << "sumTwo: " << calc.sumTwo(2, 3) << std::endl;
 ```
@@ -213,8 +233,10 @@ Counter::Counter(int start) {
 - **No `#ifdef`/macro-conditional awareness.** If a header behaves differently across
   translation units (rare, but possible with heavy conditional compilation), SaRp
   analyzes it via a single TU and won't catch the divergence.
-- **Free-function call sites are reported, never rewritten.** You update them by hand
-  (or with your editor's find/replace) using the printed file:line list.
+- **Free-function call sites are reported by default; `--rewrite-call-sites` rewrites
+  the ones it can trust.** A call site inside a macro expansion (`assert(...)`, a
+  logging macro, etc.) is always excluded from the rewrite and reported instead — its
+  source spans aren't reliable for a text edit. Update those by hand.
 - **No `#include`-what-you-use for `.cpp` files** — only header `#include`s are
   analyzed for forward-decl candidates, not a `.cpp`'s own includes. (A true
   "is this include entirely unused" check was attempted and dropped: `#pragma once`/
@@ -237,6 +259,6 @@ Counter::Counter(int start) {
 
 ```bash
 .venv/bin/pip install -e ".[dev]"
-.venv/bin/pytest          # 66 tests, ~7s — no real project needed, uses a
+.venv/bin/pytest          # 76 tests, ~7s — no real project needed, uses a
                            # temp-dir C++ project harness (test/conftest.py)
 ```

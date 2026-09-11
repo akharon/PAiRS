@@ -98,3 +98,75 @@ def test_finds_multiple_call_sites_across_files(cpp_project):
     files = {s.file for s in sites}
     assert (cpp_project.root / "main.cpp").resolve() in files
     assert (cpp_project.root / "second_caller.cpp").resolve() in files
+
+
+def test_dot_call_site_spans_are_correct_and_rewritable(cpp_project):
+    _setup_calculator_with_caller(cpp_project)
+    compdb = CompileDatabase.load(cpp_project.compile_commands_path())
+
+    sites = find_call_sites(compdb, "Calculator", "sumTwo", cpp_project.root / "calculator.h")
+
+    assert len(sites) == 1
+    site = sites[0]
+    assert site.rewritable is True
+    assert site.object_is_pointer is False
+    text = site.file.read_text()
+    assert text[site.call_start_offset : site.call_end_offset] == "c.sumTwo(2, 3)"
+    assert text[site.object_start_offset : site.object_end_offset] == "c"
+    args = [text[s:e] for s, e in site.arg_spans]
+    assert args == ["2", "3"]
+
+
+def test_arrow_call_site_is_detected_as_pointer(cpp_project):
+    cpp_project.write(
+        "calculator.h",
+        "#pragma once\nclass Calculator {\npublic:\n    int sumTwo(int a, int b) const;\n};\n",
+    )
+    cpp_project.write(
+        "calculator.cpp",
+        '#include "calculator.h"\nint Calculator::sumTwo(int a, int b) const { return a + b; }\n',
+    )
+    cpp_project.write(
+        "main.cpp",
+        '#include "calculator.h"\n'
+        "int main() {\n"
+        "    Calculator c;\n"
+        "    Calculator* cp = &c;\n"
+        "    return cp->sumTwo(2, 3);\n"
+        "}\n",
+    )
+    compdb = CompileDatabase.load(cpp_project.compile_commands_path())
+
+    sites = find_call_sites(compdb, "Calculator", "sumTwo", cpp_project.root / "calculator.h")
+
+    assert len(sites) == 1
+    assert sites[0].object_is_pointer is True
+    assert sites[0].rewritable is True
+
+
+def test_call_site_inside_macro_is_not_rewritable(cpp_project):
+    cpp_project.write(
+        "calculator.h",
+        "#pragma once\nclass Calculator {\npublic:\n    int sumTwo(int a, int b) const;\n};\n",
+    )
+    cpp_project.write(
+        "calculator.cpp",
+        '#include "calculator.h"\nint Calculator::sumTwo(int a, int b) const { return a + b; }\n',
+    )
+    cpp_project.write(
+        "main.cpp",
+        '#include "calculator.h"\n#include <cassert>\n'
+        "int main() {\n"
+        "    Calculator c;\n"
+        "    assert(c.sumTwo(2, 3) == 5);\n"
+        "    return 0;\n"
+        "}\n",
+    )
+    compdb = CompileDatabase.load(cpp_project.compile_commands_path())
+
+    sites = find_call_sites(compdb, "Calculator", "sumTwo", cpp_project.root / "calculator.h")
+
+    assert len(sites) == 1
+    assert sites[0].rewritable is False
+    # Still correctly reports the line/text even though it can't be auto-rewritten.
+    assert "sumTwo" in sites[0].source_line

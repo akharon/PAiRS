@@ -5,6 +5,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from .call_site_rewriter import apply as apply_call_sites
 from .call_sites import find_call_sites
 from .compdb import CompileDatabase
 from .free_function_analyzer import FreeFunctionAnalyzer
@@ -43,7 +44,14 @@ def main(argv: list[str] | None = None) -> int:
     ff_cmd.add_argument(
         "--apply",
         action="store_true",
-        help="Rewrite the declaration/definition to a free function; call sites are reported, not rewritten",
+        help="Rewrite the declaration/definition to a free function; call sites are reported, not rewritten unless --rewrite-call-sites is also passed",
+    )
+    ff_cmd.add_argument(
+        "--rewrite-call-sites",
+        action="store_true",
+        help="With --apply, also rewrite every obj.method(...) call site found project-wide to free-function syntax "
+        "(sites inside a macro expansion, e.g. assert(...), are never rewritten — reported instead, since their "
+        "source spans can't be trusted for a text edit)",
     )
     ff_cmd.add_argument(
         "--batch",
@@ -178,12 +186,33 @@ def _run_free_function(args: argparse.Namespace, compdb: CompileDatabase) -> int
                     else:
                         print(f"    No git commit made ({safety.git_skipped_reason})")
 
-                if sites:
+                if not sites:
+                    print("    No call sites found in the scanned translation units.")
+                elif args.rewrite_call_sites:
+                    call_results = apply_call_sites(sites, c.method_name)
+                    rewritten = [s for s in sites if s.rewritable]
+                    not_rewritable = [s for s in sites if not s.rewritable]
+                    if rewritten:
+                        print(f"    Rewrote {len(rewritten)} call site(s) to free-function syntax:")
+                        for file, (_, safety) in call_results.items():
+                            print(f"      {file}")
+                            print(f"        Patch saved to {safety.patch_path} (revert: patch -R < {safety.patch_path.name})")
+                            if safety.git_commit:
+                                print(f"        Committed as {safety.git_commit[:12]} (revert: git revert {safety.git_commit[:12]})")
+                            else:
+                                print(f"        No git commit made ({safety.git_skipped_reason})")
+                    if not_rewritable:
+                        print(
+                            f"    WARNING: {len(not_rewritable)} call site(s) could NOT be auto-rewritten "
+                            f"(inside a macro expansion — e.g. assert(...) — where the source span can't be "
+                            f"trusted for a text edit) and need manual updates:"
+                        )
+                        for s in not_rewritable:
+                            print(f"      {s.file}:{s.line}  {s.source_line}")
+                else:
                     print(f"    WARNING: {len(sites)} call site(s) need manual updates (old obj.{c.method_name}(...) syntax will not compile):")
                     for s in sites:
                         print(f"      {s.file}:{s.line}  {s.source_line}")
-                else:
-                    print("    No call sites found in the scanned translation units.")
 
     if args.batch:
         print(
@@ -191,7 +220,8 @@ def _run_free_function(args: argparse.Namespace, compdb: CompileDatabase) -> int
             f"(of {len(targets)} scanned)."
         )
     if not args.apply:
-        print("(report only; pass --apply to rewrite the declaration/definition — call sites are always reported, never auto-rewritten)")
+        print("(report only; pass --apply to rewrite the declaration/definition — call sites are always reported, "
+              "never auto-rewritten unless --rewrite-call-sites is also passed)")
     return 0
 
 
