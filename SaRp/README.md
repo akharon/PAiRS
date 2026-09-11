@@ -13,6 +13,46 @@ patterns that need real semantic analysis, not just text/syntax matching:
 3. **Full pimpl idiom** — find classes whose entire private state can be moved into a
    `struct Impl` (defined in the `.cpp`), replaced by a single
    `std::unique_ptr<Impl> impl_` member in the header, and rewrite both files.
+4. **Missing `inline` on header functions** — find non-template, non-`static`,
+   non-`constexpr` free functions *defined* (not just declared) in a header, and add
+   `inline`. Without it, every translation unit that includes the header gets its own
+   definition — an ODR violation that either silently misbehaves or fails to link.
+5. **`static` in headers → `inline` (C++17)** — find `static` free functions and
+   namespace-scope variables in a header (each including TU gets a private copy) and
+   convert them to C++17 `inline`, which gives a single shared definition instead.
+   Skipped entirely (reported as a rejection, not silently ignored) when the target
+   isn't compiled as C++17 or later.
+6. **Include-guard audit** (report only) — flags headers with no guard at all, guard
+   macros that collide across two different files (a silent "header vanishes" bug), and
+   guard names that don't match the project's path-derived naming convention.
+7. **`extern "C"` guard check** (report only) — flags C++ headers pulled in by a `.c`
+   translation unit that have no `extern "C"` guard, which compiles fine under C but
+   fails to link once the C++ side name-mangles the same declarations.
+8. **`noexcept` inference for move constructors** — find user-provided (has a body)
+   move constructors that aren't `noexcept` even though every base/member's own move
+   operation is, and add it. `std::vector` and friends silently fall back to copying
+   instead of moving when a type's move constructor isn't `noexcept`, which is often
+   the single biggest hidden performance bug in code that "already uses move
+   semantics." (Implicitly-defaulted move constructors are left alone — the compiler
+   already derives their noexcept-ness correctly.)
+9. **`const` propagation** — find non-const, non-virtual member functions whose bodies
+   never write a member (no assignment, `++`/`--`, or address-of on a field) and never
+   call another non-const member function, and add `const`.
+10. **Struct padding report** (report only) — uses Clang's actual computed layout
+    (`Type.get_size`/`get_align`/`get_offset`, exact byte counts, not a heuristic) to
+    find classes that would be smaller under a descending-alignment member reordering,
+    and reports the proposed order and byte savings. Never auto-applied: reordering
+    members is an ABI change (serialization, `offsetof`, anything reading raw memory).
+11. **Macro → `constexpr` report** (report only) — flags object-like macros that are a
+    single literal value, and function-like macros whose expansion is one expression
+    evaluating each parameter exactly once, as safe to convert to a typed `constexpr`
+    equivalent (shown in the report). Rejects macros used in `#if`/`#ifdef`, using
+    `#`/`##`, or evaluating a parameter more than once (a real bug class the "convert
+    to a function" fix would silently break the behavior of).
+12. **Analysis-coverage report** (report only) — every other whole-program-flavored
+    claim SaRp makes is only as true as the compile database it was given; this reports
+    which TUs fail to parse (and are therefore invisible to every other analysis) and
+    which project headers are never reached by any parseable TU.
 
 All three analyses use [libclang](https://clang.llvm.org/docs/Tooling.html) to build a
 real AST from your project's `compile_commands.json` — not tree-sitter or regex —
@@ -100,6 +140,44 @@ sarp --compile-commands build/compile_commands.json \
     full-pimpl src/counter.h --via src/counter.cpp --apply
 ```
 
+`missing-inline` and `static-header` follow the same single-header `--via` shape as
+`forward-decl`:
+
+```bash
+sarp --compile-commands build/compile_commands.json \
+    missing-inline src/widget.h --via src/widget.cpp --apply
+
+sarp --compile-commands build/compile_commands.json \
+    static-header src/widget.h --via src/widget.cpp --apply
+```
+
+`noexcept-move` and `const-propagation` also follow that shape:
+
+```bash
+sarp --compile-commands build/compile_commands.json \
+    noexcept-move src/widget.h --via src/widget.cpp --apply
+
+sarp --compile-commands build/compile_commands.json \
+    const-propagation src/widget.h --via src/widget.cpp --apply
+```
+
+`padding-report` and `macro-to-constexpr` are single-header report-only checks (no
+`--apply`, but still take `--via`/`--batch` like the others):
+
+```bash
+sarp --compile-commands build/compile_commands.json padding-report src/widget.h --via src/widget.cpp
+sarp --compile-commands build/compile_commands.json macro-to-constexpr src/widget.h --via src/widget.cpp
+```
+
+`include-guards`, `extern-c-check`, and `coverage` are project-wide, report-only audits
+(no `--apply`, no `--via`):
+
+```bash
+sarp --compile-commands build/compile_commands.json include-guards .
+sarp --compile-commands build/compile_commands.json extern-c-check .
+sarp --compile-commands build/compile_commands.json coverage .
+```
+
 ### Batch mode
 
 Scan every header reachable from `compile_commands.json` in one pass, instead of one
@@ -109,6 +187,12 @@ Scan every header reachable from `compile_commands.json` in one pass, instead of
 sarp --compile-commands build/compile_commands.json forward-decl --batch .
 sarp --compile-commands build/compile_commands.json free-function --batch .
 sarp --compile-commands build/compile_commands.json full-pimpl --batch .
+sarp --compile-commands build/compile_commands.json missing-inline --batch .
+sarp --compile-commands build/compile_commands.json static-header --batch .
+sarp --compile-commands build/compile_commands.json noexcept-move --batch .
+sarp --compile-commands build/compile_commands.json const-propagation --batch .
+sarp --compile-commands build/compile_commands.json padding-report --batch .
+sarp --compile-commands build/compile_commands.json macro-to-constexpr --batch .
 ```
 
 For each header, SaRp picks a `--via` file automatically: the same-basename `.cpp` if
@@ -255,10 +339,32 @@ Counter::Counter(int start) {
   skipped (batch mode) or reported as an error (single-file mode), never silently
   miscounted.
 
+## Deliberately not implemented
+
+A few candidate features were evaluated and rejected or deferred rather than shipped
+half-working:
+
+- **Friend reduction / access narrowing** — need a whole-program usage scan across
+  every TU (not just one `--via` file per header), which is materially more machinery
+  than the single-header analyses above. Worth building once, since narrowing access
+  also enables anonymous-namespace extraction and more pimpl candidates.
+- **Cross-TU ODR detection, internal-linkage promotion, `final` inference** — all need
+  the same whole-program scan as above (safe use of any of them requires seeing every
+  translation unit that could reference the symbol/class in question, not one).
+- **Include-path explanation** — needs a persistent include graph (KuzuDB or
+  equivalent) that doesn't exist in this project yet.
+- **Compile-time regression attribution** — needs `-ftime-trace` diffing across two
+  git commits, a build-timing subsystem unrelated to the AST-based analyses here.
+- **`constinit`/constant-initialization enforcement** — libclang's stable C API has no
+  `isConstantInitializer` (or `clang_Cursor_Evaluate`) entry point in this version;
+  approximating it with a token-level heuristic was rejected rather than risk a wrong
+  answer on a feature this project's own design doc flags as safety-critical
+  (MISRA/ISO 26262 relevant).
+
 ## Development
 
 ```bash
 .venv/bin/pip install -e ".[dev]"
-.venv/bin/pytest          # 76 tests, ~7s — no real project needed, uses a
+.venv/bin/pytest          # 132 tests, ~8s — no real project needed, uses a
                            # temp-dir C++ project harness (test/conftest.py)
 ```

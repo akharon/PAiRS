@@ -21,20 +21,38 @@ class CppProject:
         path = self.root / rel_path
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content)
-        if path.suffix in (".cpp", ".cc"):
+        if path.suffix in (".cpp", ".cc", ".c"):
             self._sources.append(path)
         return path
 
     def compile_commands_path(self) -> Path:
-        compiler = shutil.which("g++") or shutil.which("clang++")
-        entries = [
-            {
-                "directory": str(self.root),
-                "file": str(source),
-                "arguments": [compiler, "-std=c++17", "-c", str(source), "-o", str(source.with_suffix(".o"))],
-            }
-            for source in self._sources
-        ]
+        cxx_compiler = shutil.which("g++") or shutil.which("clang++")
+        c_compiler = shutil.which("gcc") or shutil.which("clang")
+        entries = []
+        for source in self._sources:
+            if source.suffix == ".c":
+                entries.append(
+                    {
+                        "directory": str(self.root),
+                        "file": str(source),
+                        "arguments": [c_compiler, "-std=c11", "-c", str(source), "-o", str(source.with_suffix(".o"))],
+                    }
+                )
+            else:
+                entries.append(
+                    {
+                        "directory": str(self.root),
+                        "file": str(source),
+                        "arguments": [
+                            cxx_compiler,
+                            "-std=c++17",
+                            "-c",
+                            str(source),
+                            "-o",
+                            str(source.with_suffix(".o")),
+                        ],
+                    }
+                )
         cc_path = self.root / "compile_commands.json"
         cc_path.write_text(json.dumps(entries))
         return cc_path
