@@ -16,12 +16,39 @@ from .compdb import CompileDatabase
 
 
 @dataclass
+class SourceSpan:
+    file: Path
+    start_offset: int
+    end_offset: int
+    start_line: int
+
+
+@dataclass
 class FreeFunctionCandidate:
     class_name: str
     method_name: str
     signature: str
     header_line: int
     reason: str
+    is_const: bool
+    param_types: list[str]
+    param_names: list[str]
+    return_type: str
+    declaration_span: SourceSpan
+    """Span of the full member-function declaration inside the class body (header)."""
+    definition_span: SourceSpan | None
+    """Span of the out-of-line definition (usually in the .cpp), if one exists in this TU."""
+    enclosing_class_end_offset: int
+    """Byte offset just past the enclosing class's closing `};` in the header — the free
+    function declaration is inserted here, since it must live outside the class body."""
+
+
+@dataclass
+class CallSite:
+    file: Path
+    line: int
+    column: int
+    source_line: str
 
 
 @dataclass
@@ -97,12 +124,58 @@ def _classify(method: Cursor) -> FreeFunctionCandidate | None:
         return None
 
     class_decl = method.semantic_parent
+    params = list(method.get_arguments())
+    header_text = Path(method.location.file.name).read_text()
+
     return FreeFunctionCandidate(
         class_name=class_decl.spelling,
         method_name=method.spelling,
         signature=method.displayname,
         header_line=method.location.line,
         reason="body references no instance fields or non-static member calls; usable via public API only",
+        is_const=method.is_const_method(),
+        param_types=[p.type.spelling for p in params],
+        param_names=[p.spelling or f"arg{i}" for i, p in enumerate(params)],
+        return_type=method.result_type.spelling,
+        declaration_span=_whole_line_span(_span_of(method), header_text),
+        definition_span=_span_of(definition) if definition != method else None,
+        enclosing_class_end_offset=_class_end_offset(class_decl, header_text),
+    )
+
+
+def _class_end_offset(class_decl: Cursor, header_text: str) -> int:
+    """A CLASS_DECL's extent ends right after the closing `}`, not after the class's own
+    trailing `;` — find that `;` explicitly so an insertion point placed here lands after
+    the complete `class X { ... };`, not between the `}` and its `;`.
+    """
+    brace_end = class_decl.extent.end.offset
+    semicolon = header_text.find(";", brace_end)
+    return semicolon + 1 if semicolon != -1 else brace_end
+
+
+def _whole_line_span(span: SourceSpan, text: str) -> SourceSpan:
+    """Widens a declaration's span to cover its full source line(s), including leading
+    indentation and the trailing `;` + newline, so removing it from the class leaves no
+    stray blank/semicolon behind.
+    """
+    line_start = text.rfind("\n", 0, span.start_offset) + 1
+    semicolon = text.find(";", span.end_offset)
+    line_end = text.find("\n", semicolon) + 1 if semicolon != -1 else len(text)
+    return SourceSpan(
+        file=span.file,
+        start_offset=line_start,
+        end_offset=line_end,
+        start_line=span.start_line,
+    )
+
+
+def _span_of(cursor: Cursor) -> SourceSpan:
+    extent = cursor.extent
+    return SourceSpan(
+        file=Path(extent.start.file.name).resolve(),
+        start_offset=extent.start.offset,
+        end_offset=extent.end.offset,
+        start_line=extent.start.line,
     )
 
 
