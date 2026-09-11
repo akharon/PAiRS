@@ -52,12 +52,15 @@
               "get_symbol",
               "outline",
               "impact",
+              "diff_impact",
               "hierarchy",
               "who_calls",
               "file_deps",
               "module_map",
               "analyze",
-              "rename_symbol"
+              "rename_symbol",
+              "grep_symbols",
+              "context_pack"
             ]
           },
           "default": [],
@@ -137,6 +140,10 @@
             "preview": {
               "type": "boolean",
               "description": "Include the symbol's doc line and first few body lines with each hit — usually removes the follow-up Read."
+            },
+            "workspaceFolder": {
+              "type": "string",
+              "description": "Name of the workspace folder to target when multiple are open. Omit to use the first/only workspace folder."
             }
           },
           "required": [
@@ -164,6 +171,10 @@
             "includeMembers": {
               "type": "boolean",
               "description": "List members of a type/impl (methods, fields)."
+            },
+            "workspaceFolder": {
+              "type": "string",
+              "description": "Name of the workspace folder to target when multiple are open. Omit to use the first/only workspace folder."
             }
           },
           "required": [
@@ -183,6 +194,10 @@
             "path": {
               "type": "string",
               "description": "Workspace-relative file path."
+            },
+            "workspaceFolder": {
+              "type": "string",
+              "description": "Name of the workspace folder to target when multiple are open. Omit to use the first/only workspace folder."
             }
           },
           "required": [
@@ -236,11 +251,74 @@
                 ]
               },
               "description": "Restrict the walk to these dependency edge kinds — e.g. [\"CALLS\"] for callers only, [\"READS\",\"WRITES\"] for data access. Omit for all kinds."
+            },
+            "workspaceFolder": {
+              "type": "string",
+              "description": "Name of the workspace folder to target when multiple are open. Omit to use the first/only workspace folder."
             }
           },
           "required": [
             "name"
           ]
+        }
+      },
+      {
+        "name": "pairs_diff_impact",
+        "displayName": "PAiRS: impact of the current diff",
+        "toolReferenceName": "pairsDiffImpact",
+        "modelDescription": "Blast radius of the CURRENT CHANGE: maps the git diff's changed line ranges to the symbols containing them, then walks every dependant of all of them in one merged pass. Use INSTEAD of reading the diff and then calling `impact` once per changed function — dependants reached from several changed symbols appear once, tagged with which ones reach them. Answers \"what do I need to re-test / re-review for this change\". Changed lines that sit in no symbol (imports, module-level code, unindexed files) are reported separately, never silently dropped. Defaults to the unstaged working tree; pass `rev` for a revision or range like \"main...HEAD\".",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "rev": {
+              "type": "string",
+              "description": "Git revision or range to diff, e.g. \"HEAD\" or \"main...HEAD\". Omit for uncommitted working-tree changes."
+            },
+            "staged": {
+              "type": "boolean",
+              "description": "Diff the index (`git diff --staged`) instead of the working tree. Ignored when `rev` is set."
+            },
+            "depth": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 6,
+              "description": "Transitive hops to walk from each changed symbol."
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            },
+            "offset": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Skip this many results — re-call with the offset from a truncated response to page."
+            },
+            "includeTests": {
+              "type": "boolean",
+              "description": "Include dependants reached only through test files."
+            },
+            "kinds": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "CALLS",
+                  "READS",
+                  "WRITES",
+                  "IMPLEMENTS",
+                  "EXTENDS",
+                  "REFERENCES"
+                ]
+              },
+              "description": "Restrict the walk to these dependency edge kinds. Omit for all kinds."
+            },
+            "workspaceFolder": {
+              "type": "string",
+              "description": "Name of the workspace folder to target when multiple are open. Omit to use the first/only workspace folder."
+            }
+          }
         }
       },
       {
@@ -270,6 +348,10 @@
               "type": "integer",
               "minimum": 1,
               "maximum": 200
+            },
+            "workspaceFolder": {
+              "type": "string",
+              "description": "Name of the workspace folder to target when multiple are open. Omit to use the first/only workspace folder."
             }
           },
           "required": [
@@ -312,6 +394,10 @@
               "type": "integer",
               "minimum": 1,
               "maximum": 100
+            },
+            "workspaceFolder": {
+              "type": "string",
+              "description": "Name of the workspace folder to target when multiple are open. Omit to use the first/only workspace folder."
             }
           },
           "required": [
@@ -347,6 +433,10 @@
               "type": "integer",
               "minimum": 1,
               "maximum": 200
+            },
+            "workspaceFolder": {
+              "type": "string",
+              "description": "Name of the workspace folder to target when multiple are open. Omit to use the first/only workspace folder."
             }
           },
           "required": [
@@ -384,6 +474,10 @@
             "boundary": {
               "type": "string",
               "description": "Drill into one edge instead of the whole map: \"<from module> -> <to module>\" (module keys as printed by a plain module_map call). Returns the symbols of the target module that the source actually uses, with reference sites — i.e. exactly what breaking that dependency would require."
+            },
+            "workspaceFolder": {
+              "type": "string",
+              "description": "Name of the workspace folder to target when multiple are open. Omit to use the first/only workspace folder."
             }
           }
         }
@@ -435,6 +529,10 @@
               "type": "integer",
               "minimum": 0,
               "description": "Skip this many results — re-call with the offset from a truncated response to page."
+            },
+            "workspaceFolder": {
+              "type": "string",
+              "description": "Name of the workspace folder to target when multiple are open. Omit to use the first/only workspace folder."
             }
           },
           "required": [
@@ -466,12 +564,106 @@
             "includeFuzzy": {
               "type": "boolean",
               "description": "Also rename reference sites reached by fuzzy (name-only) edges. Off by default: those sites may belong to an unrelated symbol sharing the name."
+            },
+            "workspaceFolder": {
+              "type": "string",
+              "description": "Name of the workspace folder to target when multiple are open. Omit to use the first/only workspace folder."
             }
           },
           "required": [
             "name",
             "newName"
           ]
+        }
+      },
+      {
+        "name": "pairs_grep_symbols",
+        "displayName": "PAiRS: search symbols by regex",
+        "toolReferenceName": "pairsGrepSymbols",
+        "modelDescription": "Search symbol names, qualified names, signatures, and doc text by substring or regex, returning graph citations (not file contents). Use when you know roughly what you're looking for but not the exact symbol name — a plain-text search over the index instead of grep-and-Read over the filesystem.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pattern": {
+              "type": "string",
+              "description": "Substring (default) or regex to match against name/qualified/signature/doc."
+            },
+            "isRegex": {
+              "type": "boolean",
+              "description": "Treat `pattern` as a regular expression instead of a plain substring."
+            },
+            "kinds": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "module",
+                  "function",
+                  "method",
+                  "class",
+                  "struct",
+                  "interface",
+                  "enum",
+                  "trait",
+                  "impl",
+                  "field",
+                  "var",
+                  "param",
+                  "const",
+                  "static",
+                  "macro"
+                ]
+              },
+              "description": "Restrict to these symbol kinds."
+            },
+            "pathPrefix": {
+              "type": "string",
+              "description": "Limit to files under this workspace-relative directory."
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            "workspaceFolder": {
+              "type": "string",
+              "description": "Name of the workspace folder to target when multiple are open. Omit to use the first/only workspace folder."
+            }
+          },
+          "required": [
+            "pattern"
+          ]
+        }
+      },
+      {
+        "name": "pairs_context_pack",
+        "displayName": "PAiRS: context pack (bundle)",
+        "toolReferenceName": "pairsContextPack",
+        "modelDescription": "One assembled bundle for a symbol or file: its definition, direct callers, direct callees, type hierarchy (if a type), and enclosing module boundary. Composes find_symbol/who_calls/hierarchy/module_map into a single call — use this instead of making all of those calls separately when you need broad context on one symbol or file fast.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "Symbol name (bare or qualified). Provide this or `path`."
+            },
+            "path": {
+              "type": "string",
+              "description": "Workspace-relative file path, for a file-level pack. Provide this or `name`."
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50,
+              "description": "Max items per section (callers, callees, etc)."
+            },
+            "workspaceFolder": {
+              "type": "string",
+              "description": "Name of the workspace folder to target when multiple are open. Omit to use the first/only workspace folder."
+            }
+          }
         }
       }
     ]

@@ -27,6 +27,10 @@ const pathHint = z
   .string()
   .optional()
   .describe('Disambiguation hint: prefer the symbol defined in this file (workspace-relative path or suffix).');
+const workspaceFolder = z
+  .string()
+  .optional()
+  .describe('Name of the workspace folder to target when multiple are open. Omit to use the first/only workspace folder.');
 
 export const codeToolSchemas = {
   find_symbol: {
@@ -48,6 +52,7 @@ export const codeToolSchemas = {
         .describe(
           "Include the symbol's doc line and first few body lines with each hit — usually removes the follow-up Read."
         ),
+      workspaceFolder,
     }),
   },
 
@@ -60,6 +65,7 @@ export const codeToolSchemas = {
       name: z.string().min(1).describe('Bare or qualified name.'),
       path: pathHint,
       includeMembers: z.boolean().default(true).describe('List members of a type/impl (methods, fields).'),
+      workspaceFolder,
     }),
   },
 
@@ -69,6 +75,7 @@ export const codeToolSchemas = {
       'ordered by position. Use INSTEAD of Read when you need a file\'s shape.',
     input: z.object({
       path: z.string().min(1).describe('Workspace-relative file path.'),
+      workspaceFolder,
     }),
   },
 
@@ -94,6 +101,7 @@ export const codeToolSchemas = {
           'Restrict the walk to these dependency edge kinds — e.g. ["CALLS"] for callers only, ' +
             '["READS","WRITES"] for data access. Omit for all kinds.'
         ),
+      workspaceFolder,
     }),
   },
 
@@ -121,6 +129,7 @@ export const codeToolSchemas = {
         .array(z.enum(IMPACT_EDGE_KINDS))
         .optional()
         .describe('Restrict the walk to these dependency edge kinds. Omit for all kinds.'),
+      workspaceFolder,
     }),
   },
 
@@ -137,6 +146,7 @@ export const codeToolSchemas = {
       path: pathHint,
       depth: z.number().int().min(1).max(6).default(3).describe('Transitive hops to walk, each direction.'),
       limit: z.number().int().min(1).max(200).default(50),
+      workspaceFolder,
     }),
   },
 
@@ -153,6 +163,7 @@ export const codeToolSchemas = {
       includeFuzzy: z.boolean().default(true).describe('Include name-match (unverified) edges.'),
       includeTests: z.boolean().default(true).describe('Include edges whose reference site is in a test file. Off hides them and the footer states how many were hidden.'),
       limit: z.number().int().min(1).max(100).default(30),
+      workspaceFolder,
     }),
   },
 
@@ -166,6 +177,7 @@ export const codeToolSchemas = {
       direction: z.enum(['importers', 'imports']).default('importers'),
       transitive: z.boolean().default(false).describe('Walk up to 5 hops; results carry their depth.'),
       limit: z.number().int().min(1).max(200).default(50),
+      workspaceFolder,
     }),
   },
 
@@ -192,6 +204,7 @@ export const codeToolSchemas = {
             'the target module that the source actually uses, with reference sites — i.e. ' +
             'exactly what breaking that dependency would require.'
         ),
+      workspaceFolder,
     }),
   },
 
@@ -209,6 +222,7 @@ export const codeToolSchemas = {
       includeExported: z.boolean().default(false).describe('dead_code: also report exported/public symbols.'),
       limit: z.number().int().min(1).max(100).default(30),
       offset,
+      workspaceFolder,
     }),
   },
   rename_symbol: {
@@ -231,6 +245,7 @@ export const codeToolSchemas = {
           'Also rename reference sites reached by fuzzy (name-only) edges. Off by default: ' +
             'those sites may belong to an unrelated symbol sharing the name.'
         ),
+      workspaceFolder,
     }),
   },
 
@@ -246,6 +261,7 @@ export const codeToolSchemas = {
       kinds: z.array(symbolKind).optional().describe('Restrict to these symbol kinds.'),
       pathPrefix: z.string().optional().describe('Limit to files under this workspace-relative directory.'),
       limit: z.number().int().min(1).max(100).default(30),
+      workspaceFolder,
     }),
   },
 
@@ -260,6 +276,7 @@ export const codeToolSchemas = {
       name: z.string().min(1).optional().describe('Symbol name (bare or qualified). Provide this or `path`.'),
       path: z.string().min(1).optional().describe('Workspace-relative file path, for a file-level pack. Provide this or `name`.'),
       limit: z.number().int().min(1).max(50).default(10).describe('Max items per section (callers, callees, etc).'),
+      workspaceFolder,
     }),
   },
 } as const;

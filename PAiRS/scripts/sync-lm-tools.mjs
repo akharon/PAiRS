@@ -29,6 +29,8 @@ const DISPLAY = {
   module_map: { name: 'pairs_module_map', displayName: 'PAiRS: module map (subsystems)', toolReferenceName: 'pairsModuleMap' },
   analyze: { name: 'pairs_analyze', displayName: 'PAiRS: analyze (dead code, cycles, hotspots)', toolReferenceName: 'pairsAnalyze' },
   rename_symbol: { name: 'pairs_rename_symbol', displayName: 'PAiRS: rename symbol', toolReferenceName: 'pairsRenameSymbol' },
+  grep_symbols: { name: 'pairs_grep_symbols', displayName: 'PAiRS: search symbols by regex', toolReferenceName: 'pairsGrepSymbols' },
+  context_pack: { name: 'pairs_context_pack', displayName: 'PAiRS: context pack (bundle)', toolReferenceName: 'pairsContextPack' },
 };
 
 // Minimal zod -> VS Code inputSchema (JSON Schema subset) converter — only
