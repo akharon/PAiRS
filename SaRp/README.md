@@ -1,6 +1,6 @@
 # SaRp — Semantic Analysis Recursive Processor
 
-SaRp is a libclang-based CLI for detecting (and safely rewriting) two C++ refactor
+SaRp is a libclang-based CLI for detecting (and safely rewriting) three C++ refactor
 patterns that need real semantic analysis, not just text/syntax matching:
 
 1. **Forward-declaration / pimpl-style include pruning** — find `#include`s in a
@@ -10,6 +10,9 @@ patterns that need real semantic analysis, not just text/syntax matching:
 2. **Member function → free function** — find non-static, non-virtual methods whose
    bodies never touch instance state (no field access, no calls to other non-static
    member functions, no `this`), and convert them into free functions.
+3. **Full pimpl idiom** — find classes whose entire private state can be moved into a
+   `struct Impl` (defined in the `.cpp`), replaced by a single
+   `std::unique_ptr<Impl> impl_` member in the header, and rewrite both files.
 
 Both analyses use [libclang](https://clang.llvm.org/docs/Tooling.html) to build a real
 AST from your project's `compile_commands.json` — not tree-sitter or regex — because
@@ -31,6 +34,14 @@ Both refactors are conservative by design:
   larger, riskier operation than this tool currently attempts. Instead, `--apply`
   prints every call site that needs a manual update, with file:line and the source
   line itself.
+- **Full pimpl** only offers a class as a candidate when the rewrite can be applied by
+  pure text substitution with no risk of changing behavior: every private member must
+  be a data field (no private methods), no protected members, no member-initializer-list
+  entries for private fields (`: x_(x)` needs a structural move into `Impl`'s own
+  constructor, not a substitution — such a class is skipped, not half-rewritten), and
+  every method touching a private field must have its definition visible in the
+  translation unit being analyzed. A class is skipped, with a stated reason, rather
+  than partially converted.
 
 ## Installation
 
@@ -73,6 +84,14 @@ sarp --compile-commands build/compile_commands.json \
     free-function src/calculator.h --via src/calculator.cpp --apply
 ```
 
+`full-pimpl` follows the same `--via` rule as `free-function` — it needs to see method
+*definitions*, not just declarations, to know exactly which field accesses to rewrite:
+
+```bash
+sarp --compile-commands build/compile_commands.json \
+    full-pimpl src/counter.h --via src/counter.cpp --apply
+```
+
 ### Batch mode
 
 Scan every header reachable from `compile_commands.json` in one pass, instead of one
@@ -81,6 +100,7 @@ Scan every header reachable from `compile_commands.json` in one pass, instead of
 ```bash
 sarp --compile-commands build/compile_commands.json forward-decl --batch .
 sarp --compile-commands build/compile_commands.json free-function --batch .
+sarp --compile-commands build/compile_commands.json full-pimpl --batch .
 ```
 
 For each header, SaRp picks a `--via` file automatically: the same-basename `.cpp` if
@@ -135,6 +155,59 @@ Free-function candidates in src/calculator.h:
       src/main.cpp:9  std::cout << "sumTwo: " << calc.sumTwo(2, 3) << std::endl;
 ```
 
+```
+$ sarp --compile-commands build/compile_commands.json \
+    full-pimpl src/counter.h --via src/counter.cpp --apply
+
+Full-pimpl candidates in src/counter.h:
+  class Counter: 1 private field(s), all accesses in analyzed method bodies
+    Rewrote src/counter.h
+    Patch saved to src/counter.h.sarp.patch (revert: patch -R < counter.h.sarp.patch)
+    Committed as f4a2b8c91d0e (revert: git revert f4a2b8c91d0e)
+    Rewrote src/counter.cpp
+    Patch saved to src/counter.cpp.sarp.patch (revert: patch -R < counter.cpp.sarp.patch)
+    Committed as 7c3e9f1a2b5d (revert: git revert 7c3e9f1a2b5d)
+```
+
+Before:
+```cpp
+// counter.h
+class Counter {
+public:
+    explicit Counter(int start);
+    int value() const;
+    void increment();
+private:
+    int value_ = 0;
+};
+```
+After:
+```cpp
+// counter.h
+#include <memory>
+class Counter {
+public:
+    ~Counter();
+    explicit Counter(int start);
+    int value() const;
+    void increment();
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
+// counter.cpp
+struct Counter::Impl {
+    int value_ = 0;
+};
+Counter::~Counter() = default;
+Counter::Counter(int start) {
+    impl_ = std::make_unique<Impl>();
+    impl_->value_ = start;
+}
+// ...impl_->value_ everywhere value_ used to appear
+```
+
 ## Limitations
 
 - **No `#ifdef`/macro-conditional awareness.** If a header behaves differently across
@@ -143,17 +216,27 @@ Free-function candidates in src/calculator.h:
 - **Free-function call sites are reported, never rewritten.** You update them by hand
   (or with your editor's find/replace) using the printed file:line list.
 - **No `#include`-what-you-use for `.cpp` files** — only header `#include`s are
-  analyzed for forward-decl candidates, not a `.cpp`'s own includes.
-- **No full pimpl pattern** (moving all private members into a `struct Impl`) — only
-  the narrower forward-decl-and-prune step.
-- Both analyses require the target header/method to be reachable from at least one
-  parseable translation unit in `compile_commands.json`; unparseable files are skipped
-  (batch mode) or reported as an error (single-file mode), never silently miscounted.
+  analyzed for forward-decl candidates, not a `.cpp`'s own includes. (A true
+  "is this include entirely unused" check was attempted and dropped: `#pragma once`/
+  include-guard semantics mean a header is only textually included once per
+  translation unit, via whichever top-level `#include` reaches it first in
+  preprocessing order — so the include graph doesn't reliably show which top-level
+  include is "responsible" for a given symbol, causing real false positives on
+  standard library headers.)
+- **`full-pimpl` doesn't handle private methods, protected members, or
+  member-initializer-list field initialization** — a class using any of these is
+  skipped with a stated reason rather than partially rewritten. It also requires an
+  explicit user-declared constructor (the compiler-generated default constructor can't
+  be given an `impl_` initializer).
+- All three analyses require the target header/method to be reachable from at least
+  one parseable translation unit in `compile_commands.json`; unparseable files are
+  skipped (batch mode) or reported as an error (single-file mode), never silently
+  miscounted.
 
 ## Development
 
 ```bash
 .venv/bin/pip install -e ".[dev]"
-.venv/bin/pytest          # 48 tests, ~1.5s — no real project needed, uses a
+.venv/bin/pytest          # 66 tests, ~7s — no real project needed, uses a
                            # temp-dir C++ project harness (test/conftest.py)
 ```

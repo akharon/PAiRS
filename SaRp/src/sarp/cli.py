@@ -9,6 +9,8 @@ from .call_sites import find_call_sites
 from .compdb import CompileDatabase
 from .free_function_analyzer import FreeFunctionAnalyzer
 from .free_function_rewriter import apply as apply_free_function
+from .full_pimpl_analyzer import FullPimplAnalyzer
+from .full_pimpl_rewriter import apply as apply_full_pimpl
 from .pimpl_analyzer import PimplAnalyzer
 from .pimpl_rewriter import apply as apply_pimpl
 from .project_scan import HeaderTarget, discover_headers
@@ -50,6 +52,21 @@ def main(argv: list[str] | None = None) -> int:
         help="Scan every project header reachable from compile_commands.json instead of a single header",
     )
 
+    fp_cmd = sub.add_parser(
+        "full-pimpl", help="Detect/apply the full pimpl idiom (move private fields into a struct Impl)"
+    )
+    fp_cmd.add_argument("header", type=Path, nargs="?", help="A single header to analyze")
+    fp_cmd.add_argument(
+        "--via", type=Path, help="A .cpp/.cc that DEFINES this header's methods (not just includes it)"
+    )
+    fp_cmd.add_argument("--apply", action="store_true", help="Rewrite the header and .cpp in place")
+    fp_cmd.add_argument(
+        "--batch",
+        type=Path,
+        metavar="PROJECT_ROOT",
+        help="Scan every project header reachable from compile_commands.json instead of a single header",
+    )
+
     args = parser.parse_args(argv)
 
     if args.batch and (args.header or args.via):
@@ -63,6 +80,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_forward_decl(args, compdb)
     if args.command == "free-function":
         return _run_free_function(args, compdb)
+    if args.command == "full-pimpl":
+        return _run_full_pimpl(args, compdb)
     return 1
 
 
@@ -173,6 +192,57 @@ def _run_free_function(args: argparse.Namespace, compdb: CompileDatabase) -> int
         )
     if not args.apply:
         print("(report only; pass --apply to rewrite the declaration/definition — call sites are always reported, never auto-rewritten)")
+    return 0
+
+
+def _run_full_pimpl(args: argparse.Namespace, compdb: CompileDatabase) -> int:
+    analyzer = FullPimplAnalyzer(compdb)
+    targets = _targets(args, compdb)
+    total_candidates = 0
+    headers_with_candidates = 0
+
+    for target in targets:
+        try:
+            report = analyzer.analyze_header(target.header, target.via)
+        except (ValueError, RuntimeError) as err:
+            print(f"  {target.header}: skipped ({err})")
+            continue
+
+        if not report.candidates and not report.skipped:
+            if not args.batch:
+                print(f"No full-pimpl candidates found in {report.header_path}")
+            continue
+
+        if report.skipped and not args.batch:
+            for class_name, reason in report.skipped.items():
+                print(f"Skipped {class_name} in {report.header_path}: {reason}")
+
+        if not report.candidates:
+            continue
+
+        headers_with_candidates += 1
+        total_candidates += len(report.candidates)
+        print(f"Full-pimpl candidates in {report.header_path}:")
+        for c in report.candidates:
+            print(f"  class {c.class_name}: {c.reason}")
+
+            if args.apply:
+                changed = apply_full_pimpl(c, target.via)
+                for file, (_, safety) in changed.items():
+                    print(f"    Rewrote {file}")
+                    print(f"    Patch saved to {safety.patch_path} (revert: patch -R < {safety.patch_path.name})")
+                    if safety.git_commit:
+                        print(f"    Committed as {safety.git_commit[:12]} (revert: git revert {safety.git_commit[:12]})")
+                    else:
+                        print(f"    No git commit made ({safety.git_skipped_reason})")
+
+    if args.batch:
+        print(
+            f"\n{total_candidates} candidate(s) found across {headers_with_candidates} header(s) "
+            f"(of {len(targets)} scanned)."
+        )
+    if not args.apply and total_candidates:
+        print("(dry run; pass --apply to rewrite the header and .cpp)")
     return 0
 
 
