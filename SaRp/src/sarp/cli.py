@@ -45,8 +45,13 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  line {c.include_line}: #include for '{c.type_name}' -> forward decl ({c.reason})")
 
         if args.apply:
-            apply_pimpl(report)
+            _, safety = apply_pimpl(report)
             print(f"Applied {len(report.candidates)} rewrite(s) to {report.header_path}")
+            print(f"Patch saved to {safety.patch_path} (revert: patch -R < {safety.patch_path.name})")
+            if safety.git_commit:
+                print(f"Committed as {safety.git_commit[:12]} (revert: git revert {safety.git_commit[:12]})")
+            else:
+                print(f"No git commit made ({safety.git_skipped_reason})")
         else:
             print("(dry run; pass --apply to rewrite the header)")
         return 0
