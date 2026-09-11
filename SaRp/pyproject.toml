@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sarp"
+version = "0.1.0"
+description = "Semantic Analysis Recursive Processor — libclang-based C++ refactor detection and safe rewriting"
+requires-python = ">=3.10"
+dependencies = [
+    "libclang>=18.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+sarp = "sarp.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

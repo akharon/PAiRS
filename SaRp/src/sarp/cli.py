@@ -36,8 +36,8 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     ff_cmd = sub.add_parser("free-function", help="Detect member functions that could be free functions")
-    ff_cmd.add_argument("header", type=Path, nargs="?")
-    ff_cmd.add_argument("--via", type=Path)
+    ff_cmd.add_argument("header", type=Path, nargs="?", help="A single header to analyze")
+    ff_cmd.add_argument("--via", type=Path, help="A .cpp/.cc that DEFINES this header's methods (not just includes it)")
     ff_cmd.add_argument(
         "--apply",
         action="store_true",
