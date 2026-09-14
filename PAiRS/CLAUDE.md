@@ -197,8 +197,19 @@ npm run typecheck     # tsc --noEmit
 npm run lint          # eslint src
 
 npm run package       # Build .vsix (VS Code extension)
-npm run install       # Install locally to VS Code
+npm run install       # Install locally to VS Code (full pipeline: build → test → package → install)
 ```
+
+### CLI Auto-Installation
+
+When the extension is installed (via `npm install` or VS Code extension marketplace), the `postinstall` hook automatically:
+1. Creates a symlink `~/.local/bin/pairs` → `<projectRoot>/dist/cli.js`
+2. Makes the `pairs` CLI immediately available in any terminal
+3. Warns if `~/.local/bin` isn't in `PATH` (with instructions to add it)
+
+When the package is removed/uninstalled, the `postrm` hook cleans up the symlink.
+
+**Result**: No need to manually run `npm link` — the CLI is ready to use after installation.
 
 ---
 
@@ -302,9 +313,22 @@ pairs query 'SELECT * FROM Symbol LIMIT 10'  # Raw SQL
 
 ---
 
+## Relationship to SaRp
+
+**SaRp** (Semantic Analysis Recursive Processor, in `../SaRp/`) is a complementary tool for C++ refactoring:
+- PAiRS: Code-graph indexing (tree-sitter based, navigation + analysis)
+- SaRp: Semantic refactoring (libclang based, safe automated rewrites)
+
+Workflow: Use PAiRS to understand the codebase structure and call chains, then use SaRp to apply semantic-aware refactorings (pimpl, const propagation, free functions, etc.). SaRp's real AST analysis catches things regex/text patterns cannot.
+
+For SaRp documentation, see `../SaRp/CLAUDE.md`.
+
+---
+
 ## References
 
 - **README.md** — 60-second quickstart, full tool reference, VS Code usage
 - **package.json** — Build scripts, dependencies, Language Model Tool schemas
 - **.pairs/index.db** — SQLite store (auto-generated, safe to .gitignore)
 - **.claude/skills/pairs/SKILL.md** — Auto-generated Claude Code skill (regenerated on extension activation)
+- **../SaRp/CLAUDE.md** — Semantic refactoring companion tool documentation
