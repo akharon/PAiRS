@@ -679,7 +679,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "package": "bash scripts/package.sh",
-    "install": "bash scripts/install.sh"
+    "install": "bash scripts/install.sh",
+    "postinstall": "node scripts/link-cli.mjs",
+    "postrm": "node scripts/unlink-cli.mjs"
   },
   "dependencies": {
     "web-tree-sitter": "^0.25.10",
