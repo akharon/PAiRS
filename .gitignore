@@ -1,0 +1,41 @@
+# PAiRS derived indices — disposable, rebuildable from source, never committed
+.pairs/
+.pairs*
+
+# SaRp derived indices
+.sarp/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+*.local
+
+# Build outputs
+*.egg-info/
+dist/
+build/
+__pycache__/
+*.pyc
+.pytest_cache/
+.vitest/
+
+# Node/npm
+node_modules/
+*.tgz
+pnpm-lock.yaml
+yarn.lock
+package-lock.json
+
+# Temporary
+*.swp
+*.swo
+*~
+.tmp/
