@@ -3,6 +3,7 @@
 .git
 .gitignore
 .pairs/**
+.claude/settings.local.json
 scripts/
 spikes/
 # Everything else in node_modules is bundled into dist/ and excluded.
@@ -13,3 +14,5 @@ eslint.config.mjs
 tsconfig.json
 vitest.config.ts
 src/
+dist/**/*.js.map
+dist/v3-bench.*

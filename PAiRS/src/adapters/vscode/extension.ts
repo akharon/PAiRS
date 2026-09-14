@@ -39,6 +39,7 @@ import { createExecutors } from '../../core/tools/executors';
 import { collectDiffHunks } from '../../platform/gitDiff';
 import { codeToolSchemas } from '../../core/tools/tools';
 import type { CodeToolInput, CodeToolName } from '../../core/tools/tools';
+import { ensureCliLinked } from './cliLink';
 import { writeSkillFiles } from './skills';
 
 interface Workspace {
@@ -401,6 +402,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   }
 
   void Promise.all(workspaces.map((ws) => writeSkillFiles(ws.root)));
+
+  // Marketplace installs never run npm's postinstall hook, so link the
+  // bundled CLI onto PATH here instead — the only path that covers every
+  // install method (Marketplace, .vsix, npm install).
+  void ensureCliLinked(context.extensionPath);
 }
 
 export function deactivate(): void {

@@ -12,8 +12,9 @@ import path from 'node:path';
 import os from 'node:os';
 
 const homeDir = os.homedir();
-const binDir = path.join(homeDir, '.local', 'bin');
-const symlinkTarget = path.join(binDir, 'pairs');
+const isWindows = process.platform === 'win32';
+const binDir = isWindows ? path.join(homeDir, 'AppData', 'Local', 'Pairs', 'bin') : path.join(homeDir, '.local', 'bin');
+const symlinkTarget = path.join(binDir, isWindows ? 'pairs.cmd' : 'pairs');
 
 async function main() {
   try {
@@ -31,9 +32,9 @@ async function main() {
           isOurSymlink = true;
         }
       } else if (stat.isFile()) {
-        // File (not symlink) — check if it's our CLI
+        // File (not symlink) — check if it's our CLI (Windows .cmd shim)
         const content = await fs.readFile(symlinkTarget, 'utf8');
-        if (content.includes('PAiRS') || content.includes('cli')) {
+        if (content.includes('cli.js')) {
           isOurSymlink = true;
         }
       }

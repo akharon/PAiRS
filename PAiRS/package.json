@@ -1,12 +1,26 @@
 {
   "name": "pairs",
+  "displayName": "PAiRS",
   "version": "0.24.0",
   "description": "Derived code-graph index for AI coding agents",
+  "publisher": "mkyr",
   "license": "MIT",
   "author": "Mustafa Kiyar",
+  "categories": [
+    "Programming Languages",
+    "Machine Learning",
+    "Other"
+  ],
+  "keywords": [
+    "code graph",
+    "copilot",
+    "language model tools",
+    "code navigation",
+    "refactoring"
+  ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/mkyr/pairs"
+    "url": "https://github.com/akharon/PAiRS.git"
   },
   "readme": "README.md",
   "icon": "assets/icon.png",

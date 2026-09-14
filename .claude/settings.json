@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pairs --version)",
+      "Bash(pairs --help)",
+      "Bash(node scripts/unlink-cli.mjs)",
+      "Bash(pairs find_symbol --help)",
+      "Bash(git commit -m ' *)",
+      "Bash(pairs)",
+      "Bash(git commit -m 'Document PAiRS CLI auto-installation in CLAUDE.md *)",
+      "Bash(git commit -m 'Add SaRp and project configuration documentation *)",
+      "Bash(git commit -m 'Enhance .gitignore and extension initialization *)",
+      "Bash(git check-ignore *)",
+      "Bash(git restore *)",
+      "Bash(git rm *)",
+      "Bash(git commit -m 'Add root .gitignore to exclude derived indices and build artifacts *)",
+      "Bash(git log *)",
+      "Bash(identify assets/icon.png)",
+      "Bash(npx @vscode/vsce ls)"
+    ]
+  }
+}

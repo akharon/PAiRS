@@ -128,4 +128,4 @@ npm run install          # build + package + code --install-extension, end to en
 
 ---
 
-**License:** MIT | **GitHub:** [mkyr/pairs](https://github.com/mkyr/pairs)
+**License:** MIT | **GitHub:** [akharon/PAiRS](https://github.com/akharon/PAiRS)
