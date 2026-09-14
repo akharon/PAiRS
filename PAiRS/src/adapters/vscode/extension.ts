@@ -57,10 +57,34 @@ let statusBar: vscode.StatusBarItem | undefined;
 // through every call site — mirrors the existing statusBar module-level.
 let allWorkspaces: Workspace[] = [];
 
+/**
+ * Adds `.pairs/` to the workspace's top-level .gitignore so the derived index
+ * is never accidentally committed. No-op if the entry (or a broader pattern
+ * such as `.pairs` followed by a wildcard) is already present; creates the
+ * file if it doesn't exist.
+ */
+async function ensurePairsIgnored(root: string): Promise<void> {
+  const gitignorePath = path.join(root, '.gitignore');
+  let contents = '';
+  try {
+    contents = await fs.readFile(gitignorePath, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+  const alreadyIgnored = contents
+    .split('\n')
+    .some((line) => /^\.pairs\*?\/?$/.test(line.trim()));
+  if (alreadyIgnored) return;
+  const needsNewline = contents.length > 0 && !contents.endsWith('\n');
+  contents += `${needsNewline ? '\n' : ''}${contents.length > 0 ? '\n' : ''}# PAiRS derived index - disposable, never committed\n.pairs/\n`;
+  await fs.writeFile(gitignorePath, contents, 'utf8');
+}
+
 async function openWorkspace(folder: vscode.WorkspaceFolder, extensionPath: string): Promise<Workspace> {
   const root = folder.uri.fsPath;
   const dbPath = path.join(root, '.pairs', 'index.db');
   await fs.mkdir(path.dirname(dbPath), { recursive: true });
+  await ensurePairsIgnored(root);
   // Bundled next to dist/extension.js by scripts/fetch-grammars.mjs.
   const grammarsDir = path.join(extensionPath, 'dist', 'grammars');
   const queriesDir = path.join(extensionPath, 'dist', 'queries');

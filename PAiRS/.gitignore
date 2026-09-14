@@ -40,6 +40,7 @@ coverage/
 # PAiRS derived index — disposable, rebuildable from source, never committed
 # (holds the SQLite code graph, cache, and build-state sidecar)
 .pairs/
+.pairs*/
 
 # rules.ron and baseline.json ARE committed (team-owned policy) — they live
 # in the repo being analyzed, not here, so no ignore needed in this repo.
