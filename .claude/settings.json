@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pairs --version)",
+      "Bash(pairs --help)",
+      "Bash(node scripts/unlink-cli.mjs)",
+      "Bash(pairs find_symbol --help)",
+      "Bash(git commit -m ' *)",
+      "Bash(pairs)",
+      "Bash(git commit -m 'Document PAiRS CLI auto-installation in CLAUDE.md *)",
+      "Bash(git commit -m 'Add SaRp and project configuration documentation *)"
+    ]
+  }
+}
