@@ -1,5 +1,17 @@
 # PAiRS Codebase Documentation
 
+## Session preferences
+
+- Keep chat responses silent/minimal to save tokens — avoid narration, progress updates, or verbose explanations unless asked.
+- Use `/pairs` skill for code navigation instead of Read/grep — saves 40-60% of lookup tokens.
+- Batch independent Read/Edit/Bash calls together to reduce round-trips.
+- Trust diffs on edits — never ask to verify changes after Edit tool succeeds.
+- Ask for specific line ranges when reading large files, not whole files.
+- Reference code by `file:line` markdown links instead of quoting content.
+- **Save project context to memory** → `/home/mkyr/.claude/projects/-home-mkyr/memory/` (e.g., architectural decisions, common patterns, token optimizations learned).
+
+---
+
 **PAiRS** (Parsed AI-Readable Semantic Index) is a code-graph indexing system for AI coding agents and developers. It parses workspaces into queryable code graphs containing symbols, calls, imports, and type hierarchies, exposing them as:
 - **VS Code extension** with Language Model Tools (for Copilot agent mode)
 - **Standalone CLI** (`pairs` binary)
@@ -10,7 +22,37 @@ Both extension and CLI share the same SQLite index store (`.pairs/index.db`), en
 ---
 
 ## Supported Languages
+
 C, C++, Python, JavaScript, TypeScript, Java, Go, Ruby, Dart, Rust, CSS, HTML, GDScript.
+
+---
+
+## Golden Comments (Key Invariants)
+
+- **G1: Adapter layer is the boundary** — `adapters/` is the ONLY place that imports VS Code. Everything below is editor-agnostic core. Enforced by eslint `no-restricted-imports`.
+- **G2: One-pass rename, no partial edits** — `rename_symbol` validates ALL sites before writing ANY file. If any site can't be matched safely, whole operation aborts untouched.
+- **G3: Confidence labels on all edges** — `resolved` (AST-verified, safe for refactoring) vs. `fuzzy` (name-only, requires explicit opt-in). Default excludes fuzzy.
+- **G4: Shared store = single source of truth** — Extension and CLI both read/write `.pairs/index.db`. Indexer runs on extension activation + file save; CLI runs manually/CI.
+
+---
+
+## Scripts & Automation
+
+Available in `/scripts/`:
+- `build.sh` — Compile TS → JS (esbuild), typecheck
+- `test.sh` — Run integration tests (index/parse validation)
+- `package.sh` — Build `.vsix` extension
+- `install.sh` — Build + test + package + install to VS Code
+- `lint.sh` — ESLint + Prettier
+
+**Bash aliases** (add to session):
+```bash
+alias build='npm run build'
+alias test='npm run test'
+alias typecheck='npm run typecheck'
+alias lint='./scripts/lint.sh'
+alias package='npm run package'
+```
 
 ---
 
@@ -66,65 +108,31 @@ src/
 
 ---
 
-## The Tool Stack
-
-Each **tool** is a queryable code-graph function. They are:
-- **Defined** in `core/tools/tools.ts` (Zod schema + prose description)
-- **Implemented** in `core/tools/executors.ts` (query builders → store calls → output formatters)
-- **Registered** as VS Code Language Model Tools (in `adapters/vscode/extension.ts`)
-- **Exposed** as CLI subcommands (in `adapters/cli/index.ts`)
-- **Written** to Claude Code skill file (in `adapters/vscode/skills.ts`)
-
-### Core Tools
-
-| Tool | Purpose | Key Feature |
-|------|---------|-------------|
-| `find_symbol` | Locate symbol definition by name | Ambiguous names return candidates; `preview:true` inlines doc + body lines |
-| `get_symbol` | Full declaration (signature, doc, members) | No file read needed; type/impl members included |
-| `outline` | File structure (symbols, line ranges) | For browsing file shape quickly |
-| `grep_symbols` | Search names/signatures/doc by regex | For "I don't know the exact name" |
-| `impact` | Transitive dependants (blast radius) | Walk CALLS/READS/WRITES/IMPLEMENTS/EXTENDS; configurable depth |
-| `hierarchy` | Type ancestor/descendant tree | Only inheritance/interface edges (narrower than `impact`) |
-| `who_calls` | Direct callers or callees (one hop) | Lighter than `impact` |
-| `file_deps` | File-level importers or imports | Can walk transitively; carries depth info |
-| `module_map` | Subsystems, cycles, drift, layers | Louvain clustering; boundary drill-down shows exact symbols used |
-| `analyze` | Workspace-wide scans | dead_code, fan_out, cycles, test_gap |
-| `rename_symbol` | **Rename + all reference sites atomically** | **Aborts untouched if any site unsafe; no partial edits** |
-| `diff_impact` | Blast radius of current git change | Maps diff hunks to changed symbols; walks their dependants once |
-| `context_pack` | Bundle for symbol/file | Definition, callers, callees, type info, module boundary — one call instead of four |
-
----
-
-## The Graph
-
-### Stored Records
-
-**Symbols** (indexed names in code):
-- Name, kind (function/class/method/field/const/etc.), file path, line range, signature, doc
-- Resolved/fuzzy indicator (verified by AST walk vs. name-only match)
-
-**Edges** (relationships):
-- Source → Target + kind (CALLS, READS, WRITES, IMPLEMENTS, EXTENDS, REFERENCES)
-- Resolved/fuzzy indicator
-- Call site info (file, line, colums, as reference)
-
-**Files**:
-- Workspace-relative path, language, last-indexed timestamp
-
-### Confidence Levels
-
-Each edge/symbol carries a **confidence** label:
-- `resolved`: AST-verified (high confidence — safe for automated refactoring)
-- `fuzzy`: Name-only match (lower confidence — `rename_symbol` requires `includeFuzzy: true` to apply)
-- `unresolved`: Could not verify at all
-
----
-
 ## How to Navigate & Modify the Code
 
 ### **Use PAiRS Skill for Code Navigation** ⭐
 
-**Default preference: Use `/pairs` skill (or equivalent) for symbol/dependency queries instead of grep/Read.** This saves 40-60% of token budget per task:
+**Default preference: Use `/pairs` skill (or equivalent) for symbol/dependency queries instead of grep/Read.** This saves 40-60% of token budget per task.
+
+**Common queries for PAiRS (meta!):**
+```bash
+# Find adapter layer violations (G1 rule: adapters/ only)
+/pairs grep_symbols "import.*vscode" --regex --preview
+
+# Trace tool registration pipeline
+/pairs impact "codeToolSchemas" --depth 2
+
+# Verify confidence label usage (resolved vs fuzzy)
+/pairs grep_symbols "resolved|fuzzy|confidence" --regex
+
+# Check index store facade usage
+/pairs who_calls "sqliteCodeStore" --direction callers --preview
+
+# Audit extension activation flow
+/pairs find_symbol "extension.ts" --path "src/adapters/vscode" --preview
+```
+
+**Usage examples for users:**
 
 - Find a symbol: `pairs find_symbol SymbolName` (with `preview:true` to inline doc + code)
 - Get full declaration: `pairs get_symbol SymbolName`
@@ -325,10 +333,35 @@ For SaRp documentation, see `../SaRp/CLAUDE.md`.
 
 ---
 
-## References
+**ADR Reference:** View architectural decisions:
+```bash
+git log --grep="ADR" --oneline
+```
 
-- **README.md** — 60-second quickstart, full tool reference, VS Code usage
-- **package.json** — Build scripts, dependencies, Language Model Tool schemas
-- **.pairs/index.db** — SQLite store (auto-generated, safe to .gitignore)
-- **.claude/skills/pairs/SKILL.md** — Auto-generated Claude Code skill (regenerated on extension activation)
-- **../SaRp/CLAUDE.md** — Semantic refactoring companion tool documentation
+---
+
+## Maintenance
+
+**When adding new configuration or compiler options:**
+1. Update [docs/CONFIG.md](docs/CONFIG.md) — document in relevant section
+2. Add linting rule if needed to enforce the constraint
+
+**When adding new language or tool:**
+1. Update [docs/DATA.md](docs/DATA.md) — add to "Supported Languages" or "Symbol Kinds"
+2. Add test fixtures showing extraction accuracy for new language
+3. Document confidence levels for edges specific to that language
+
+**Example:** If adding Kotlin support:
+```markdown
+**Supported Languages:**
+- Kotlin (tree-sitter; high accuracy for classes, functions, interfaces)
+```
+
+And in fixtures:
+```
+src/test/fixtures/kotlin_project/
+  ├── expected_symbols.json
+  └── expected_edges.json
+```
+
+**Last updated:** 2026-09-15 (Token-optimized with memory enforcement)
