@@ -1,7 +1,7 @@
 {
   "name": "pairs",
   "displayName": "PAiRS",
-  "version": "0.24.0",
+  "version": "0.25.0",
   "description": "Derived code-graph index for AI coding agents",
   "publisher": "mkyr",
   "license": "MIT",
