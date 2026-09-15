@@ -1,5 +1,17 @@
 # SaRp Codebase Documentation
 
+## Session preferences
+
+- Keep chat responses silent/minimal to save tokens — avoid narration, progress updates, or verbose explanations unless asked.
+- Use `/pairs` skill for code navigation instead of Read/grep — saves 40-60% of lookup tokens.
+- Batch independent Read/Edit/Bash calls together to reduce round-trips.
+- Trust diffs on edits — never ask to verify changes after Edit tool succeeds.
+- Ask for specific line ranges when reading large files, not whole files.
+- Reference code by `file:line` markdown links instead of quoting content.
+- **Save project context to memory** → `/home/mkyr/.claude/projects/-home-mkyr/memory/` (e.g., architectural decisions, common patterns, token optimizations learned).
+
+---
+
 **SaRp** (Semantic Analysis Recursive Processor) is a libclang-based CLI tool for detecting and safely rewriting C++ refactoring patterns that require real semantic analysis. It analyzes your project's `compile_commands.json` to build a real AST and identify opportunities for safe, automated refactoring.
 
 ---
@@ -77,6 +89,36 @@ SaRp performs 12 analyses across a C++ codebase, grouped into three categories:
 
 ---
 
+## Golden Comments (Key Invariants)
+
+- **G1: Conservative rewrites only** — Every rewrite aborts if *anything* looks unsafe. Partial pimpl only if no private methods/initializers. Forward-decl only if NO usage needs complete type.
+- **G2: Analyzer/rewriter split enforced** — Analyzers are pure (no side effects, always safe). Rewriters apply text substitutions (can fail, logged). CLI runs analyzer first; user approves before apply.
+- **G3: Macro expansion safety critical** — Clang source extents inside macros can be degenerate. `safety.is_safe_extent()` validates before rewriting. Call sites inside macros reported for manual review.
+- **G4: Real AST, not regex** — libclang provides full semantic analysis (overload resolution, type completeness, access checking). Text/syntax approaches fail on methods calling other methods indirectly, forward-declared types, macro-expanded code.
+
+---
+
+## Scripts & Automation
+
+Available in `/scripts/`:
+- `install.sh` — Create `.venv`, install dev dependencies
+- `test.sh` — Run pytest suite (all analyses)
+- `test-one.sh <name>` — Run single analysis test
+- `lint.sh` — Mypy + Black
+- `analyze-project.sh <compile_commands.json>` — Dry run on real project
+- `apply-refactoring.sh <analysis> <compile_commands.json>` — Apply refactoring
+
+**Bash aliases** (add to session):
+```bash
+alias install='./scripts/install.sh'
+alias test='./scripts/test.sh'
+alias test-one='./scripts/test-one.sh'
+alias lint='./scripts/lint.sh'
+alias analyze='./scripts/analyze-project.sh'
+```
+
+---
+
 ## Architecture Overview
 
 ### Directory Structure
@@ -138,6 +180,36 @@ src/sarp/
    - Source span validation (is this cursor extent trustworthy?)
    - Macro expansion detection (skips rewriting inside macros)
    - Line/column-based text replacement
+
+---
+
+## PAiRS Skill Shortcuts
+
+While SaRp is Python-based (less tree-sitter coverage), use `/pairs` for C++ analysis discovery and cross-project navigation.
+
+**Common queries for SaRp (self-discovery):**
+```bash
+# Find all analyzer implementations (1 per analysis)
+/pairs find_symbol ".*_analyzer" --regex --preview
+
+# Verify conservative rewrite pattern (G2 rule)
+/pairs grep_symbols "abort|unsafe|safety" --regex
+
+# Check macro expansion safety (G3 rule critical)
+/pairs find_symbol "is_safe_extent" --preview
+
+# Trace analyzer→rewriter pipeline
+/pairs impact "Finding" --depth 2
+
+# Audit test fixture strategy
+/pairs find_symbol "conftest" --preview
+```
+
+**For C++ codebases being analyzed by SaRp**, use SaRp itself:
+```bash
+sarp analyze /path/to/compile_commands.json --all
+sarp apply const-propagation /path/to/compile_commands.json
+```
 
 ---
 
@@ -477,3 +549,12 @@ While **PAiRS** is a code-graph indexing system for code navigation and call-cha
 - SaRp provides conservative automated rewrites (or reports for manual review)
 
 The two tools can be used together: use PAiRS to navigate the codebase, then use SaRp to apply semantic refactorings.
+
+---
+
+**ADR Reference:** View architectural decisions:
+```bash
+git log --grep="ADR" --oneline
+```
+
+**Last updated:** 2026-09-15 (Token-optimized with memory enforcement)
