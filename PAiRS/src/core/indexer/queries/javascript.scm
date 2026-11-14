@@ -52,6 +52,12 @@
 (call_expression
   function: (member_expression
     property: (property_identifier) @ref.call))
+; Constructor calls: `new Foo()` is a call to class Foo.
+(new_expression
+  constructor: (identifier) @ref.call)
+(new_expression
+  constructor: (member_expression
+    property: (property_identifier) @ref.call))
 
 ; --- imports ---------------------------------------------------------------------
 (import_statement

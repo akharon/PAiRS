@@ -15,42 +15,59 @@
  * chat participant, no embeddings — code graph only.
  */
 
-import * as path from 'node:path';
-import * as fs from 'node:fs/promises';
-// Synchronous counterpart for the preview reader: ExecutorDeps.readSource
-// returns `string | null`, not a Promise. The extension runs in the node
-// host, so node fs is available and vscode.workspace.fs (async-only) would
-// force needless plumbing for a three-line excerpt.
 import * as fsSync from 'node:fs';
+import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { ParserRegistryImpl, fileQuerySource } from '../../core/indexer/parserRegistryImpl';
 import { ExtractorImpl } from '../../core/indexer/extractorImpl';
 import { IndexerImpl } from '../../core/indexer/codeIndexerImpl';
-import { isSkippedPath, nodeListWorkspaceFiles, nodeReadFile } from '../../core/indexer/nodeFsDeps';
+import {
+  createWorkspaceFilter,
+  nodeListWorkspaceFiles,
+  nodeReadFile,
+  nodeStatFile,
+  type WorkspaceFilter,
+} from '../../core/indexer/nodeFsDeps';
 import { langForPath } from '../../core/indexer/parserRegistry';
 import { WatchQueue } from '../../core/indexer/watchQueue';
 import { SqliteCodeStore } from '../../store/graph/sqliteCodeStore';
 import { nodeSqlDriver } from '../../store/graph/sqliteDriver';
 import type { CodeStore } from '../../store/graph/codeStore';
 import type { Indexer } from '../../core/indexer/codeIndexer';
+import type { IndexStats } from '../../core/indexer/types';
 import { moduleMap } from '../../core/analyze/moduleMap';
 import { moduleMapHtml } from '../../core/analyze/moduleMapHtml';
 import { createExecutors } from '../../core/tools/executors';
 import { collectDiffHunks } from '../../platform/gitDiff';
+import { withIndexLock } from '../../platform/indexLock';
+import { ensurePairsDir, markRefreshed, startHeartbeat } from '../../platform/pairsDir';
+import { gitWorktreeInfo } from '../../platform/workspaceRoot';
 import { codeToolSchemas } from '../../core/tools/tools';
 import type { CodeToolInput, CodeToolName } from '../../core/tools/tools';
 import { ensureCliLinked } from './cliLink';
-import { writeSkillFiles } from './skills';
+import { writeSkillFiles, type SkillLocation } from './skills';
 
 interface Workspace {
   root: string;
   /** The vscode.WorkspaceFolder's name — used to target this workspace from a
    * command's quick-pick and from a tool's `workspaceFolder` input. */
   name: string;
+  pairsDir: string;
   store: CodeStore;
   indexer: Indexer;
   parsers: ParserRegistryImpl;
+  /** Same exclusion rules as the full-index walker (gitignore, nested repos, SKIP_DIRS). */
+  filter: WorkspaceFilter;
+  /**
+   * Last computed IndexStats. stats() is several full COUNT scans, so it is
+   * recomputed only after a fullIndex or a watcher flush — switching editors
+   * just re-renders from this cache.
+   */
+  stats?: IndexStats;
 }
+
+/** Drop the store's in-memory caches this long after the last watcher flush. */
+const IDLE_RELEASE_MS = 60_000;
 
 let statusBar: vscode.StatusBarItem | undefined;
 // Module-level so reindex()/rebuildIndex() (which act on one Workspace) can
@@ -59,33 +76,30 @@ let statusBar: vscode.StatusBarItem | undefined;
 let allWorkspaces: Workspace[] = [];
 
 /**
- * Adds `.pairs/` to the workspace's top-level .gitignore so the derived index
- * is never accidentally committed. No-op if the entry (or a broader pattern
- * such as `.pairs` followed by a wildcard) is already present; creates the
- * file if it doesn't exist.
+ * A fresh linked git worktree has no index. Seed it from the main worktree's
+ * (a consistent VACUUM INTO snapshot) so the activation reindex only re-parses
+ * files that actually differ. Best effort — never blocks activation.
  */
-async function ensurePairsIgnored(root: string): Promise<void> {
-  const gitignorePath = path.join(root, '.gitignore');
-  let contents = '';
+function seedFromMainWorktree(root: string, dbPath: string): void {
   try {
-    contents = await fs.readFile(gitignorePath, 'utf8');
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    if (fsSync.existsSync(dbPath)) return;
+    const info = gitWorktreeInfo(root);
+    if (info.kind !== 'linked' || !info.mainRoot) return;
+    const mainDb = path.join(info.mainRoot, '.pairs', 'index.db');
+    if (!fsSync.existsSync(mainDb)) return;
+    SqliteCodeStore.snapshot(mainDb, dbPath, nodeSqlDriver);
+  } catch {
+    for (const suffix of ['', '-wal', '-shm']) fsSync.rmSync(dbPath + suffix, { force: true });
   }
-  const alreadyIgnored = contents
-    .split('\n')
-    .some((line) => /^\.pairs\*?\/?$/.test(line.trim()));
-  if (alreadyIgnored) return;
-  const needsNewline = contents.length > 0 && !contents.endsWith('\n');
-  contents += `${needsNewline ? '\n' : ''}${contents.length > 0 ? '\n' : ''}# PAiRS derived index - disposable, never committed\n.pairs/\n`;
-  await fs.writeFile(gitignorePath, contents, 'utf8');
 }
 
 async function openWorkspace(folder: vscode.WorkspaceFolder, extensionPath: string): Promise<Workspace> {
   const root = folder.uri.fsPath;
-  const dbPath = path.join(root, '.pairs', 'index.db');
-  await fs.mkdir(path.dirname(dbPath), { recursive: true });
-  await ensurePairsIgnored(root);
+  // `.pairs/` ignores itself (`.pairs/.gitignore` = `*`): the user's own
+  // .gitignore is never edited, so no checkout is dirtied.
+  const pairsDir = ensurePairsDir(root);
+  const dbPath = path.join(pairsDir, 'index.db');
+  seedFromMainWorktree(root, dbPath);
   // Bundled next to dist/extension.js by scripts/fetch-grammars.mjs.
   const grammarsDir = path.join(extensionPath, 'dist', 'grammars');
   const queriesDir = path.join(extensionPath, 'dist', 'queries');
@@ -97,8 +111,18 @@ async function openWorkspace(folder: vscode.WorkspaceFolder, extensionPath: stri
     extractor: new ExtractorImpl(),
     listWorkspaceFiles: nodeListWorkspaceFiles(root),
     readFile: nodeReadFile(root),
+    statFile: nodeStatFile(root),
   });
-  return { root, name: folder.name, store, indexer, parsers };
+  return { root, name: folder.name, pairsDir, store, indexer, parsers, filter: createWorkspaceFilter(root) };
+}
+
+/** Recompute (and cache) one workspace's stats. Call after a fullIndex or watcher flush only. */
+async function recomputeStats(ws: Workspace): Promise<void> {
+  try {
+    ws.stats = await ws.indexer.stats();
+  } catch {
+    ws.stats = undefined;
+  }
 }
 
 /**
@@ -107,7 +131,8 @@ async function openWorkspace(folder: vscode.WorkspaceFolder, extensionPath: stri
  * getWorkspaceFolder), since that's what the user is actually looking at;
  * falls back to aggregating (summing) stats across all open workspaces
  * otherwise — kept simple rather than trying to track "the last-focused
- * folder" independent of the editor.
+ * folder" independent of the editor. Renders from each workspace's cached
+ * stats; only a workspace with no cache yet pays for a stats() call.
  */
 async function refreshStatus(workspaces: Workspace[]): Promise<void> {
   if (!statusBar) return;
@@ -116,13 +141,16 @@ async function refreshStatus(workspaces: Workspace[]): Promise<void> {
     const activeFolder = activeUri ? vscode.workspace.getWorkspaceFolder(activeUri) : undefined;
     const activeWs = activeFolder ? workspaces.find((w) => w.name === activeFolder.name) : undefined;
 
-    if (activeWs) {
-      const stats = await activeWs.indexer.stats();
+    for (const w of workspaces) if (w.stats === undefined) await recomputeStats(w);
+
+    if (activeWs?.stats) {
+      const stats = activeWs.stats;
       const pct = (stats.fuzzyRate * 100).toFixed(0);
       statusBar.text = `$(symbol-structure) pairs[${activeWs.name}] ${stats.symbols} sym · ${pct}% fuzzy`;
       statusBar.tooltip = `PAiRS code index — ${activeWs.name}\n${stats.files} files · ${stats.symbols} symbols · ${stats.edges} edges\nfuzzyRate ${pct}% · resolvableMisses ${stats.resolvableMisses}`;
     } else {
-      const allStats = await Promise.all(workspaces.map((w) => w.indexer.stats()));
+      const allStats = workspaces.map((w) => w.stats).filter((s): s is IndexStats => s !== undefined);
+      if (allStats.length === 0) throw new Error('index not available yet');
       const totals = allStats.reduce(
         (acc, s) => ({
           files: acc.files + s.files,
@@ -146,14 +174,36 @@ async function refreshStatus(workspaces: Workspace[]): Promise<void> {
   statusBar.show();
 }
 
-async function reindex(ws: Workspace): Promise<void> {
-  await vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Window, title: `PAiRS: indexing ${ws.name}…` },
-    async () => {
-      await ws.indexer.fullIndex(ws.root);
+/**
+ * Full index under the cross-process lock (a CLI or another window may be
+ * indexing the same root). `wait:false` — used at activation — skips when
+ * someone else holds the lock; the status bar still refreshes from whatever
+ * the other indexer has written. Always ends by recomputing the cached stats
+ * and dropping the store's in-memory caches (the extension host is long-lived).
+ */
+async function runLockedFullIndex(ws: Workspace, title: string, wait: boolean, resetFirst = false): Promise<void> {
+  await vscode.window.withProgress({ location: vscode.ProgressLocation.Window, title }, async () => {
+    const r = await withIndexLock(
+      ws.pairsDir,
+      async () => {
+        if (resetFirst) await ws.store.reset();
+        await ws.indexer.fullIndex(ws.root);
+        markRefreshed(ws.pairsDir);
+      },
+      { wait }
+    );
+    if (r.skipped) {
+      void vscode.window.setStatusBarMessage(`PAiRS: another indexer is running on ${ws.name}; using its index.`, 5000);
     }
-  );
+    await recomputeStats(ws);
+    ws.store.releaseCaches();
+  });
   await refreshStatus(allWorkspaces);
+}
+
+/** Manual `pairs.reindex`: waits for any other indexer rather than silently doing nothing. */
+async function reindex(ws: Workspace, wait = true): Promise<void> {
+  await runLockedFullIndex(ws, `PAiRS: indexing ${ws.name}…`, wait);
 }
 
 /**
@@ -163,14 +213,7 @@ async function reindex(ws: Workspace): Promise<void> {
  * whole workspace from scratch.
  */
 async function rebuildIndex(ws: Workspace): Promise<void> {
-  await vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Window, title: `PAiRS: rebuilding index for ${ws.name}…` },
-    async () => {
-      await ws.store.reset();
-      await ws.indexer.fullIndex(ws.root);
-    }
-  );
-  await refreshStatus(allWorkspaces);
+  await runLockedFullIndex(ws, `PAiRS: rebuilding index for ${ws.name}…`, true, true);
 }
 
 /**
@@ -318,6 +361,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       dispose: () => void ws.store.checkpoint().finally(() => ws.store.dispose()),
     });
     context.subscriptions.push({ dispose: () => ws.parsers.dispose() });
+    // `.pairs/watcher.json` heartbeat: tells one-shot CLIs this window keeps
+    // the index fresh, so they skip their own refresh. Removed on dispose.
+    const stopHeartbeat = startHeartbeat(ws.pairsDir);
+    context.subscriptions.push({ dispose: stopHeartbeat });
   }
 
   statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
@@ -377,31 +424,54 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // the debounced WatchQueue into indexFile/removeFile (both serialized on the
     // indexer's opChain), then the status bar refreshes — it tracks the code
     // without a manual reindex.
+    // Memory: drop the store's caches 60 s after the last flush (debounced).
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    const clearIdle = (): void => {
+      if (idleTimer !== undefined) clearTimeout(idleTimer);
+      idleTimer = undefined;
+    };
+    context.subscriptions.push({ dispose: clearIdle });
     const queue = new WatchQueue({
       indexFile: (p) => ws.indexer.indexFile(p),
       removeFile: (p) => ws.indexer.removeFile(p),
       onFlushed: async () => {
         await ws.store.checkpoint();
+        await recomputeStats(ws);
         await refreshStatus(allWorkspaces);
+        clearIdle();
+        idleTimer = setTimeout(() => ws.store.releaseCaches(), IDLE_RELEASE_MS);
       },
     });
     context.subscriptions.push({ dispose: () => queue.dispose() });
     const srcWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(folder, '**/*'));
+    // Same exclusion rules as the full-index walker (SKIP_DIRS, dot-dirs,
+    // nested-repo boundaries, root + nested .gitignore) — so a gitignored file
+    // or a linked worktree's copy never gets indexed between full indexes.
     const rel = (uri: vscode.Uri): string | null => {
       const r = path.relative(ws.root, uri.fsPath).split(path.sep).join('/');
-      return !r.startsWith('..') && !isSkippedPath(r) && langForPath(r) ? r : null;
+      return !r.startsWith('..') && !path.isAbsolute(r) && !ws.filter.isExcluded(r) && langForPath(r) ? r : null;
     };
-    srcWatcher.onDidChange((u) => { const r = rel(u); if (r) queue.changed(r); });
-    srcWatcher.onDidCreate((u) => { const r = rel(u); if (r) queue.changed(r); });
-    srcWatcher.onDidDelete((u) => { const r = rel(u); if (r) queue.deleted(r); });
+    srcWatcher.onDidChange((u) => { const r = rel(u); if (r) { clearIdle(); queue.changed(r); } });
+    srcWatcher.onDidCreate((u) => { const r = rel(u); if (r) { clearIdle(); queue.changed(r); } });
+    srcWatcher.onDidDelete((u) => { const r = rel(u); if (r) { clearIdle(); queue.deleted(r); } });
     context.subscriptions.push(srcWatcher);
 
     // Index on activation so the graph is fresh the moment Copilot or a CLI
     // call needs it; do it in the background so activation isn't blocked.
-    void reindex(ws);
+    // wait:false — if a CLI is already indexing this root, skip and just
+    // refresh the status from its result.
+    void reindex(ws, false).catch((err: unknown) => {
+      void vscode.window.showWarningMessage(`PAiRS: indexing ${ws.name} failed — ${(err as Error).message}`);
+    });
   }
 
-  void Promise.all(workspaces.map((ws) => writeSkillFiles(ws.root)));
+  // Claude Code skill: one user-level copy by default (so no checkout is
+  // dirtied), per-workspace or off by setting. Content-compared before any write.
+  const skillLocation = vscode.workspace.getConfiguration('pairs').get<SkillLocation>('skillLocation', 'user');
+  const skillRoots = skillLocation === 'workspace' ? workspaces.map((w) => w.root) : [workspaces[0]!.root];
+  void Promise.all(skillRoots.map((root) => writeSkillFiles(root, skillLocation))).catch(() => {
+    /* a missing skill must never break activation */
+  });
 
   // Marketplace installs never run npm's postinstall hook, so link the
   // bundled CLI onto PATH here instead — the only path that covers every

@@ -19,10 +19,10 @@ pairs index                 # builds .pairs/index.db (SQLite, safe to .gitignore
 pairs find_symbol login     # where is it defined?
 pairs impact login          # what breaks if I change it?
 pairs diff_impact           # what does my current, uncommitted change break?
-pairs rename_symbol login signIn --naked   # renames every reference site, one atomic pass
+pairs rename_symbol login signIn   # renames every reference site, one atomic pass
 ```
 
-Every command prints JSON by default (scriptable/pipeable); add `--naked` for the original human-readable prose. Don't know the exact symbol name? `pairs grep_symbols <pattern>` searches names/signatures/doc text; `pairs context_pack <name>` bundles a symbol's definition, callers, callees, and module position into one call instead of four.
+Every command prints compact prose by default (cheapest for agents and humans); `--json` gives compact JSON for scripts, `--pretty` indented JSON. Don't know the exact symbol name? `pairs grep_symbols <pattern>` searches names/signatures/doc text; `pairs context_pack <name>` bundles a symbol's definition, callers, callees, and module position into one call instead of four.
 
 ---
 
@@ -58,11 +58,11 @@ PAiRS registers its analysis functions as native VS Code Language Model Tools, s
 
 ### Claude Code integration
 
-On every activation, PAiRS writes `.claude/skills/pairs/SKILL.md` into the workspace. If you use Claude Code in that workspace, it auto-discovers this skill and drives the same functionality through the `pairs` CLI instead of an in-process tool call. This file is regenerated on each activation to track your installed extension version — don't hand-edit it.
+On activation, PAiRS installs a Claude Code skill (`SKILL.md`) so Claude Code drives the same functionality through the `pairs` CLI. By default it goes to `~/.claude/skills/pairs/` (setting `pairs.skillLocation`: `user` | `workspace` | `off`) and is rewritten only when its content changes, so worktrees stay clean.
 
 ## 3. Using the `pairs` CLI
 
-The extension bundles a CLI (`dist/cli.js`) for terminal use, CI pipelines, and Claude Code. If you have the repo/npm package rather than just the `.vsix`, it's exposed as the `pairs` binary. Run all commands from your workspace root — the index lives at `./.pairs/index.db` relative to your current directory.
+The extension bundles a CLI (`dist/cli.js`) for terminal use, CI pipelines, and Claude Code. If you have the repo/npm package rather than just the `.vsix`, it's exposed as the `pairs` binary. Commands work from any subdirectory or git worktree: the root is the nearest ancestor containing `.pairs/index.db` or `.git` (override with `--root` or `PAIRS_ROOT`). A linked worktree is seeded from the main worktree's index on first use.
 
 ```
 pairs <command> [args]
@@ -71,17 +71,19 @@ pairs <command> [args]
 | Command | Usage | Description |
 |---|---|---|
 | `index` | `pairs index [--rebuild]` | Full index (or full rebuild with `--rebuild`, dropping the store first). Prints a JSON report. |
-| `stats` | `pairs stats` | Index size and resolution quality (files, symbols, edges, fuzzy rate) as JSON. |
+| `stats` | `pairs stats [--json]` | Index size and resolution quality (files, symbols, edges, fuzzy rate): two lines of prose, or JSON with `--json`. |
 | `find` (via `query`) | `pairs query '<sql>'` | Raw read-only SQL against the graph schema (`File`, `Symbol`, `Edge`, `PendingRef`) for anything not covered by a dedicated command. |
 | `watch` | `pairs watch` | Indexes once, then watches the workspace and incrementally re-indexes on save. `Ctrl-C` to stop. |
-| `files` | `pairs files [pattern] [--paths] [--naked]` | Lists/searches indexed non-source filenames (a glob like `*.txt` or `Pic*.svg`). `--paths` also matches against full paths. |
+| `files` | `pairs files [pattern] [--paths] [--json]` | Lists/searches indexed non-source filenames (a glob like `*.txt` or `Pic*.svg`), one path per line. `--paths` also matches against full paths. |
 | `read` | `pairs read <path> [startLine] [endLine]` | Prints a file, or a 1-indexed inclusive line range. Out-of-range values clamp rather than error. |
 
-Every tool below (`find_symbol` through `context_pack`) is also a subcommand: `pairs <tool> [args] [--naked]`. **JSON is the default output for every one of them** — pipe it straight into `jq`, a script, or another process. Pass `--naked` on any of them for the original compact prose rendering instead (still the default for Copilot's in-editor Language Model Tools, which read prose more reliably and at lower token cost — see §4).
+Every tool below (`find_symbol` through `context_pack`) is also a subcommand: `pairs <tool> [args]`. **Output is compact prose by default** — the same text Copilot's Language Model Tools return (see §4). Pass `--json` for compact, slimmed JSON (no internal ids; default-valued fields omitted) to pipe into `jq` or a script, or `--pretty` for indented JSON. `--naked` is accepted and ignored (it was the old opt-in for prose). `pairs query` always prints JSON, compact unless `--pretty`.
+
+Lists are bounded (default 20–25 rows) and end with `… +N more (pass limit=M)`; re-run with `--limit M` / `--offset N`. Every tool input field is a `--flag` (also `--kebab-case` / `--flag=value`; booleans `--flag` / `--no-flag` / `--flag false`; lists comma-separated; `--kind`, `--lang`, `--regex` are shorthands for `kinds`, `langs`, `isRegex`), unknown flags are rejected with the valid list, and `pairs <tool> --help` / `pairs --help` print usage generated from the tool schemas. An empty index answers with one line telling you to run `pairs index`.
 
 ## 4. Reference: agent tools / CLI commands
 
-These are the same operations, exposed as VS Code Language Model Tools (Copilot, prose output) or CLI subcommands (Claude Code / scripts / CI, JSON output by default):
+These are the same operations, exposed as VS Code Language Model Tools (Copilot, prose output) or CLI subcommands (Claude Code / scripts / CI; prose by default, `--json` for structured output):
 
 | Tool | Purpose |
 |---|---|

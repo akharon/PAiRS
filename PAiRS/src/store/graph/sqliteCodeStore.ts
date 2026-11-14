@@ -46,6 +46,7 @@ import { ENTRY_POINT_NAMES, globToRegExp, isTestPath, TEST_PATH_REGEX } from '..
 import type { CodeStore, CodeStoreFactory } from './codeStore';
 import { assertReadOnlySql } from './codeStore';
 import { importCandidatePaths, isExternalSpecifier } from './importPath';
+import { bareName, baseOf, maxTypoDistance, rankClosestPaths, rankNameSuggestions } from './nameSuggest';
 import { nodeSqlDriver } from './sqliteDriver';
 import type { SqlConnectionLike, SqlDriver, SqlStatement } from './sqliteDriver';
 import { ALL_TABLES, REFERENCE_EDGE_KINDS, SCHEMA_DDL, SCHEMA_INDEXES, SCHEMA_VERSION } from './sqlSchema';
@@ -58,25 +59,26 @@ interface IndexEntry {
 }
 
 /**
- * In-memory mirror of the symbol table, exactly as the Kuzu store kept it:
- * resolution is pure lookup and the round-trips it used to make dominated
- * index time. Unchanged here — it was never Kuzu-specific.
+ * In-memory mirror of the symbol table: resolution is pure lookup and the
+ * round-trips it used to make dominated index time.
+ *
+ * Each symbol is stored once per map it participates in, as a number — there
+ * is deliberately no per-symbol object and no second copy of (name, path):
+ * "name → (id, path)" is derived from `byName` + `pathById`, and removing a
+ * file's entries re-reads that file's (id, name, qualified) rows from SQLite
+ * (see mirrorEntriesOf) instead of keeping an `entriesByFile` shadow copy.
  */
 interface SymbolIndex {
   byQualified: Map<string, number[]>;
   byName: Map<string, number[]>;
   /** Suffix probes: `::x::y` → ids. */
   byQualifiedSuffix: Map<string, number[]>;
-  /** name → (id, declaring file path); the module probe suffix-matches the path. */
-  byNameWithPath: Map<string, Array<{ id: number; path: string }>>;
   /** id → qualified, for the `use`-specifier narrowing rung. */
   qualifiedById: Map<number, string>;
-  /** id → declaring file path, for the cross-crate confidence gate. */
+  /** id → declaring file path (interned: one string per file), for the confidence gate and path probes. */
   pathById: Map<number, string>;
   /** file path → that file's module symbol id (module symbols stay out of the name maps). */
   moduleIdByPath: Map<string, number>;
-  /** path → this file's entries, so applyExtraction patches the mirror in place. */
-  entriesByFile: Map<string, IndexEntry[]>;
 }
 
 function toSymbolRecord(r: Record<string, unknown>): SymbolRecord {
@@ -124,6 +126,15 @@ function toNamedFileRecord(r: Record<string, unknown>): NamedFileRecord {
 const SYMBOL_COLS = `s.id AS id, s.fileId AS fileId, s.file AS file, s.name AS name, s.qualified AS qualified,
   s.kind AS kind, s.lang AS lang, s.startLine AS startLine, s.endLine AS endLine,
   s.signature AS signature, s.doc AS doc, s.parentId AS parentId, s.exported AS exported`;
+
+/**
+ * SQLite caps host parameters at 999 on older builds (SQLITE_MAX_VARIABLE_NUMBER)
+ * — every variable-length `IN (...)` chunks at 500.
+ */
+const ID_CHUNK = 500;
+/** PendingRef rows decided and written per transaction in resolvePending's full pass. */
+const PENDING_CHUNK = 5000;
+const PENDING_COLS = `id, fileId, fromSymbolId, name, qualifiedName, kind, line, methodCall, selfReceiver, receiverType, inTest`;
 
 /** `IN (?,?,?)` placeholder list for a variable-length id set. */
 function placeholders(n: number): string {
@@ -199,6 +210,9 @@ export class SqliteCodeStore implements CodeStore {
       } catch {
         /* connection state unknown — surface the original error */
       }
+      // The mirror is patched inside transactions; a rollback leaves it ahead
+      // of the database. Drop it — it rebuilds lazily from the committed rows.
+      this.invalidateSymbolIndex();
       throw err;
     } finally {
       this.inTx = false;
@@ -227,6 +241,11 @@ export class SqliteCodeStore implements CodeStore {
     this.resetSync();
   }
 
+  private pragmaNumber(name: string): number {
+    const row = this.conn.prepare(`PRAGMA ${name}`).get();
+    return row ? Number(Object.values(row)[0] ?? 0) : 0;
+  }
+
   private resetSync(): void {
     this.invalidateSymbolIndex();
     this.stmts.clear();
@@ -234,6 +253,14 @@ export class SqliteCodeStore implements CodeStore {
     // table shape, and deleting rows from an old-shaped table leaves later
     // INSERTs binding against missing columns.
     for (const t of ALL_TABLES) this.conn.exec(`DROP TABLE IF EXISTS ${t}`);
+    // Dropped pages are only freelisted — without this the file keeps its
+    // high-water mark forever, even across `--rebuild`. VACUUM (cheap now: the
+    // database is empty) rewrites it to its minimum size, and doubles as the
+    // one-time conversion of a pre-existing file to auto_vacuum=INCREMENTAL
+    // (the mode can only change via VACUUM; brand-new files get it in the
+    // driver). Must run outside a transaction.
+    if (this.pragmaNumber('auto_vacuum') !== 2) this.conn.exec('PRAGMA auto_vacuum = INCREMENTAL');
+    this.conn.exec('VACUUM');
     for (const ddl of SCHEMA_DDL) this.conn.exec(ddl);
     for (const ix of SCHEMA_INDEXES) this.conn.exec(ix);
     this.conn.exec(`INSERT OR REPLACE INTO Meta(key, value) VALUES('schema_version', '${SCHEMA_VERSION}')`);
@@ -253,20 +280,28 @@ export class SqliteCodeStore implements CodeStore {
     };
     push(idx.byQualified, e.qualified, e.id);
     push(idx.byName, e.name, e.id);
-    push(idx.byNameWithPath, e.name, { id: e.id, path: e.path });
     idx.qualifiedById.set(e.id, e.qualified);
     idx.pathById.set(e.id, e.path);
     const segs = e.qualified.split('::');
     for (let i = 1; i < segs.length; i++) push(idx.byQualifiedSuffix, segs.slice(i).join('::'), e.id);
-    push(idx.entriesByFile, e.path, e);
   }
 
-  /** Remove one file's entries from the mirror (inverse of indexAdd). */
-  private static indexRemoveFile(idx: SymbolIndex, path: string): void {
+  /** `name` → (id, declaring path) for every candidate, derived from byName + pathById (insertion order preserved). */
+  private static namesWithPath(idx: SymbolIndex, name: string): Array<{ id: number; path: string }> {
+    const ids = idx.byName.get(name);
+    if (!ids) return [];
+    return ids.map((id) => ({ id, path: idx.pathById.get(id) ?? '' }));
+  }
+
+  /**
+   * Drop a file's symbols from the mirror (inverse of indexAdd). `entries` are
+   * the file's non-module symbol rows as they are in SQLite right now — callers
+   * read them BEFORE deleting the rows, so the mirror needs no shadow copy of
+   * its own contents.
+   */
+  private static indexRemoveEntries(idx: SymbolIndex, path: string, entries: Array<{ id: number; name: string; qualified: string }>): void {
     idx.moduleIdByPath.delete(path);
-    const entries = idx.entriesByFile.get(path);
-    if (!entries) return;
-    idx.entriesByFile.delete(path);
+    if (entries.length === 0) return;
     const ids = new Set(entries.map((e) => e.id));
     const prune = (m: Map<string, number[]>, k: string): void => {
       const list = m.get(k);
@@ -282,13 +317,16 @@ export class SqliteCodeStore implements CodeStore {
       idx.pathById.delete(e.id);
       const segs = e.qualified.split('::');
       for (let i = 1; i < segs.length; i++) prune(idx.byQualifiedSuffix, segs.slice(i).join('::'));
-      const withPath = idx.byNameWithPath.get(e.name);
-      if (withPath) {
-        const kept = withPath.filter((c) => !ids.has(c.id));
-        if (kept.length) idx.byNameWithPath.set(e.name, kept);
-        else idx.byNameWithPath.delete(e.name);
-      }
     }
+  }
+
+  /** The file's non-module symbols as SQLite has them now (what the mirror holds for it). */
+  private mirrorEntriesOf(fileId: number): Array<{ id: number; name: string; qualified: string }> {
+    return this.all(`SELECT id, name, qualified FROM Symbol WHERE fileId = ? AND kind <> 'module'`, fileId).map((r) => ({
+      id: Number(r.id),
+      name: String(r.name),
+      qualified: String(r.qualified ?? ''),
+    }));
   }
 
   private loadSymbolIndex(): SymbolIndex {
@@ -297,18 +335,25 @@ export class SqliteCodeStore implements CodeStore {
       byQualified: new Map(),
       byName: new Map(),
       byQualifiedSuffix: new Map(),
-      byNameWithPath: new Map(),
       qualifiedById: new Map(),
       pathById: new Map(),
       moduleIdByPath: new Map(),
-      entriesByFile: new Map(),
     };
-    for (const r of this.all(`SELECT id, name, qualified, file FROM Symbol WHERE kind <> 'module'`)) {
+    // Every row of a file carries its own copy of the path string; intern them
+    // so pathById holds one string per file, not one per symbol.
+    const paths = new Map<string, string>();
+    const intern = (p: string): string => {
+      const hit = paths.get(p);
+      if (hit !== undefined) return hit;
+      paths.set(p, p);
+      return p;
+    };
+    for (const r of this.stmt(`SELECT id, name, qualified, file FROM Symbol WHERE kind <> 'module'`).iterate()) {
       SqliteCodeStore.indexAdd(idx, {
         id: Number(r.id),
         name: String(r.name),
         qualified: String(r.qualified ?? ''),
-        path: String(r.file),
+        path: intern(String(r.file)),
       });
     }
     // Module symbols: kept out of the name maps (they'd pollute every bare-name
@@ -316,7 +361,7 @@ export class SqliteCodeStore implements CodeStore {
     // per file = the root module symbol the extractor emits first; inline
     // `mod`s get higher ids and must not displace it.
     for (const r of this.all(`SELECT file, MIN(id) AS id FROM Symbol WHERE kind = 'module' GROUP BY file`)) {
-      idx.moduleIdByPath.set(String(r.file), Number(r.id));
+      idx.moduleIdByPath.set(intern(String(r.file)), Number(r.id));
     }
     this.symbolIndex = idx;
     return idx;
@@ -331,10 +376,25 @@ export class SqliteCodeStore implements CodeStore {
    * re-indexed when its target changes, so without this every cross-file edge
    * into an edited file is silently lost. An edge that was fuzzy re-parks with
    * methodCall=1 so the confidence cap survives the round trip.
+   *
+   * What an edge row cannot tell us is how the original ref was written
+   * (selfReceiver / receiverType are not stored on Edge). The two cases that
+   * matter for precision are recovered from the (caller, target) qualified
+   * names instead, and only for `resolved` CALLS edges (a fuzzy edge keeps the
+   * plain methodCall=1 cap — the safe direction):
+   *  - selfReceiver: the target's qualified name is `<caller's scope><sep><name>`,
+   *    i.e. the target is a sibling member of the caller's own type.
+   *  - receiverType: the target's qualified name is `<Type>.<name>` (TS-style
+   *    dotted members) — re-parking with that Type reproduces the typed-receiver
+   *    rung's answer instead of degrading to a name-only fuzzy fan-out when the
+   *    method name is not unique workspace-wide.
+   * Anything else (e.g. a receiverType whose target was found by another rung)
+   * re-parks bare, exactly as before, so it resolves by the ordinary ladder.
    */
   private reparkIncomingRefs(fileId: number): void {
     const rows = this.all(
-      `SELECT a.id AS fromId, a.fileId AS fromFileId, s.name AS name, s.qualified AS qualified,
+      `SELECT a.id AS fromId, a.fileId AS fromFileId, a.qualified AS callerQualified,
+              s.name AS name, s.qualified AS qualified, s.kind AS targetKind,
               e.kind AS kind, e.line AS line, e.confidence AS conf, e.test AS test
        FROM Edge e
        JOIN Symbol s ON s.id = e.dst
@@ -346,24 +406,36 @@ export class SqliteCodeStore implements CodeStore {
     );
     if (rows.length === 0) return;
     const ins = this.stmt(
-      `INSERT INTO PendingRef(fileId, fromSymbolId, name, qualifiedName, kind, line, methodCall, inTest)
-       VALUES(?,?,?,?,?,?,?,?)`
+      `INSERT INTO PendingRef(fileId, fromSymbolId, name, qualifiedName, kind, line, methodCall, selfReceiver, receiverType, inTest)
+       VALUES(?,?,?,?,?,?,?,?,?,?)`
     );
     for (const r of rows) {
-      // A top-level fn's stored qualified IS its bare name; parking that as a
-      // qualifiedName would hit the qualified ladder's "single segment never
-      // matches" rule and stay unresolved forever — park it bare instead.
       const q = String(r.qualified ?? '');
-      ins.run(
-        Number(r.fromFileId),
-        Number(r.fromId),
-        String(r.name),
-        q.includes('::') ? q : '',
-        String(r.kind),
-        Number(r.line ?? 0),
-        String(r.conf) === 'fuzzy' ? 1 : 0,
-        r.test ? 1 : 0
-      );
+      const name = String(r.name);
+      const kind = String(r.kind);
+      const fuzzy = String(r.conf) === 'fuzzy';
+      let qualifiedName = q.includes('::') ? q : '';
+      // An import edge lands on the target file's MODULE symbol (qualified =
+      // its path, name = file name), which no name rung can ever find. Park it
+      // as a path import (DEPENDS_ON + qualifiedName) so resolvePending retries
+      // it through resolveImportPath once the target is re-indexed.
+      if (kind === 'DEPENDS_ON' && String(r.targetKind) === 'module') qualifiedName = q;
+      let methodCall = fuzzy ? 1 : 0;
+      let selfReceiver = 0;
+      let receiverType: string | null = null;
+      if (!fuzzy && kind === 'CALLS' && String(r.targetKind) !== 'module') {
+        const callerQ = String(r.callerQualified ?? '');
+        const sep = callerQ.includes('::') ? '::' : '.';
+        const callerSegs = callerQ.split(sep);
+        if (callerSegs.length > 1 && q === `${callerSegs.slice(0, -1).join(sep)}${sep}${name}`) {
+          selfReceiver = 1;
+          methodCall = 1;
+        } else if (q.endsWith(`.${name}`) && q.length > name.length + 1 && !q.includes('::')) {
+          receiverType = q.slice(0, -(name.length + 1));
+          methodCall = 1;
+        }
+      }
+      ins.run(Number(r.fromFileId), Number(r.fromId), name, qualifiedName, kind, Number(r.line ?? 0), methodCall, selfReceiver, receiverType, r.test ? 1 : 0);
     }
   }
 
@@ -377,14 +449,14 @@ export class SqliteCodeStore implements CodeStore {
     const crate = extraction.crate ?? null;
 
     let fileId: number;
+    let oldMirrorEntries: Array<{ id: number; name: string; qualified: string }> = [];
     if (existing) {
       fileId = Number(existing.id);
       this.reparkIncomingRefs(fileId);
-      // Delete prior symbols and everything hanging off them. FK cascade
-      // covers PendingRef; Edge has no FK (its src may be a File id for
-      // DECLARES), so clear it explicitly.
-      this.run(`DELETE FROM Edge WHERE src IN (SELECT id FROM Symbol WHERE fileId = ?) OR dst IN (SELECT id FROM Symbol WHERE fileId = ?)`, fileId, fileId);
-      this.run(`DELETE FROM Edge WHERE kind = 'DECLARES' AND src = ?`, fileId);
+      // The mirror patch below needs the OLD symbols' (id, name, qualified);
+      // read them before the rows go.
+      if (this.symbolIndex) oldMirrorEntries = this.mirrorEntriesOf(fileId);
+      this.deleteFileEdges(fileId);
       this.run(`DELETE FROM Symbol WHERE fileId = ?`, fileId);
       this.run(`DELETE FROM PendingRef WHERE fileId = ?`, fileId);
       this.run(`DELETE FROM ExternalName WHERE fileId = ?`, fileId);
@@ -469,7 +541,7 @@ export class SqliteCodeStore implements CodeStore {
     // Patch the in-memory mirror in place — a full rebuild per file made
     // fullIndex O(files × symbols).
     if (this.symbolIndex) {
-      SqliteCodeStore.indexRemoveFile(this.symbolIndex, extraction.path);
+      SqliteCodeStore.indexRemoveEntries(this.symbolIndex, extraction.path, oldMirrorEntries);
       extraction.symbols.forEach((sym, i) => {
         if (sym.kind === 'module') {
           // Mirrors loadSymbolIndex: module symbols stay out of the name maps,
@@ -590,18 +662,39 @@ export class SqliteCodeStore implements CodeStore {
   }
 
   async removeFile(path: string): Promise<void> {
-    if (this.symbolIndex) SqliteCodeStore.indexRemoveFile(this.symbolIndex, path);
     const r = this.one(`SELECT id FROM File WHERE path = ?`, path);
-    if (!r) return;
+    if (!r) {
+      if (this.symbolIndex) this.symbolIndex.moduleIdByPath.delete(path);
+      return;
+    }
     const fileId = Number(r.id);
     this.transaction(() => {
+      if (this.symbolIndex) SqliteCodeStore.indexRemoveEntries(this.symbolIndex, path, this.mirrorEntriesOf(fileId));
       this.reparkIncomingRefs(fileId); // referrers keep their claim
       this.run(`DELETE FROM PendingRef WHERE fileId = ?`, fileId);
-      this.run(`DELETE FROM Edge WHERE src IN (SELECT id FROM Symbol WHERE fileId = ?) OR dst IN (SELECT id FROM Symbol WHERE fileId = ?)`, fileId, fileId);
-      this.run(`DELETE FROM Edge WHERE kind = 'DECLARES' AND src = ?`, fileId);
+      this.deleteFileEdges(fileId);
       this.run(`DELETE FROM Symbol WHERE fileId = ?`, fileId);
       this.run(`DELETE FROM File WHERE id = ?`, fileId);
     });
+  }
+
+  /**
+   * Delete every Edge row touching file `fileId`'s symbols, plus the file's
+   * DECLARES edges. Edge has no FK (a DECLARES edge's src is a *File* id), and
+   * the old single `src IN (...) OR dst IN (...)` delete could not use an
+   * index for both arms — so it is two statements, each on its own index
+   * (Edge primary key for src, idx_edge_dst for dst).
+   *
+   * The src arm excludes DECLARES: its src is a file id, and a file id can
+   * numerically equal one of this file's SYMBOL ids, which would otherwise
+   * delete an unrelated file's DECLARES edges. This file's own DECLARES edges
+   * go via the dst arm (their dst is this file's symbols) and the explicit
+   * file-id delete below.
+   */
+  private deleteFileEdges(fileId: number): void {
+    this.run(`DELETE FROM Edge WHERE kind <> 'DECLARES' AND src IN (SELECT id FROM Symbol WHERE fileId = ?)`, fileId);
+    this.run(`DELETE FROM Edge WHERE dst IN (SELECT id FROM Symbol WHERE fileId = ?)`, fileId);
+    this.run(`DELETE FROM Edge WHERE kind = 'DECLARES' AND src = ?`, fileId);
   }
 
   /**
@@ -777,7 +870,7 @@ export class SqliteCodeStore implements CodeStore {
       const modulePath = segments.slice(0, -1).filter((s) => s !== 'crate' && s !== 'self' && s !== 'super');
       if (modulePath.length > 0) {
         const fileSuffix = `${modulePath.join('/')}.rs`;
-        const byModule = (idx.byNameWithPath.get(name) ?? []).filter((c) => c.path === fileSuffix || c.path.endsWith(`/${fileSuffix}`));
+        const byModule = SqliteCodeStore.namesWithPath(idx, name).filter((c) => c.path === fileSuffix || c.path.endsWith(`/${fileSuffix}`));
         if (byModule.length > 0) {
           return gate({ ids: byModule.map((c) => c.id), confidence: byModule.length === 1 ? 'resolved' : 'fuzzy' });
         }
@@ -800,7 +893,7 @@ export class SqliteCodeStore implements CodeStore {
     // there the receiver's static type is unknown, so a same-file namesake is
     // coincidence rather than lexical scope, and `gate` must still cap it.
     if (fromPath && !methodCall) {
-      const local = (idx.byNameWithPath.get(name) ?? []).filter((c) => c.path === fromPath);
+      const local = SqliteCodeStore.namesWithPath(idx, name).filter((c) => c.path === fromPath);
       if (local.length > 0) {
         // Multiple same-file declarations (overloads, shadowed scopes) are
         // ambiguous within the file, but still certainly not cross-module.
@@ -834,166 +927,260 @@ export class SqliteCodeStore implements CodeStore {
    * pool has finished, or — for a single-file incremental re-index — every
    * OTHER file was already indexed in a prior run). Only applyExtraction's
    * inline resolve, mid-parallel-pass, needs `fullPass: false`.
+   *
+   * Scope: `namesHint` and/or `opts.filePaths` select a subset of PendingRef
+   * (rows whose name is hinted UNION rows owned by those files); with neither,
+   * every parked ref is retried.
+   *
+   * Memory: the full pass never holds the whole table. Refs whose name no
+   * workspace symbol declares are retired in one SQL statement (see
+   * retireUndeclaredPending); the rest are processed PENDING_CHUNK rows at a
+   * time, each chunk decided and written in its own transaction.
    */
-  async resolvePending(namesHint?: string[], opts?: { retireUnresolved?: boolean }): Promise<number> {
-    const rows = namesHint?.length
-      ? this.all(
-          `SELECT id, fileId, fromSymbolId, name, qualifiedName, kind, line, methodCall, selfReceiver, receiverType, inTest
-           FROM PendingRef WHERE name IN (${placeholders(namesHint.length)})`,
-          ...namesHint
-        )
-      : this.all(`SELECT id, fileId, fromSymbolId, name, qualifiedName, kind, line, methodCall, selfReceiver, receiverType, inTest FROM PendingRef`);
-    if (rows.length === 0) return 0;
+  async resolvePending(namesHint?: string[], opts?: { retireUnresolved?: boolean; filePaths?: string[] }): Promise<number> {
+    const names = namesHint ?? [];
+    const filePaths = opts?.filePaths ?? [];
+    const scoped = names.length > 0 || filePaths.length > 0;
+    const retire = opts?.retireUnresolved === true;
+
+    let scopedRows: Record<string, unknown>[] = [];
+    if (scoped) {
+      scopedRows = this.scopedPendingRows(names, filePaths);
+      if (scopedRows.length === 0) return 0;
+    } else if (this.one(`SELECT 1 AS x FROM PendingRef LIMIT 1`) === undefined) {
+      return 0;
+    }
 
     const idx = this.loadSymbolIndex();
-    const pathByFileId = new Map<number, string>();
-    for (const fr of this.all(`SELECT id, path FROM File`)) pathByFileId.set(Number(fr.id), String(fr.path));
 
+    // Per-file facts, fetched lazily for just the files a chunk touches.
+    const pathByFileId = new Map<number, string>();
     // Each file's externally-bound names, recorded at extraction time (see
     // applyExtractionInner). A ref that parks in phase A is re-resolved here,
     // so without this the guard is bypassed on the second pass and the binding
     // it prevented happens anyway — which is exactly how vitest's `expect`
     // reached Parser.expect as `resolved`.
     const externalByFile = new Map<number, Set<string>>();
-    for (const r of this.all(`SELECT fileId, name FROM ExternalName`)) {
-      const fileId = Number(r.fileId);
-      let set = externalByFile.get(fileId);
-      if (set === undefined) externalByFile.set(fileId, (set = new Set<string>()));
-      set.add(String(r.name));
-    }
+    const loadFileFacts = (fileIds: number[]): void => {
+      const missing = [...new Set(fileIds)].filter((id) => !pathByFileId.has(id));
+      for (let i = 0; i < missing.length; i += ID_CHUNK) {
+        const part = missing.slice(i, i + ID_CHUNK);
+        for (const fr of this.all(`SELECT id, path FROM File WHERE id IN (${placeholders(part.length)})`, ...part)) {
+          pathByFileId.set(Number(fr.id), String(fr.path));
+        }
+        for (const r of this.all(`SELECT fileId, name FROM ExternalName WHERE fileId IN (${placeholders(part.length)})`, ...part)) {
+          const fileId = Number(r.fileId);
+          let set = externalByFile.get(fileId);
+          if (set === undefined) externalByFile.set(fileId, (set = new Set<string>()));
+          set.add(String(r.name));
+        }
+      }
+    };
 
-    // Names the workspace actually defines. Used to tell a genuine miss (we
-    // have this symbol but failed to link it) from an external ref (npm,
-    // stdlib, test globals) at the moment we retire the row — after deletion
-    // the name is gone and stats() can no longer make the distinction.
-    const definedNames = new Set<string>();
-    for (const r of this.all(`SELECT DISTINCT name FROM Symbol WHERE kind <> 'module'`)) {
-      definedNames.add(String(r.name));
-    }
+    // Used at the moment a row is retired: a genuine miss (we HAVE this symbol
+    // but failed to link it) vs an external ref (npm, stdlib, test globals) —
+    // after deletion the name is gone and stats() can no longer tell. Asked per
+    // distinct name on demand rather than loading every symbol name up front.
+    const declaredCache = new Map<string, boolean>();
+    const isDeclared = (name: string): boolean => {
+      let hit = declaredCache.get(name);
+      if (hit === undefined) {
+        hit = this.one(`SELECT 1 AS x FROM Symbol WHERE name = ? AND kind <> 'module' LIMIT 1`, name) !== undefined;
+        declaredCache.set(name, hit);
+      }
+      return hit;
+    };
 
-    // Decide first, write once.
     let created = 0;
     let retired = 0;
     let retiredMisses = 0;
-    const edges: Array<{ fromId: number; toId: number; kind: EdgeKind; line: number; confidence: EdgeConfidence; test: boolean }> = [];
-    const settled: number[] = [];
-    // A ref that parks and re-resolves across several `resolvePending` calls
-    // (or a single call touching the same site twice) must still produce one
-    // edge, not one per pass — mirrors the `seenDep` guard in
-    // applyExtractionInner. Keyed on (fromId,toId,kind,line); 'resolved' wins
-    // over 'fuzzy' if both are seen for the same key.
-    const seenEdge = new Map<string, number>(); // key -> index into edges
     const CONFIDENCE_RANK: Record<EdgeConfidence, number> = { unresolved: -1, fuzzy: 0, resolved: 1 };
-    const addEdge = (e: { fromId: number; toId: number; kind: EdgeKind; line: number; confidence: EdgeConfidence; test: boolean }): void => {
-      const key = `${e.fromId}|${e.toId}|${e.kind}|${e.line}`;
-      const i = seenEdge.get(key);
-      if (i === undefined) {
-        seenEdge.set(key, edges.length);
-        edges.push(e);
-        return;
-      }
-      // Same site resolved twice in this batch: never let a fuzzy hit
-      // suppress a resolved one, or vice versa downgrade it.
-      if (CONFIDENCE_RANK[e.confidence] > CONFIDENCE_RANK[edges[i]!.confidence]) {
-        edges[i] = e;
-      }
-    };
-    for (const r of rows) {
-      // A DEPENDS_ON pending WITH a qualifiedName is a parked import — the
-      // import IS the dependency statement, so the cross-crate gate does not
-      // apply. Bare DEPENDS_ON refs get the gate like any other ref.
-      const isUseImport = r.kind === 'DEPENDS_ON' && Boolean(String(r.qualifiedName ?? ''));
-      const declaringPath = pathByFileId.get(Number(r.fileId)) ?? null;
+    type PendingEdge = { fromId: number; toId: number; kind: EdgeKind; line: number; confidence: EdgeConfidence; test: boolean };
 
-      // A parked path-style import: its target file may have been indexed
-      // since. Retry it as a path before the name ladder, which can never
-      // resolve a file path.
-      if (isUseImport && declaringPath !== null) {
-        const viaPath = this.resolveImportPath(declaringPath, String(r.qualifiedName));
-        if (viaPath !== null) {
-          if (viaPath !== Number(r.fromSymbolId)) {
-            const before = edges.length;
-            addEdge({ fromId: Number(r.fromSymbolId), toId: viaPath, kind: 'DEPENDS_ON', line: Number(r.line), confidence: 'resolved', test: Boolean(r.inTest) });
-            if (edges.length > before) created += 1;
+    const processChunk = (rows: Record<string, unknown>[]): void => {
+      loadFileFacts(rows.map((r) => Number(r.fileId)));
+      // Decide first, write once per chunk.
+      const edges: PendingEdge[] = [];
+      const settled: number[] = [];
+      // A ref that parks and re-resolves across several `resolvePending` calls
+      // (or a single call touching the same site twice) must still produce one
+      // edge, not one per pass — mirrors the `seenDep` guard in
+      // applyExtractionInner. Keyed on (fromId,toId,kind,line); 'resolved' wins
+      // over 'fuzzy' if both are seen for the same key. Cross-chunk repeats are
+      // collapsed by the ON CONFLICT upsert below.
+      const seenEdge = new Map<string, number>(); // key -> index into edges
+      const addEdge = (e: PendingEdge): void => {
+        const key = `${e.fromId}|${e.toId}|${e.kind}|${e.line}`;
+        const i = seenEdge.get(key);
+        if (i === undefined) {
+          seenEdge.set(key, edges.length);
+          edges.push(e);
+          return;
+        }
+        // Same site resolved twice in this batch: never let a fuzzy hit
+        // suppress a resolved one, or vice versa downgrade it.
+        if (CONFIDENCE_RANK[e.confidence] > CONFIDENCE_RANK[edges[i]!.confidence]) edges[i] = e;
+      };
+      for (const r of rows) {
+        // A DEPENDS_ON pending WITH a qualifiedName is a parked import — the
+        // import IS the dependency statement, so the cross-crate gate does not
+        // apply. Bare DEPENDS_ON refs get the gate like any other ref.
+        const isUseImport = r.kind === 'DEPENDS_ON' && Boolean(String(r.qualifiedName ?? ''));
+        const declaringPath = pathByFileId.get(Number(r.fileId)) ?? null;
+
+        // A parked path-style import: its target file may have been indexed
+        // since. Retry it as a path before the name ladder, which can never
+        // resolve a file path.
+        if (isUseImport && declaringPath !== null) {
+          const viaPath = this.resolveImportPath(declaringPath, String(r.qualifiedName));
+          if (viaPath !== null) {
+            if (viaPath !== Number(r.fromSymbolId)) {
+              const before = edges.length;
+              addEdge({ fromId: Number(r.fromSymbolId), toId: viaPath, kind: 'DEPENDS_ON', line: Number(r.line), confidence: 'resolved', test: Boolean(r.inTest) });
+              if (edges.length > before) created += 1;
+            }
+            settled.push(Number(r.id));
+            continue;
           }
-          settled.push(Number(r.id));
+        }
+
+        const fromPath = isUseImport ? null : declaringPath;
+        // A parked import is itself the dependency statement, so it must still
+        // resolve by name; only ordinary refs get the external-name guard.
+        const externalNames = isUseImport ? undefined : externalByFile.get(Number(r.fileId));
+        const callerQualified = idx.qualifiedById.get(Number(r.fromSymbolId)) ?? null;
+        const resolved = this.resolveOneRef(
+          String(r.name),
+          String(r.qualifiedName ?? '') || null,
+          [],
+          Boolean(r.methodCall),
+          fromPath,
+          externalNames,
+          Boolean(r.selfReceiver),
+          callerQualified,
+          r.receiverType ? String(r.receiverType) : null,
+          true
+        );
+        if (resolved === 'unresolved') {
+          // Full-index pass: every file has declared, so this names something
+          // outside the workspace (npm/stdlib/test globals like `it`/`describe`/
+          // `String`) and no later file can rescue it. Retire it instead of
+          // parking it forever — these rows otherwise accumulate across every
+          // re-index and dominate the db file.
+          if (retire) {
+            settled.push(Number(r.id));
+            retired += 1;
+            // A *qualified* ref (`Vec::new`) is never a miss on bare name alone —
+            // the workspace having some unrelated `new` does not make it
+            // resolvable. Mirrors the predicate stats() applies to live rows.
+            if (String(r.qualifiedName ?? '') === '' && isDeclared(String(r.name))) retiredMisses += 1;
+          }
           continue;
         }
+        for (const toId of resolved.ids) {
+          const before = edges.length;
+          addEdge({ fromId: Number(r.fromSymbolId), toId, kind: r.kind as EdgeKind, line: Number(r.line), confidence: resolved.confidence, test: Boolean(r.inTest) });
+          if (edges.length > before) created += 1;
+        }
+        settled.push(Number(r.id));
       }
 
-      const fromPath = isUseImport ? null : declaringPath;
-      // A parked import is itself the dependency statement, so it must still
-      // resolve by name; only ordinary refs get the external-name guard.
-      const externalNames = isUseImport ? undefined : externalByFile.get(Number(r.fileId));
-      const callerQualified = idx.qualifiedById.get(Number(r.fromSymbolId)) ?? null;
-      const resolved = this.resolveOneRef(
-        String(r.name),
-        String(r.qualifiedName ?? '') || null,
-        [],
-        Boolean(r.methodCall),
-        fromPath,
-        externalNames,
-        Boolean(r.selfReceiver),
-        callerQualified,
-        r.receiverType ? String(r.receiverType) : null,
-        true
-      );
-      if (resolved === 'unresolved') {
-        // Full-index pass: every file has declared, so this names something
-        // outside the workspace (npm/stdlib/test globals like `it`/`describe`/
-        // `String`) and no later file can rescue it. Retire it instead of
-        // parking it forever — these rows otherwise accumulate across every
-        // re-index and dominate the db file.
-        if (opts?.retireUnresolved === true) {
-          settled.push(Number(r.id));
-          retired += 1;
-          // A *qualified* ref (`Vec::new`) is never a miss on bare name alone —
-          // the workspace having some unrelated `new` does not make it
-          // resolvable. Mirrors the predicate stats() applies to live rows.
-          const qualified = String(r.qualifiedName ?? '');
-          if (qualified === '' && definedNames.has(String(r.name))) retiredMisses += 1;
+      this.transaction(() => {
+        // Backstop for the cross-run (and cross-chunk) case the in-memory dedupe
+        // above cannot see: a `fuzzy` row may already sit on disk from an
+        // earlier pass at the exact (src,dst,kind,line) this pass now resolves
+        // with certainty. Plain `INSERT OR IGNORE` would silently lose the
+        // 'resolved' outcome. `ON CONFLICT DO UPDATE` upgrades in place
+        // instead, and only ever upgrades (fuzzy -> resolved), never the
+        // reverse, matching the "fuzzy must never suppress resolved" rule.
+        const insEdge = this.stmt(`
+          INSERT INTO Edge(src, dst, kind, line, confidence, test) VALUES(?,?,?,?,?,?)
+          ON CONFLICT(src, dst, kind, line) DO UPDATE SET confidence = 'resolved'
+          WHERE excluded.confidence = 'resolved' AND Edge.confidence = 'fuzzy'
+        `);
+        for (const e of edges) insEdge.run(e.fromId, e.toId, e.kind, e.line, e.confidence, e.test ? 1 : 0);
+        if (settled.length > 0) {
+          const del = this.stmt(`DELETE FROM PendingRef WHERE id = ?`);
+          for (const id of settled) del.run(id);
         }
-        continue;
+      });
+    };
+
+    if (scoped) {
+      for (let i = 0; i < scopedRows.length; i += PENDING_CHUNK) processChunk(scopedRows.slice(i, i + PENDING_CHUNK));
+    } else {
+      if (retire) retired += this.retireUndeclaredPending();
+      let lastId = 0;
+      for (;;) {
+        const rows = this.all(`SELECT ${PENDING_COLS} FROM PendingRef WHERE id > ? ORDER BY id LIMIT ?`, lastId, PENDING_CHUNK);
+        if (rows.length === 0) break;
+        lastId = Number(rows[rows.length - 1]!.id);
+        processChunk(rows);
       }
-      for (const toId of resolved.ids) {
-        const before = edges.length;
-        addEdge({ fromId: Number(r.fromSymbolId), toId, kind: r.kind as EdgeKind, line: Number(r.line), confidence: resolved.confidence, test: Boolean(r.inTest) });
-        if (edges.length > before) created += 1;
-      }
-      settled.push(Number(r.id));
     }
 
-    this.transaction(() => {
-      // Backstop for the cross-run case the in-memory dedupe above cannot see:
-      // a `fuzzy` row may already sit on disk from an earlier pass at the
-      // exact (src,dst,kind,line) this pass now resolves with certainty.
-      // Plain `INSERT OR IGNORE` would silently lose the 'resolved' outcome —
-      // the row already exists, so the insert is ignored and the stronger
-      // confidence is dropped on the floor. `ON CONFLICT DO UPDATE` upgrades
-      // in place instead, and only ever upgrades (fuzzy -> resolved), never
-      // the reverse, matching the "fuzzy must never suppress resolved" rule.
-      const insEdge = this.stmt(`
-        INSERT INTO Edge(src, dst, kind, line, confidence, test) VALUES(?,?,?,?,?,?)
-        ON CONFLICT(src, dst, kind, line) DO UPDATE SET confidence = 'resolved'
-        WHERE excluded.confidence = 'resolved' AND Edge.confidence = 'fuzzy'
-      `);
-      for (const e of edges) insEdge.run(e.fromId, e.toId, e.kind, e.line, e.confidence, e.test ? 1 : 0);
-      if (settled.length > 0) {
-        const del = this.stmt(`DELETE FROM PendingRef WHERE id = ?`);
-        for (const id of settled) del.run(id);
-      }
+    if (retire) {
       // Retired rows are gone but still happened: stats() reports index quality
       // from the pending count, so persist the tally rather than letting
       // `externalRefs` silently read 0.
-      if (opts?.retireUnresolved === true) {
+      this.transaction(() => {
         this.run(`INSERT OR REPLACE INTO Meta(key, value) VALUES('retired_refs', ?)`, String(retired));
-        this.run(
-          `INSERT OR REPLACE INTO Meta(key, value) VALUES('retired_resolvable_misses', ?)`,
-          String(retiredMisses)
-        );
-      }
-    });
+        this.run(`INSERT OR REPLACE INTO Meta(key, value) VALUES('retired_resolvable_misses', ?)`, String(retiredMisses));
+      });
+    }
     return created;
+  }
+
+  /** PendingRef rows a scoped retry covers: name in `names` UNION owned by `filePaths`' files, by id. */
+  private scopedPendingRows(names: string[], filePaths: string[]): Record<string, unknown>[] {
+    const byId = new Map<number, Record<string, unknown>>();
+    for (let i = 0; i < names.length; i += ID_CHUNK) {
+      const part = names.slice(i, i + ID_CHUNK);
+      for (const r of this.all(`SELECT ${PENDING_COLS} FROM PendingRef WHERE name IN (${placeholders(part.length)})`, ...part)) byId.set(Number(r.id), r);
+    }
+    const fileIds: number[] = [];
+    for (let i = 0; i < filePaths.length; i += ID_CHUNK) {
+      const part = filePaths.slice(i, i + ID_CHUNK);
+      for (const r of this.all(`SELECT id FROM File WHERE path IN (${placeholders(part.length)})`, ...part)) fileIds.push(Number(r.id));
+    }
+    for (let i = 0; i < fileIds.length; i += ID_CHUNK) {
+      const part = fileIds.slice(i, i + ID_CHUNK);
+      for (const r of this.all(`SELECT ${PENDING_COLS} FROM PendingRef WHERE fileId IN (${placeholders(part.length)})`, ...part)) byId.set(Number(r.id), r);
+    }
+    return [...byId.values()].sort((a, b) => Number(a.id) - Number(b.id));
+  }
+
+  /**
+   * Full-pass shortcut: delete, in SQL, every parked ref that can never
+   * resolve because no workspace symbol carries its bare name — these are the
+   * bulk of PendingRef (npm / stdlib / test-global calls). Returns the count.
+   *
+   * Safe because every rung of resolveOneRef needs a non-module symbol whose
+   * `name` equals the ref's bare name: Rung 0 (`scope.name` qualified), 0.5
+   * (`Type.name`), Rung 1 (qualified/suffix keys ending in `::name` — hence the
+   * "qualifiedName ends with ::name" condition, which keeps any ref whose
+   * written path tail differs from its bare name), the module-path rung
+   * (byName), Rung 2 and Rung 3 (byQualified/byName on `name`; a top-level
+   * symbol's qualified IS its name). Not retired here, on purpose:
+   *  - parked path imports (DEPENDS_ON with a qualifiedName): they resolve by
+   *    FILE PATH to a module symbol (which is excluded from the name maps),
+   *    never by name;
+   *  - everything, if any symbol's own `name` contains `::` or `.`: then a
+   *    qualified key's last segment need not equal a symbol name, so the
+   *    name-only argument no longer holds and the (chunked) ladder decides.
+   * These rows are, by construction, never "resolvable misses" (their name is
+   * undeclared), so the caller counts them as retired only.
+   */
+  private retireUndeclaredPending(): number {
+    const oddName = this.one(`SELECT 1 AS x FROM Symbol WHERE kind <> 'module' AND (instr(name, ':') > 0 OR instr(name, '.') > 0) LIMIT 1`);
+    if (oddName !== undefined) return 0;
+    const res = this.run(
+      `DELETE FROM PendingRef
+       WHERE NOT (kind = 'DEPENDS_ON' AND qualifiedName <> '')
+         AND (qualifiedName = '' OR substr(qualifiedName, -(length(name) + 2)) = '::' || name)
+         AND NOT EXISTS (SELECT 1 FROM Symbol s WHERE s.name = PendingRef.name AND s.kind <> 'module')`
+    );
+    return Number(res.changes);
   }
 
   async listFiles(): Promise<FileRecord[]> {
@@ -1039,7 +1226,7 @@ export class SqliteCodeStore implements CodeStore {
   async getMany(ids: number[]): Promise<Map<number, SymbolRecord>> {
     const out = new Map<number, SymbolRecord>();
     const dedupedIds = [...new Set(ids)];
-    const CHUNK = 500;
+    const CHUNK = ID_CHUNK;
     for (let i = 0; i < dedupedIds.length; i += CHUNK) {
       const chunk = dedupedIds.slice(i, i + CHUNK);
       const rows = this.all(`SELECT ${SYMBOL_COLS} FROM Symbol s WHERE s.id IN (${placeholders(chunk.length)})`, ...chunk);
@@ -1067,6 +1254,57 @@ export class SqliteCodeStore implements CodeStore {
     return this.all(`SELECT ${SYMBOL_COLS} FROM Symbol s WHERE s.file = ? ORDER BY s.startLine`, path).map(toSymbolRecord);
   }
 
+  async resolveFilePath(input: string): Promise<{ exact: string } | { matches: string[]; closest: string[] }> {
+    const norm = input.trim().replace(/\\/g, '/').replace(/^(?:\.\/)+/, '');
+    for (const cand of norm === input ? [input] : [input, norm]) {
+      const r = this.one(`SELECT path FROM File WHERE path = ?`, cand);
+      if (r) return { exact: String(r.path) };
+    }
+    if (!norm) return { matches: [], closest: [] };
+    const esc = (s: string): string => s.replace(/[\\%_]/g, (c) => `\\${c}`);
+    // Path-suffix match on a `/` boundary. LIKE is ASCII-case-insensitive, so a
+    // case-exact hit (if any) wins over a case-folded one.
+    const rows = this.all(`SELECT path FROM File WHERE path LIKE ? ESCAPE '\\' ORDER BY path LIMIT 21`, `%/${esc(norm)}`).map((r) => String(r.path));
+    const exactCase = rows.filter((p) => p.endsWith(`/${norm}`));
+    const matches = exactCase.length > 0 ? exactCase : rows;
+    if (matches.length === 1) return { exact: matches[0]! };
+    if (matches.length > 1) return { matches, closest: [] };
+
+    // Miss: offer the paths with the nearest basenames. Bounded candidate set.
+    const base = baseOf(norm);
+    const stem = base.replace(/\.[^.]*$/, '');
+    let cands: string[] = [];
+    if (stem.length >= 2) {
+      cands = this.all(`SELECT path FROM File WHERE path LIKE ? ESCAPE '\\' LIMIT 200`, `%${esc(stem)}%`).map((r) => String(r.path));
+    }
+    if (cands.length === 0 && base.length > 0) {
+      cands = this.all(`SELECT path FROM File WHERE path LIKE ? ESCAPE '\\' LIMIT 2000`, `%/${esc(base[0]!)}%`).map((r) => String(r.path));
+    }
+    return { matches: [], closest: rankClosestPaths(norm, cands, 3) };
+  }
+
+  async suggestNames(name: string, limit = 5): Promise<string[]> {
+    const q = bareName(name);
+    if (!q) return [];
+    const esc = (s: string): string => s.replace(/[\\%_]/g, (c) => `\\${c}`);
+    const cands = new Set<string>();
+    // Equal-ignoring-case / prefix / substring in one bounded scan.
+    const like = q.length >= 3 ? `%${esc(q)}%` : `${esc(q)}%`;
+    for (const r of this.all(`SELECT DISTINCT name FROM Symbol WHERE name LIKE ? ESCAPE '\\' LIMIT 300`, like)) cands.add(String(r.name));
+    // Typos: same first letter, similar length. Capped so a huge repo never loads every symbol.
+    const d = maxTypoDistance(q.length);
+    const first = q[0]!.toLowerCase();
+    for (const r of this.all(
+      `SELECT DISTINCT name FROM Symbol WHERE LOWER(SUBSTR(name, 1, 1)) = ? AND LENGTH(name) BETWEEN ? AND ? LIMIT 2000`,
+      first,
+      Math.max(1, q.length - d),
+      q.length + d
+    )) {
+      cands.add(String(r.name));
+    }
+    return rankNameSuggestions(name, cands, limit);
+  }
+
   async membersOf(parentId: number): Promise<SymbolRecord[]> {
     return this.all(`SELECT ${SYMBOL_COLS} FROM Symbol s WHERE s.parentId = ? ORDER BY s.startLine`, parentId).map(toSymbolRecord);
   }
@@ -1085,14 +1323,7 @@ export class SqliteCodeStore implements CodeStore {
       conds.push(`s.file LIKE ? ESCAPE '\\'`);
       params.push(`${opts.pathPrefix.replace(/[\\%_]/g, (c) => `\\${c}`)}%`);
     }
-    const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
-    const rows = this.all(`SELECT ${SYMBOL_COLS} FROM Symbol s ${where} ORDER BY s.file, s.startLine`, ...params);
     const limit = opts?.limit ?? 50;
-    // No native regex/substring index over name/qualified/signature/doc — the
-    // Symbol table is already small enough (loadSymbolIndex mirrors the whole
-    // thing in memory elsewhere in this file) that a JS filter over the SQL
-    // pre-filter above is simpler and no slower than a LIKE-based approximation
-    // that would then need the same JS pass to apply regex semantics anyway.
     let matcher: (text: string) => boolean;
     if (opts?.isRegex) {
       let re: RegExp;
@@ -1103,18 +1334,34 @@ export class SqliteCodeStore implements CodeStore {
       }
       matcher = (text) => re.test(text);
     } else {
+      // Plain substring: SQL does the filtering (and the LIMIT), so the Symbol
+      // table is never materialized. LIKE is case-insensitive for ASCII; JS
+      // re-checks with toLowerCase().includes() so non-ASCII letters (which
+      // LIKE would not fold) are matched identically to before — SQL is only a
+      // PRE-filter that must not exclude a real hit, hence both stay.
       const needle = pattern.toLowerCase();
+      const like = `%${pattern.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+      // A non-ASCII needle: LIKE's ASCII-only folding could miss `É` vs `é`,
+      // so skip the SQL pre-filter and let JS decide (still streamed, not mapped).
+      if (/^[\x00-\x7f]*$/.test(pattern)) {
+        conds.push(
+          `(s.name LIKE ? ESCAPE '\\' OR s.qualified LIKE ? ESCAPE '\\' OR s.signature LIKE ? ESCAPE '\\' OR s.doc LIKE ? ESCAPE '\\')`
+        );
+        params.push(like, like, like, like);
+      }
       matcher = (text) => text.toLowerCase().includes(needle);
     }
+    const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+    const sql = `SELECT ${SYMBOL_COLS} FROM Symbol s ${where} ORDER BY s.file, s.startLine`;
     const out: SymbolRecord[] = [];
-    for (const r of rows) {
-      const rec = toSymbolRecord(r);
+    // Streamed: rows are tested as they arrive and the scan stops at `limit`,
+    // so neither path maps (or holds) the rest of the table.
+    for (const r of this.stmt(sql).iterate(...params)) {
       // Matched per-field, not one joined string: a regex like `^getFoo$`
       // must anchor to a single field (the name), not to the start/end of a
       // multi-line join of name+qualified+signature+doc.
-      const fields = [rec.name, rec.qualified, rec.signature ?? '', rec.doc ?? ''];
-      if (fields.some(matcher)) {
-        out.push(rec);
+      if (matcher(String(r.name)) || matcher(String(r.qualified ?? '')) || matcher(String(r.signature ?? '')) || matcher(String(r.doc ?? ''))) {
+        out.push(toSymbolRecord(r));
         if (out.length >= limit) break;
       }
     }
@@ -1134,22 +1381,33 @@ export class SqliteCodeStore implements CodeStore {
   private edgesBetween(ids: number[], kinds: EdgeKind[], anchor: 'src' | 'dst'): EdgeRecord[] {
     if (ids.length === 0) return [];
     const kindList = kinds.length > 0 ? kinds : REFERENCE_EDGE_KINDS;
-    const rows = this.all(
-      `SELECT e.src AS fromId, e.dst AS toId, e.kind AS kind, e.line AS line,
-              e.confidence AS confidence, e.test AS test
-       FROM Edge e
-       WHERE e.${anchor} IN (${placeholders(ids.length)}) AND e.kind IN (${placeholders(kindList.length)})`,
-      ...ids,
-      ...kindList
-    );
-    return rows.map((r) => ({
-      fromId: Number(r.fromId),
-      toId: Number(r.toId),
-      kind: r.kind as EdgeKind,
-      line: Number(r.line ?? 0),
-      confidence: (r.confidence as EdgeConfidence) ?? 'resolved',
-      test: Boolean(r.test),
-    }));
+    const out: EdgeRecord[] = [];
+    // Chunked like getMany: the id list plus the kind list must stay under the
+    // host-parameter cap, and a big `impact` frontier easily exceeds it.
+    const chunkSize = Math.max(1, ID_CHUNK - kindList.length);
+    const unique = [...new Set(ids)];
+    for (let i = 0; i < unique.length; i += chunkSize) {
+      const chunk = unique.slice(i, i + chunkSize);
+      const rows = this.all(
+        `SELECT e.src AS fromId, e.dst AS toId, e.kind AS kind, e.line AS line,
+                e.confidence AS confidence, e.test AS test
+         FROM Edge e
+         WHERE e.${anchor} IN (${placeholders(chunk.length)}) AND e.kind IN (${placeholders(kindList.length)})`,
+        ...chunk,
+        ...kindList
+      );
+      for (const r of rows) {
+        out.push({
+          fromId: Number(r.fromId),
+          toId: Number(r.toId),
+          kind: r.kind as EdgeKind,
+          line: Number(r.line ?? 0),
+          confidence: (r.confidence as EdgeConfidence) ?? 'resolved',
+          test: Boolean(r.test),
+        });
+      }
+    }
+    return out;
   }
 
   async query(sql: string, params?: Record<string, unknown>): Promise<Record<string, unknown>[]> {
@@ -1406,6 +1664,60 @@ export class SqliteCodeStore implements CodeStore {
   async checkpoint(): Promise<void> {
     if (this.disposed) return;
     this.conn.exec(`PRAGMA wal_checkpoint(TRUNCATE)`);
+  }
+
+  // -- Contract helpers (touch / count / caches / compact) ---------------------
+
+  /** Refresh stat metadata only; the content (hash) is untouched. No-op for unknown paths. */
+  async touchFile(path: string, mtimeMs: number, size: number): Promise<void> {
+    this.run(`UPDATE File SET mtimeMs = ?, size = ? WHERE path = ?`, mtimeMs, size, path);
+  }
+
+  async fileCount(): Promise<number> {
+    return Number(this.one(`SELECT COUNT(*) AS c FROM File`)?.c ?? 0);
+  }
+
+  /**
+   * Drop the in-memory symbol mirror and prepared statements. Safe at any
+   * point between operations: the mirror is rebuilt lazily from SQLite by the
+   * next resolve (loadSymbolIndex), and applyExtraction only patches a mirror
+   * that exists — a released store re-reads the already-written rows instead.
+   * Statements are re-prepared on demand by `stmt()`.
+   */
+  releaseCaches(): void {
+    this.invalidateSymbolIndex();
+    this.stmts.clear();
+  }
+
+  /**
+   * Return freed pages to the OS. Only meaningful for auto_vacuum=INCREMENTAL
+   * files (new databases and converted ones — see resetSync); anything else is
+   * left alone. Skipped unless more than 10% of the file is free, so calling it
+   * after every index run stays cheap.
+   */
+  async compact(): Promise<void> {
+    if (this.disposed) return;
+    if (this.pragmaNumber('auto_vacuum') !== 2) return;
+    const total = this.pragmaNumber('page_count');
+    const free = this.pragmaNumber('freelist_count');
+    if (total === 0 || free / total <= 0.1) return;
+    this.conn.exec('PRAGMA incremental_vacuum');
+    this.conn.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+  }
+
+  /**
+   * Consistent snapshot copy of an index at `srcDbPath` into `dstDbPath`
+   * (which must not exist), via `VACUUM INTO` — safe while another process
+   * has the source open in WAL mode. Used to seed a fresh git worktree's
+   * index from the main worktree's so only changed files need re-parsing.
+   */
+  static snapshot(srcDbPath: string, dstDbPath: string, driver: SqlDriver): void {
+    const conn = driver.open(srcDbPath);
+    try {
+      conn.exec(`VACUUM INTO '${dstDbPath.replace(/'/g, "''")}'`);
+    } finally {
+      conn.close();
+    }
   }
 
   dispose(): void {

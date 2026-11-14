@@ -40,6 +40,18 @@ Quick guide to all configuration files in PAiRS.
 - **No imports of low-level query functions**: Everything goes through facade
 - **Reason**: Ensures consistency; single optimization point
 
+### Extension / CLI Settings
+- **`pairs.disabledTools`**: tool names not registered as Language Model Tools.
+- **`pairs.skillLocation`** (`user` default | `workspace` | `off`): where the Claude Code skill is written. `user` = `~/.claude/skills/pairs/SKILL.md` (one copy for every project/worktree); `workspace` = `<folder>/.claude/skills/pairs/SKILL.md`. Only rewritten when content differs.
+- **CLI**: global flags `--root <dir>` (or `PAIRS_ROOT`) and `--no-refresh`. Without them the root is the nearest ancestor of cwd holding `.pairs/index.db` or `.git`.
+- **State dir**: `.pairs/` self-ignores via `.pairs/.gitignore` (`*`); PAiRS never edits the project's `.gitignore`. It also holds `index.lock` (cross-process full-index lock), `watcher.json` (heartbeat, refreshed every 30 s by the extension / `pairs watch`) and `last-refresh` (CLI auto-refresh throttle, 30 s).
+
+### Sharing an index between Windows and WSL
+- **Symptom**: `pairs` in WSL on a `/mnt/<drive>/...` checkout used to fail with `disk I/O error` while VS Code (Windows) had the same `.pairs/index.db` open. Cause: the index is a WAL database, and the `-shm` shared-memory file cannot be mapped by both OSes across the 9p/drvfs boundary (`SQLITE_IOERR`, errcode 4618). With no Windows holder, WAL on drvfs works.
+- **Query commands** (code tools, `stats`, `query`, `files`) catch the I/O / cantopen / busy / locked class of open errors and reopen the index read-only: `file:<path>?immutable=1` (no locks, no `-shm`), else a temp-dir copy of `index.db` (+ `-wal`). They print one stderr line, skip auto-refresh, and never write or checkpoint. Content still in the `-wal` (not yet checkpointed by the extension) is missing from an immutable snapshot, so very recent edits may not show.
+- **`index` / `watch`** cannot write across the boundary: they print one line and exit 1. Let the extension index, or use a WSL-native checkout (`--root <dir>`).
+- **Same version on both sides**: a snapshot cannot be migrated, so if the extension and the CLI have different index schema versions, the CLI reports it in one line; reload/update the extension.
+
 ---
 
 ## How to Modify Common Configurations

@@ -1,7 +1,7 @@
 {
   "name": "pairs",
   "displayName": "PAiRS",
-  "version": "0.25.0",
+  "version": "0.27.0",
   "description": "Derived code-graph index for AI coding agents",
   "publisher": "mkyr",
   "license": "MIT",
@@ -79,6 +79,21 @@
           },
           "default": [],
           "description": "Tool names to not register as in-editor Language Model Tools, e.g. \"analyze\"."
+        },
+        "pairs.skillLocation": {
+          "type": "string",
+          "enum": [
+            "user",
+            "workspace",
+            "off"
+          ],
+          "enumDescriptions": [
+            "Write the Claude Code skill once to ~/.claude/skills/pairs/SKILL.md (shared by every project and git worktree).",
+            "Write the skill into each workspace folder's .claude/skills/pairs/SKILL.md (adds an untracked file to every checkout).",
+            "Do not write a Claude Code skill."
+          ],
+          "default": "user",
+          "description": "Where the PAiRS Claude Code skill is installed. The file is only rewritten when its content changes."
         }
       }
     },
@@ -87,7 +102,7 @@
         "name": "pairs_find_symbol",
         "displayName": "PAiRS: find symbol definition",
         "toolReferenceName": "pairsFindSymbol",
-        "modelDescription": "Find where a symbol is defined by name (bare or qualified), workspace-wide. Returns definitions with file:line, kind, and signature. Use INSTEAD of grep/Read to locate a definition. Ambiguous names return the candidate list so you can re-call qualified. Pass preview:true to also get each hit's doc and first body lines, which usually removes the follow-up Read.",
+        "modelDescription": "Locate a symbol definition by bare or qualified name, workspace-wide (file:line, kind, signature). Use instead of grep/Read. preview:true adds doc + first body lines. Ambiguous names list candidates.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -118,7 +133,7 @@
                   "macro"
                 ]
               },
-              "description": "Restrict to these symbol kinds."
+              "description": "Restrict to these kinds."
             },
             "langs": {
               "type": "array",
@@ -149,15 +164,15 @@
             "offset": {
               "type": "integer",
               "minimum": 0,
-              "description": "Skip this many results — re-call with the offset from a truncated response to page."
+              "description": "Skip this many results (paging)."
             },
             "preview": {
               "type": "boolean",
-              "description": "Include the symbol's doc line and first few body lines with each hit — usually removes the follow-up Read."
+              "description": "Include doc and first body lines per hit."
             },
             "workspaceFolder": {
               "type": "string",
-              "description": "Name of the workspace folder to target when multiple are open. Omit to use the first/only workspace folder."
+              "description": "Workspace folder name when several are open; default first."
             }
           },
           "required": [
@@ -169,7 +184,7 @@
         "name": "pairs_get_symbol",
         "displayName": "PAiRS: get full declaration",
         "toolReferenceName": "pairsGetSymbol",
-        "modelDescription": "Full declaration of a symbol by name: signature, doc, span, and (for a type/impl) its members. Use INSTEAD of Read when you need a symbol's shape, not its body.",
+        "modelDescription": "Full declaration of a symbol: signature, doc, body excerpt, members. Use instead of Read for a symbol's shape.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -180,15 +195,15 @@
             },
             "path": {
               "type": "string",
-              "description": "Disambiguation hint: prefer the symbol defined in this file (workspace-relative path or suffix)."
+              "description": "Prefer the symbol defined in this file (path or suffix)."
             },
             "includeMembers": {
               "type": "boolean",
-              "description": "List members of a type/impl (methods, fields)."
+              "description": "List members of a type/impl."
             },
             "workspaceFolder": {
               "type": "string",
-              "description": "Name of the workspace folder to target when multiple are open. Omit to use the first/only workspace folder."
+              "description": "Workspace folder name when several are open; default first."
             }
           },
           "required": [
@@ -200,7 +215,7 @@
         "name": "pairs_outline",
         "displayName": "PAiRS: file outline",
         "toolReferenceName": "pairsOutline",
-        "modelDescription": "Structural outline of a file: its symbols, signatures, and line ranges, ordered by position. Use INSTEAD of Read when you need a file's shape.",
+        "modelDescription": "Symbols of one file with signatures and line numbers, in order. Use instead of Read to see a file's shape.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -211,7 +226,7 @@
             },
             "workspaceFolder": {
               "type": "string",
-              "description": "Name of the workspace folder to target when multiple are open. Omit to use the first/only workspace folder."
+              "description": "Workspace folder name when several are open; default first."
             }
           },
           "required": [
@@ -223,24 +238,24 @@
         "name": "pairs_impact",
         "displayName": "PAiRS: change impact (blast radius)",
         "toolReferenceName": "pairsImpact",
-        "modelDescription": "What transitively DEPENDS ON a symbol (\"blast radius\"): every caller, reader, and implementer that reaches it, up to `depth` hops. Call BEFORE renaming/removing/changing a symbol, or on \"what depends on X\". Catches renamed-import references grep misses. Fuzzy (name-matched) dependants are marked as such. Set includeTests:false to walk only production dependants (test-only paths are excluded from the walk, not just hidden). Pass kinds to slice by edge type (e.g. kinds:[\"CALLS\"] for callers only).",
+        "modelDescription": "Transitive dependants (\"blast radius\") of a symbol: callers, readers, implementers, up to `depth` hops. Call BEFORE renaming/removing/changing a symbol. Fuzzy (name-only) dependants are marked. kinds slices by edge type ([\"CALLS\"] = callers only); includeTests:false drops test-only paths.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
           "properties": {
             "name": {
               "type": "string",
-              "description": "Bare or qualified name of the symbol to analyze."
+              "description": "Bare or qualified name."
             },
             "path": {
               "type": "string",
-              "description": "Disambiguation hint: prefer the symbol defined in this file (workspace-relative path or suffix)."
+              "description": "Prefer the symbol defined in this file (path or suffix)."
             },
             "depth": {
               "type": "integer",
               "minimum": 1,
               "maximum": 6,
-              "description": "Transitive hops to walk."
+              "description": "Hops to walk."
             },
             "limit": {
               "type": "integer",
@@ -249,7 +264,7 @@
             },
             "includeTests": {
               "type": "boolean",
-              "description": "Include dependants reached only through test files. Off filters test-only paths out of the walk entirely, not just the rendered list."
+              "description": "Include dependants reached only via test files."
             },
             "kinds": {
               "type": "array",
@@ -264,11 +279,11 @@
                   "REFERENCES"
                 ]
               },
-              "description": "Restrict the walk to these dependency edge kinds — e.g. [\"CALLS\"] for callers only, [\"READS\",\"WRITES\"] for data access. Omit for all kinds."
+              "description": "Only these edge kinds, e.g. [\"READS\",\"WRITES\"]. Omit for all."
             },
             "workspaceFolder": {
               "type": "string",
-              "description": "Name of the workspace folder to target when multiple are open. Omit to use the first/only workspace folder."
+              "description": "Workspace folder name when several are open; default first."
             }
           },
           "required": [
@@ -280,24 +295,24 @@
         "name": "pairs_diff_impact",
         "displayName": "PAiRS: impact of the current diff",
         "toolReferenceName": "pairsDiffImpact",
-        "modelDescription": "Blast radius of the CURRENT CHANGE: maps the git diff's changed line ranges to the symbols containing them, then walks every dependant of all of them in one merged pass. Use INSTEAD of reading the diff and then calling `impact` once per changed function — dependants reached from several changed symbols appear once, tagged with which ones reach them. Answers \"what do I need to re-test / re-review for this change\". Changed lines that sit in no symbol (imports, module-level code, unindexed files) are reported separately, never silently dropped. Defaults to the unstaged working tree; pass `rev` for a revision or range like \"main...HEAD\".",
+        "modelDescription": "Blast radius of the current git change in one merged walk: maps diff hunks to changed symbols, then their dependants (each listed once). Use instead of reading the diff and calling impact per function. Hunks outside any symbol are listed separately. Default: unstaged tree; rev for e.g. \"main...HEAD\".",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
           "properties": {
             "rev": {
               "type": "string",
-              "description": "Git revision or range to diff, e.g. \"HEAD\" or \"main...HEAD\". Omit for uncommitted working-tree changes."
+              "description": "Git revision/range, e.g. \"HEAD\" or \"main...HEAD\". Omit for working-tree changes."
             },
             "staged": {
               "type": "boolean",
-              "description": "Diff the index (`git diff --staged`) instead of the working tree. Ignored when `rev` is set."
+              "description": "Diff the index instead (ignored when rev is set)."
             },
             "depth": {
               "type": "integer",
               "minimum": 1,
               "maximum": 6,
-              "description": "Transitive hops to walk from each changed symbol."
+              "description": "Hops from each changed symbol."
             },
             "limit": {
               "type": "integer",
@@ -307,11 +322,11 @@
             "offset": {
               "type": "integer",
               "minimum": 0,
-              "description": "Skip this many results — re-call with the offset from a truncated response to page."
+              "description": "Skip this many results (paging)."
             },
             "includeTests": {
               "type": "boolean",
-              "description": "Include dependants reached only through test files."
+              "description": "Include dependants reached only via test files."
             },
             "kinds": {
               "type": "array",
@@ -326,11 +341,11 @@
                   "REFERENCES"
                 ]
               },
-              "description": "Restrict the walk to these dependency edge kinds. Omit for all kinds."
+              "description": "Only these edge kinds. Omit for all."
             },
             "workspaceFolder": {
               "type": "string",
-              "description": "Name of the workspace folder to target when multiple are open. Omit to use the first/only workspace folder."
+              "description": "Workspace folder name when several are open; default first."
             }
           }
         }
@@ -339,24 +354,24 @@
         "name": "pairs_hierarchy",
         "displayName": "PAiRS: inheritance hierarchy",
         "toolReferenceName": "pairsHierarchy",
-        "modelDescription": "Inheritance/interface tree around a type: what it EXTENDS/IMPLEMENTS (ancestors) and what EXTENDS/IMPLEMENTS it (descendants), up to `depth` hops each way. Call on \"what does X inherit from\", \"what implements X\", or before changing a base class/interface to see every subclass affected. Narrower than `impact` (which also includes CALLS/READS/WRITES); use this when you specifically want the type hierarchy, not the full dependant set.",
+        "modelDescription": "Type tree: ancestors (extends/implements) and descendants, `depth` hops each way. Use before changing a base class/interface. Narrower than impact.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
           "properties": {
             "name": {
               "type": "string",
-              "description": "Bare or qualified name of the class/interface/trait to analyze."
+              "description": "Bare or qualified class/interface/trait name."
             },
             "path": {
               "type": "string",
-              "description": "Disambiguation hint: prefer the symbol defined in this file (workspace-relative path or suffix)."
+              "description": "Prefer the symbol defined in this file (path or suffix)."
             },
             "depth": {
               "type": "integer",
               "minimum": 1,
               "maximum": 6,
-              "description": "Transitive hops to walk, each direction."
+              "description": "Hops each direction."
             },
             "limit": {
               "type": "integer",
@@ -365,7 +380,7 @@
             },
             "workspaceFolder": {
               "type": "string",
-              "description": "Name of the workspace folder to target when multiple are open. Omit to use the first/only workspace folder."
+              "description": "Workspace folder name when several are open; default first."
             }
           },
           "required": [
@@ -377,7 +392,7 @@
         "name": "pairs_who_calls",
         "displayName": "PAiRS: call graph (callers/callees)",
         "toolReferenceName": "pairsWhoCalls",
-        "modelDescription": "Direct call sites of a function/method (\"callers\"), or what it calls (\"callees\"). Lighter than `impact` when you only want one hop. Catches renamed imports grep misses. Set includeTests:false to hide test-file callers/callees — the footer reports how many were hidden.",
+        "modelDescription": "Direct callers (or callees) of a function/method, one hop; cheaper than impact. includeTests:false hides test-file edges (footer says how many).",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -387,7 +402,7 @@
             },
             "path": {
               "type": "string",
-              "description": "Disambiguation hint: prefer the symbol defined in this file (workspace-relative path or suffix)."
+              "description": "Prefer the symbol defined in this file (path or suffix)."
             },
             "direction": {
               "type": "string",
@@ -402,7 +417,7 @@
             },
             "includeTests": {
               "type": "boolean",
-              "description": "Include edges whose reference site is in a test file. Off hides them and the footer states how many were hidden."
+              "description": "Include edges from test files."
             },
             "limit": {
               "type": "integer",
@@ -411,7 +426,7 @@
             },
             "workspaceFolder": {
               "type": "string",
-              "description": "Name of the workspace folder to target when multiple are open. Omit to use the first/only workspace folder."
+              "description": "Workspace folder name when several are open; default first."
             }
           },
           "required": [
@@ -423,7 +438,7 @@
         "name": "pairs_file_deps",
         "displayName": "PAiRS: file dependencies",
         "toolReferenceName": "pairsFileDeps",
-        "modelDescription": "File-level dependency graph: which files depend on this one (\"importers\", the blast radius) or what it depends on (\"imports\"). Call BEFORE moving/deleting a file or on \"what would break\".",
+        "modelDescription": "File-level dependencies: importers (what breaks if this file changes or moves) or imports. Use before moving/deleting a file.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -441,7 +456,7 @@
             },
             "transitive": {
               "type": "boolean",
-              "description": "Walk up to 5 hops; results carry their depth."
+              "description": "Walk up to 5 hops; results carry depth."
             },
             "limit": {
               "type": "integer",
@@ -450,7 +465,7 @@
             },
             "workspaceFolder": {
               "type": "string",
-              "description": "Name of the workspace folder to target when multiple are open. Omit to use the first/only workspace folder."
+              "description": "Workspace folder name when several are open; default first."
             }
           },
           "required": [
@@ -462,7 +477,7 @@
         "name": "pairs_module_map",
         "displayName": "PAiRS: module map (subsystems)",
         "toolReferenceName": "pairsModuleMap",
-        "modelDescription": "The module (directory) dependency graph: detected subsystems (Louvain clusters), module CYCLES, each module's dependency LAYER and fan-in/fan-out, the most depended-on modules, and explicit-vs-implicit DRIFT (how much dependency weight crosses cluster boundaries). Call on \"what are the subsystems\", \"where does this belong\", \"what is safe to change\", \"is the architecture drifting\", or before a big refactor. High drift means the folder layout and the real dependencies disagree; cycles mean no layering holds at all.",
+        "modelDescription": "Directory-level architecture: subsystems, module cycles, dependency layers, fan-in/out, and drift between folder layout and real dependencies. Use for \"where does this belong\", \"what is safe to change\", big refactors. boundary drills into one edge.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -471,27 +486,27 @@
               "type": "integer",
               "minimum": 1,
               "maximum": 100,
-              "description": "Max drift edges to list."
+              "description": "Max items per list (drift edges, cycles)."
             },
             "depth": {
               "type": "integer",
               "minimum": 1,
               "maximum": 20,
-              "description": "Collapse modules to this many leading path segments — use on large monorepos to keep the map legible."
+              "description": "Collapse modules to N leading path segments (large monorepos)."
             },
             "resolution": {
               "type": "number",
               "minimum": 0.1,
               "maximum": 10,
-              "description": "Louvain resolution: >1 finds more/smaller subsystems, <1 fewer/larger ones."
+              "description": "Louvain resolution: >1 more/smaller subsystems."
             },
             "boundary": {
               "type": "string",
-              "description": "Drill into one edge instead of the whole map: \"<from module> -> <to module>\" (module keys as printed by a plain module_map call). Returns the symbols of the target module that the source actually uses, with reference sites — i.e. exactly what breaking that dependency would require."
+              "description": "\"<from module> -> <to module>\" (keys from a plain call): the target symbols the source uses, with sites."
             },
             "workspaceFolder": {
               "type": "string",
-              "description": "Name of the workspace folder to target when multiple are open. Omit to use the first/only workspace folder."
+              "description": "Workspace folder name when several are open; default first."
             }
           }
         }
@@ -500,7 +515,7 @@
         "name": "pairs_analyze",
         "displayName": "PAiRS: analyze (dead code, cycles, hotspots)",
         "toolReferenceName": "pairsAnalyze",
-        "modelDescription": "Workspace-wide architectural analyses. `kind`: dead_code (zero-reference symbols — candidates, not verdicts), fan_out (functions with the most outgoing calls), cycles (dependency cycles at module or type scope), test_gap (exported symbols with no test referencing them).",
+        "modelDescription": "Workspace analyses by `kind`: dead_code (zero-reference candidates), fan_out (most outgoing calls), cycles (module/type), test_gap (exported symbols no test references).",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -520,19 +535,19 @@
                 "module",
                 "type"
               ],
-              "description": "cycles only: cycle detection scope."
+              "description": "cycles only."
             },
             "pathPrefix": {
               "type": "string",
-              "description": "Limit to files under this workspace-relative directory."
+              "description": "Only files under this directory."
             },
             "excludePath": {
               "type": "string",
-              "description": "Skip files under this directory (e.g. tests)."
+              "description": "Skip files under this directory."
             },
             "includeExported": {
               "type": "boolean",
-              "description": "dead_code: also report exported/public symbols."
+              "description": "dead_code: also exported symbols."
             },
             "limit": {
               "type": "integer",
@@ -542,11 +557,11 @@
             "offset": {
               "type": "integer",
               "minimum": 0,
-              "description": "Skip this many results — re-call with the offset from a truncated response to page."
+              "description": "Skip this many results (paging)."
             },
             "workspaceFolder": {
               "type": "string",
-              "description": "Name of the workspace folder to target when multiple are open. Omit to use the first/only workspace folder."
+              "description": "Workspace folder name when several are open; default first."
             }
           },
           "required": [
@@ -558,14 +573,14 @@
         "name": "pairs_rename_symbol",
         "displayName": "PAiRS: rename symbol",
         "toolReferenceName": "pairsRenameSymbol",
-        "modelDescription": "Rename a symbol and every direct reference site (definition + callers/readers/writers/implementers found via the same edges `impact` walks) consistently, in one pass. Aborts without touching any file if a reference site cannot be matched safely (e.g. the indexed line no longer contains the name at a word boundary) — re-index and retry. Aborts without writing if any reference site is fuzzy (name-only match) unless includeFuzzy is set. Revert via your VCS (e.g. `git checkout -- <files>`); this tool does not keep its own undo log.",
+        "modelDescription": "Rename a symbol and all its reference sites in one pass. Aborts without writing if any site cannot be matched safely or is fuzzy (unless includeFuzzy). No undo log: revert via VCS.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
           "properties": {
             "name": {
               "type": "string",
-              "description": "Bare or qualified name of the symbol to rename."
+              "description": "Bare or qualified name."
             },
             "newName": {
               "type": "string",
@@ -573,15 +588,15 @@
             },
             "path": {
               "type": "string",
-              "description": "Disambiguation hint: prefer the symbol defined in this file (workspace-relative path or suffix)."
+              "description": "Prefer the symbol defined in this file (path or suffix)."
             },
             "includeFuzzy": {
               "type": "boolean",
-              "description": "Also rename reference sites reached by fuzzy (name-only) edges. Off by default: those sites may belong to an unrelated symbol sharing the name."
+              "description": "Also rename name-only (fuzzy) sites; may hit unrelated same-named symbols."
             },
             "workspaceFolder": {
               "type": "string",
-              "description": "Name of the workspace folder to target when multiple are open. Omit to use the first/only workspace folder."
+              "description": "Workspace folder name when several are open; default first."
             }
           },
           "required": [
@@ -594,18 +609,17 @@
         "name": "pairs_grep_symbols",
         "displayName": "PAiRS: search symbols by regex",
         "toolReferenceName": "pairsGrepSymbols",
-        "modelDescription": "Search symbol names, qualified names, signatures, and doc text by substring or regex, returning graph citations (not file contents). Use when you know roughly what you're looking for but not the exact symbol name — a plain-text search over the index instead of grep-and-Read over the filesystem.",
+        "modelDescription": "Substring or regex search over symbol names, qualified names, signatures and docs; returns file:line citations, not file contents. Use when the exact name is unknown.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
           "properties": {
             "pattern": {
               "type": "string",
-              "description": "Substring (default) or regex to match against name/qualified/signature/doc."
+              "description": "Substring, or regex when isRegex."
             },
             "isRegex": {
-              "type": "boolean",
-              "description": "Treat `pattern` as a regular expression instead of a plain substring."
+              "type": "boolean"
             },
             "kinds": {
               "type": "array",
@@ -629,11 +643,11 @@
                   "macro"
                 ]
               },
-              "description": "Restrict to these symbol kinds."
+              "description": "Restrict to these kinds."
             },
             "pathPrefix": {
               "type": "string",
-              "description": "Limit to files under this workspace-relative directory."
+              "description": "Only files under this directory."
             },
             "limit": {
               "type": "integer",
@@ -642,7 +656,7 @@
             },
             "workspaceFolder": {
               "type": "string",
-              "description": "Name of the workspace folder to target when multiple are open. Omit to use the first/only workspace folder."
+              "description": "Workspace folder name when several are open; default first."
             }
           },
           "required": [
@@ -654,28 +668,28 @@
         "name": "pairs_context_pack",
         "displayName": "PAiRS: context pack (bundle)",
         "toolReferenceName": "pairsContextPack",
-        "modelDescription": "One assembled bundle for a symbol or file: its definition, direct callers, direct callees, type hierarchy (if a type), and enclosing module boundary. Composes find_symbol/who_calls/hierarchy/module_map into a single call — use this instead of making all of those calls separately when you need broad context on one symbol or file fast.",
+        "modelDescription": "One call bundling a symbol's or file's definition, callers, callees, type hierarchy and module deps. Use instead of several separate calls.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
           "properties": {
             "name": {
               "type": "string",
-              "description": "Symbol name (bare or qualified). Provide this or `path`."
+              "description": "Symbol name. Give this or `path`."
             },
             "path": {
               "type": "string",
-              "description": "Workspace-relative file path, for a file-level pack. Provide this or `name`."
+              "description": "Workspace-relative file path. Give this or `name`."
             },
             "limit": {
               "type": "integer",
               "minimum": 1,
               "maximum": 50,
-              "description": "Max items per section (callers, callees, etc)."
+              "description": "Max items per section."
             },
             "workspaceFolder": {
               "type": "string",
-              "description": "Name of the workspace folder to target when multiple are open. Omit to use the first/only workspace folder."
+              "description": "Workspace folder name when several are open; default first."
             }
           }
         }

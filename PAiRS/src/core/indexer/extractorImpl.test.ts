@@ -34,8 +34,9 @@ describe('tsReceiverDeclaredType (Step 2.3)', () => {
        JOIN Symbol a ON a.id = e.src JOIN Symbol b ON b.id = e.dst
        WHERE e.kind = 'CALLS' AND a.qualified = 'run'`
     );
-    expect(rows.map((r) => String(r.dst))).toEqual(['Widget.render']);
-    expect(String(rows[0]!.conf)).toBe('resolved');
+    // `new Widget()` is a CALLS edge to the class itself, alongside the member call.
+    expect(rows.map((r) => String(r.dst)).sort()).toEqual(['Widget', 'Widget.render']);
+    expect(rows.every((r) => String(r.conf) === 'resolved')).toBe(true);
   });
 
   it('falls back to the fuzzy-capped ladder for an untyped receiver', async () => {

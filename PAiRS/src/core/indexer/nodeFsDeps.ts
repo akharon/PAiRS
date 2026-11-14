@@ -130,6 +130,134 @@ export function isSkippedPath(relPath: string): boolean {
   return relPath.split('/').some((seg) => SKIP_DIRS.has(seg) || (seg.startsWith('.') && seg !== '.'));
 }
 
+/** One loaded .gitignore, scoped to the directory it lives in. */
+interface GitignoreScope {
+  relDir: string;
+  test: (relPath: string) => boolean;
+}
+
+/**
+ * Does any applicable gitignore (root down to the containing dir) ignore this
+ * workspace-relative path? Shared by the walker and the watcher filter so
+ * both apply identical `.gitignore` semantics. Each file's own `!` negations
+ * are handled inside parseGitignore.
+ */
+function ignoredByStack(stack: ReadonlyArray<GitignoreScope>, rel: string): boolean {
+  for (const g of stack) {
+    const sub = g.relDir ? rel.slice(g.relDir.length + 1) : rel;
+    if (sub === '' || sub.startsWith('..')) continue;
+    if (g.test(sub)) return true;
+  }
+  return false;
+}
+
+/** What `<dir>/.git` is: a FILE (linked worktree / submodule), a DIRECTORY (independent repo) or absent. */
+export type GitMarker = 'file' | 'dir' | 'none';
+
+function gitMarkerSync(absDir: string): GitMarker {
+  try {
+    return fs.statSync(path.join(absDir, '.git')).isDirectory() ? 'dir' : 'file';
+  } catch {
+    return 'none';
+  }
+}
+
+async function gitMarker(absDir: string): Promise<GitMarker> {
+  try {
+    return (await fs.promises.stat(path.join(absDir, '.git'))).isDirectory() ? 'dir' : 'file';
+  } catch {
+    return 'none';
+  }
+}
+
+/**
+ * Repository boundary rule for a NESTED directory (never the walk root).
+ *  - `.git` FILE: a linked worktree or submodule — a duplicate copy of code
+ *    that lives elsewhere. Never descend; indexing it multiplies every symbol.
+ *  - `.git` DIRECTORY: an independent repo. Skipped when the walk root is itself
+ *    a repo (a vendored clone inside a repo); indexed when the root is NOT a
+ *    repo (a multi-repo parent folder holding several checkouts).
+ */
+function isRepoBoundary(marker: GitMarker, rootIsRepo: boolean): boolean {
+  return marker === 'file' || (marker === 'dir' && rootIsRepo);
+}
+
+export interface WorkspaceFilter {
+  /** Whether the workspace root itself is a git repo (has a `.git` entry). */
+  readonly rootIsRepo: boolean;
+  /**
+   * Should this workspace-relative POSIX path (file OR directory) be left out of
+   * the index? Covers SKIP_DIRS, dot-dirs, nested-repo boundaries and the root
+   * plus nested `.gitignore`s — the same rules the full-index walker applies, so
+   * a file watcher using it can't index what a full index would not.
+   */
+  isExcluded(relPath: string): boolean;
+}
+
+/**
+ * Sync, cached counterpart of the walker's exclusion rules, for event-driven
+ * callers (fs.watch, the VS Code FileSystemWatcher). Gitignore scopes and
+ * `.git` marker lookups are cached for `ttlMs` so a burst of events costs a
+ * handful of stats, while a newly added worktree or edited .gitignore is still
+ * noticed within seconds.
+ */
+export function createWorkspaceFilter(
+  root: string,
+  opts: { ttlMs?: number; now?: () => number } = {}
+): WorkspaceFilter {
+  const ttlMs = opts.ttlMs ?? 5000;
+  const now = opts.now ?? Date.now;
+  const rootIsRepo = gitMarkerSync(root) !== 'none';
+  const markers = new Map<string, { v: GitMarker; at: number }>();
+  const scopes = new Map<string, { v: GitignoreScope | null; at: number }>();
+
+  const markerOf = (relDir: string): GitMarker => {
+    const hit = markers.get(relDir);
+    const t = now();
+    if (hit && t - hit.at < ttlMs) return hit.v;
+    const v = gitMarkerSync(path.join(root, relDir));
+    markers.set(relDir, { v, at: t });
+    return v;
+  };
+
+  const scopeOf = (relDir: string): GitignoreScope | null => {
+    const hit = scopes.get(relDir);
+    const t = now();
+    if (hit && t - hit.at < ttlMs) return hit.v;
+    let v: GitignoreScope | null = null;
+    try {
+      v = { relDir, test: parseGitignore(fs.readFileSync(path.join(root, relDir, '.gitignore'), 'utf8')) };
+    } catch {
+      v = null;
+    }
+    scopes.set(relDir, { v, at: t });
+    return v;
+  };
+
+  return {
+    rootIsRepo,
+    isExcluded(relPath: string): boolean {
+      if (relPath === '' || relPath === '.') return false;
+      if (isSkippedPath(relPath)) return true;
+      const segs = relPath.split('/').filter(Boolean);
+      const stack: GitignoreScope[] = [];
+      const rootScope = scopeOf('');
+      if (rootScope) stack.push(rootScope);
+      let cur = '';
+      for (let i = 0; i < segs.length; i++) {
+        cur = cur ? `${cur}/${segs[i]}` : segs[i]!;
+        if (ignoredByStack(stack, cur)) return true;
+        if (isRepoBoundary(markerOf(cur), rootIsRepo)) return true;
+        if (i < segs.length - 1) {
+          const sc = scopeOf(cur);
+          if (sc) stack.push(sc);
+        }
+      }
+      return false;
+    },
+  };
+}
+
 /**
  * Watch `workspaceRoot` and feed indexable-file events to the callbacks
  * (paths workspace-relative POSIX). One non-recursive fs.watch per
@@ -142,8 +270,8 @@ export function isSkippedPath(relPath: string): boolean {
  * existence decides. Returns a disposer. Pair with core WatchQueue for
  * debouncing.
  *
- * Respects the root `.gitignore` (if present) — files matching patterns are
- * skipped just like they would be in `git status`.
+ * Applies {@link createWorkspaceFilter}: root + nested `.gitignore`s and
+ * nested-repo boundaries, identical to the full-index walk.
  */
 export function nodeWatchWorkspace(
   workspaceRoot: string,
@@ -153,12 +281,12 @@ export function nodeWatchWorkspace(
   const realOfWatched = new Map<string, string>(); // relDir → real path
   const watchedReal = new Set<string>(); // real paths of watched dirs — breaks symlink cycles
   let disposed = false;
-  let isIgnored: (relPath: string) => boolean = () => false; // placeholder, loaded sync in addDir('') setup
+  const filter = createWorkspaceFilter(workspaceRoot);
 
   const onFsEvent = (relDir: string, filename: string | null): void => {
     if (disposed || filename === null) return;
     const rel = (relDir ? `${relDir}/` : '') + String(filename).split(path.sep).join('/');
-    if (isSkippedPath(rel) || isIgnored(rel)) return;
+    if (filter.isExcluded(rel)) return;
     const abs = path.join(workspaceRoot, rel);
     fs.promises
       .stat(abs) // follows symlinks: a linked dir/file is treated as its target
@@ -174,17 +302,8 @@ export function nodeWatchWorkspace(
   };
 
   const addDir = (relDir: string): void => {
-    if (disposed || watchers.has(relDir) || (relDir !== '' && isSkippedPath(relDir))) return;
+    if (disposed || watchers.has(relDir) || (relDir !== '' && filter.isExcluded(relDir))) return;
     const absDir = path.join(workspaceRoot, relDir);
-    // Load .gitignore sync on first setup (relDir = '' is root).
-    if (relDir === '') {
-      try {
-        const contents = fs.readFileSync(path.join(workspaceRoot, '.gitignore'), 'utf8');
-        isIgnored = parseGitignore(contents);
-      } catch {
-        isIgnored = () => false;
-      }
-    }
     // Two links to one physical dir would otherwise mean two watchers and
     // duplicate events; an ancestor link would recurse forever.
     let real: string;
@@ -280,6 +399,7 @@ interface WalkCollectors {
  */
 async function walkWorkspace(workspaceRoot: string): Promise<WalkCollectors> {
   const results: WalkCollectors = { source: [], named: [] };
+  const rootIsRepo = (await gitMarker(workspaceRoot)) !== 'none';
   // Stack of (relDir-prefix, predicate) pairs from root to current directory;
   // relPaths passed to `walk` are workspace-relative, so each ancestor
   // predicate needs the path rebased to *its own* directory before testing.
@@ -297,18 +417,7 @@ async function walkWorkspace(workspaceRoot: string): Promise<WalkCollectors> {
     const stack =
       localIgnore === GITIGNORE_CACHE_MISS ? gitignores : [...gitignores, { relDir, test: localIgnore }];
 
-    const isIgnored = (rel: string): boolean => {
-      let ignored = false;
-      for (const g of stack) {
-        const sub = g.relDir ? rel.slice(g.relDir.length + 1) : rel;
-        if (sub === '' || sub.startsWith('..')) continue;
-        // Later (deeper) gitignores must be able to override earlier ones,
-        // including re-including via `!` — so evaluate root-to-leaf in order
-        // and let the last verdict win, same as the per-file rule stacking.
-        if (g.test(sub)) ignored = true;
-      }
-      return ignored;
-    };
+    const isIgnored = (rel: string): boolean => ignoredByStack(stack, rel);
 
     let entries: fs.Dirent[];
     try {
@@ -323,7 +432,12 @@ async function walkWorkspace(workspaceRoot: string): Promise<WalkCollectors> {
       const kind = await classifyEntry(entry, abs);
       if (kind === 'dir') {
         if (SKIP_DIRS.has(entry.name) || isIgnored(rel)) continue;
-        await walk(abs, relDir, nextAncestors, stack);
+        // Linked worktrees / submodules (`.git` FILE) are duplicate copies of
+        // code — never descend. Independent repos (`.git` dir) are skipped only
+        // when the root is itself a repo. See isRepoBoundary.
+        if (isRepoBoundary(await gitMarker(abs), rootIsRepo)) continue;
+        // `rel` (not relDir) so a nested .gitignore is scoped to its own directory.
+        await walk(abs, rel, nextAncestors, stack);
       } else if (kind === 'file') {
         if (isIgnored(rel)) continue;
         if (langForPath(rel)) {
@@ -360,6 +474,17 @@ export function nodeListWorkspaceFiles(workspaceRoot: string): () => Promise<str
  */
 export function nodeListNamedFiles(workspaceRoot: string): () => Promise<Array<{ path: string; mtimeMs: number; size: number }>> {
   return async () => (await walkWorkspace(workspaceRoot)).named;
+}
+
+/**
+ * Stat without reading — contract for IndexerDeps.statFile, so the indexer can
+ * skip unchanged files on mtime/size before ever opening them.
+ */
+export function nodeStatFile(workspaceRoot: string): (relPath: string) => Promise<{ mtimeMs: number; size: number }> {
+  return async (relPath) => {
+    const st = await fs.promises.stat(path.join(workspaceRoot, relPath));
+    return { mtimeMs: st.mtimeMs, size: st.size };
+  };
 }
 
 export function nodeReadFile(workspaceRoot: string): (relPath: string) => Promise<{ source: string; mtimeMs: number; size: number }> {

@@ -15,7 +15,18 @@
  * an old index — drop and recreate. The index is derived data, never migrated.
  */
 
-export const SCHEMA_VERSION = 9;
+/**
+ * v10: Edge is WITHOUT ROWID keyed on (src,dst,kind,line) — the former UNIQUE
+ * index is now the table itself (no second copy of every edge), and the
+ * redundant idx_edge_src (a prefix of that key) is gone. Old databases are
+ * dropped and rebuilt by SqliteCodeStore.migrate().
+ */
+/**
+ * v11: extractor emits constructor-call CALLS edges (`new Foo()`), TypeScript
+ * type-reference REFERENCES edges, and static `Cls.method()` receiver types —
+ * existing indexes lack these edges and are dropped/rebuilt on version mismatch.
+ */
+export const SCHEMA_VERSION = 11;
 
 export const SCHEMA_DDL: readonly string[] = [
   `CREATE TABLE IF NOT EXISTS File(
@@ -55,8 +66,12 @@ export const SCHEMA_DDL: readonly string[] = [
      kind TEXT NOT NULL,
      line INTEGER DEFAULT 0,
      confidence TEXT DEFAULT 'resolved',
-     test INTEGER DEFAULT 0
-   )`,
+     test INTEGER DEFAULT 0,
+     -- confidence is deliberately NOT in the key: two resolution passes can
+     -- reach the same site with different confidence, and that must collapse
+     -- to one row, not two (see the ON CONFLICT upserts in the store).
+     PRIMARY KEY (src, dst, kind, line)
+   ) WITHOUT ROWID`,
   `CREATE TABLE IF NOT EXISTS PendingRef(
      id INTEGER PRIMARY KEY,
      fileId INTEGER NOT NULL REFERENCES File(id) ON DELETE CASCADE,
@@ -102,13 +117,8 @@ export const SCHEMA_INDEXES: readonly string[] = [
   `CREATE INDEX IF NOT EXISTS idx_symbol_name ON Symbol(name)`,
   `CREATE INDEX IF NOT EXISTS idx_symbol_qualified ON Symbol(qualified)`,
   `CREATE INDEX IF NOT EXISTS idx_symbol_parent ON Symbol(parentId)`,
-  `CREATE INDEX IF NOT EXISTS idx_edge_src ON Edge(src, kind)`,
+  // Forward lookups (`src IN (...)`) are served by the Edge primary key.
   `CREATE INDEX IF NOT EXISTS idx_edge_dst ON Edge(dst, kind)`,
-  `CREATE INDEX IF NOT EXISTS idx_edge_kind ON Edge(kind)`,
-  // `confidence` is deliberately NOT in the key: two resolution passes can
-  // reach the same site with different confidence, and that must collapse to
-  // one row, not two.
-  `CREATE UNIQUE INDEX IF NOT EXISTS idx_edge_unique ON Edge(src, dst, kind, line)`,
   `CREATE INDEX IF NOT EXISTS idx_pending_file ON PendingRef(fileId)`,
   `CREATE INDEX IF NOT EXISTS idx_pending_name ON PendingRef(name)`,
   `CREATE INDEX IF NOT EXISTS idx_namedfile_name ON NamedFile(name)`,

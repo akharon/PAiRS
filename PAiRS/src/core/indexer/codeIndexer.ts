@@ -55,6 +55,12 @@ export interface IndexerDeps {
   extractor: Extractor;
   listWorkspaceFiles(): Promise<string[]>;
   readFile(path: string): Promise<{ source: string; mtimeMs: number; size: number }>;
+  /**
+   * Stat without reading content. When provided, the indexer checks
+   * mtime/size against the store BEFORE reading the file, so an unchanged
+   * workspace costs one stat per file instead of a full read.
+   */
+  statFile?(path: string): Promise<{ mtimeMs: number; size: number }>;
   /** Non-source filenames to refresh in NamedFile each fullIndex. Optional — omit to skip filename indexing. */
   listNamedFiles?(): Promise<Array<{ path: string; mtimeMs: number; size: number }>>;
   /** Crate name for a workspace-relative path (O6 monorepo scoping). Null for single-crate projects. */

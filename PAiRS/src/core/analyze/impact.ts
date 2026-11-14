@@ -38,8 +38,10 @@ export interface ImpactResult {
   seed: SymbolRecord;
   /** Dependants ordered by depth, then file:line. Excludes the seed. */
   dependants: ImpactNode[];
-  /** True if the walk hit `maxDepth` and stopped short of the transitive closure. */
+  /** True if the walk stopped short of the transitive closure: it hit `maxDepth` or the node cap. */
   truncated: boolean;
+  /** True if the walk stopped because it collected `maxNodes` dependants (a hub symbol); `truncated` is then also true. */
+  capped?: boolean;
   /**
    * Edges dropped because their reference site was in a test file and
    * `includeTests` was false. Not a count of hidden dependants (a dependant
@@ -49,6 +51,9 @@ export interface ImpactResult {
    */
   hiddenTestEdges: number;
 }
+
+/** Hard ceiling on dependants collected by one walk, so a hub symbol at depth 6 can't exhaust memory. */
+export const IMPACT_MAX_NODES = 5000;
 
 const CONFIDENCE_RANK: Record<EdgeConfidence, number> = { resolved: 0, fuzzy: 1, unresolved: 2 };
 function weaker(a: EdgeConfidence, b: EdgeConfidence): EdgeConfidence {
@@ -62,13 +67,16 @@ function weaker(a: EdgeConfidence, b: EdgeConfidence): EdgeConfidence {
  *   file are dropped from the frontier BEFORE they can seed the next hop —
  *   a test-only path is excluded from the walk entirely, not just hidden at
  *   render time. Default true (unchanged behavior).
+ * @param maxNodes stop collecting once this many dependants are known
+ *   (default IMPACT_MAX_NODES); the result is then `capped` and `truncated`.
  */
 export async function impact(
   store: CodeStore,
   id: number,
   maxDepth = 5,
   kinds: readonly EdgeKind[] = IMPACT_EDGE_KINDS,
-  includeTests = true
+  includeTests = true,
+  maxNodes = IMPACT_MAX_NODES
 ): Promise<ImpactResult | null> {
   const seed = await store.get(id);
   if (!seed) return null;
@@ -83,6 +91,7 @@ export async function impact(
   let frontier = [id];
   let hop = 0;
   let truncated = false;
+  let capped = false;
   let hiddenTestEdges = 0;
 
   while (frontier.length > 0) {
@@ -103,6 +112,10 @@ export async function impact(
       // was already reached at <= the current depth via at-least-as-strong paths.
       const conf = e.confidence;
       if (!prior) {
+        if (seen.size >= maxNodes) {
+          capped = true;
+          continue;
+        }
         seen.set(e.fromId, { depth: hop, confidence: conf });
         next.push(e.fromId);
       } else if (prior.depth === hop) {
@@ -111,6 +124,10 @@ export async function impact(
       }
     }
     frontier = next;
+    if (capped) {
+      truncated = true;
+      break;
+    }
   }
 
   const ids = [...seen.keys()];
@@ -126,5 +143,5 @@ export async function impact(
     (a, b) => a.depth - b.depth || a.symbol.file.localeCompare(b.symbol.file, 'en') || a.symbol.startLine - b.symbol.startLine
   );
 
-  return { seed, dependants, truncated, hiddenTestEdges };
+  return { seed, dependants, truncated, capped, hiddenTestEdges };
 }

@@ -68,6 +68,8 @@ function fakeStore(initialFiles: FileRecord[] = []): CodeStore & { applied: stri
       return { ...EMPTY_STATS, files: files.size };
     },
     async checkpoint(): Promise<void> {},
+    async compact(): Promise<void> {},
+    async touchFile(): Promise<void> {},
   } as unknown as CodeStore & { applied: string[]; removed: string[]; resolveCalls: number };
   return store;
 }

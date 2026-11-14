@@ -80,6 +80,17 @@
 ; --- calls -----------------------------------------------------------------------
 (call_expression function: (identifier) @ref.call)
 (call_expression function: (member_expression property: (property_identifier) @ref.call))
+; Constructor calls: `new Foo()` is a call to class Foo (CALLS edge to the class).
+(new_expression constructor: (identifier) @ref.call)
+(new_expression constructor: (member_expression property: (property_identifier) @ref.call))
+
+; --- type references -------------------------------------------------------------
+; Any use of a type name (parameter/field/return/variable annotations, generic type
+; args, unions, casts...) is a REFERENCES edge to that type, so `impact` of an
+; interface/class/alias reaches the code that merely names it. The extractor drops
+; the declaration's own name and nodes already captured as extends/implements
+; (see isTypeReferenceNoise in extractorImpl.ts).
+(type_identifier) @ref.reference
 
 ; --- type references (extends/implements outside class_heritage shape above) -----
 (extends_type_clause (type_identifier) @ref.extends)

@@ -127,7 +127,7 @@ export interface CodeStore {
    * deleted rather than parked forever. Never pass it on an incremental
    * re-index — mid-pass, a miss only means "not indexed *yet*".
    */
-  resolvePending(namesHint?: string[], opts?: { retireUnresolved?: boolean }): Promise<number>;
+  resolvePending(namesHint?: string[], opts?: { retireUnresolved?: boolean; filePaths?: string[] }): Promise<number>;
   /** Known files with their hash/mtime — the indexer diffs against disk on startup. */
   listFiles(): Promise<FileRecord[]>;
 
@@ -167,6 +167,21 @@ export interface CodeStore {
   lookup(nameOrQualified: string): Promise<SymbolRecord[] | AmbiguousSymbol>;
   /** All symbols of a file ordered by startLine. */
   outline(path: string): Promise<SymbolRecord[]>;
+  /**
+   * Resolve a user/agent-supplied file path against the indexed files: exact
+   * match, then `\`→`/` / leading `./` normalisation, then a unique path-suffix
+   * match on a `/` boundary (`tools.ts` → `src/core/tools/tools.ts`, never
+   * `xtools.ts`). `{ exact }` when it resolved; otherwise `matches` holds the
+   * candidates (>1 = ambiguous, 0 = none, with `closest` = up to 3 paths with
+   * the nearest basenames).
+   */
+  resolveFilePath(input: string): Promise<{ exact: string } | { matches: string[]; closest: string[] }>;
+  /**
+   * "Did you mean" for a symbol-name miss: distinct names ranked
+   * case-insensitive-equal, prefix, substring, then edit distance ≤ 2. Bounded
+   * (candidate scans are capped), so it is safe on a large index.
+   */
+  suggestNames(name: string, limit?: number): Promise<string[]>;
   /** Direct children of a symbol (method → containing impl block), ordered by startLine. */
   membersOf(parentId: number): Promise<SymbolRecord[]>;
   /**
@@ -232,6 +247,24 @@ export interface CodeStore {
    * high-water mark between sessions.
    */
   checkpoint(): Promise<void>;
+  /**
+   * Refresh a known file's stat metadata (mtime/size) WITHOUT re-parsing it.
+   * Used when content hash is unchanged but mtime moved (git checkout, a
+   * fresh worktree seeded from another index, `touch`), so the next run
+   * short-circuits on stat alone. No-op for unknown paths.
+   */
+  touchFile(path: string, mtimeMs: number, size: number): Promise<void>;
+  /** Number of indexed source files. Cheap (`COUNT(*)` on File) — use it instead of stats() for "is the index empty?". */
+  fileCount(): Promise<number>;
+  /**
+   * Drop in-memory caches (symbol-resolution mirror, prepared statements).
+   * They rebuild lazily on next use. Long-lived hosts (VS Code extension)
+   * call this after an indexing burst so an idle window does not pin the
+   * whole symbol table in memory.
+   */
+  releaseCaches(): void;
+  /** Reclaim free pages so the file shrinks after large deletes / rebuilds. Safe to call often: no-op when there is little to reclaim. */
+  compact(): Promise<void>;
   dispose(): void;
 }
 

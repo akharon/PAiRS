@@ -8,9 +8,11 @@
  *
  * Full index runs Pass 1 for all files before any Pass 2 resolution
  * (subsystem_indexer_spec.md §3: "forward references"); incremental
- * indexFile() resolves only the names the changed file just declared.
+ * indexFile() resolves the names the changed file just declared plus the
+ * changed file's own parked refs (see indexOneFile).
  */
 
+import * as crypto from 'node:crypto';
 import { langForPath } from './parserRegistry';
 import type { FileIndexResult, Indexer, IndexerDeps, IndexReport, SpanError } from './codeIndexer';
 import type { CodeLang, FileExtraction, SymbolKind } from './types';
@@ -97,6 +99,8 @@ export class IndexerImpl implements Indexer {
     }
 
     await this.deps.store.checkpoint();
+    // Hand back pages freed by retired refs / replaced rows (no-op when small).
+    await this.deps.store.compact();
 
     const stats = await this.deps.store.stats();
     const kindCount = (...kinds: SymbolKind[]): number =>
@@ -142,29 +146,52 @@ export class IndexerImpl implements Indexer {
     if (!lang) {
       return { declared: [], edges: { resolved: 0, unresolved: 0 }, parseErrors: [], elapsedMs: 0 };
     }
-
-    let file: { source: string; mtimeMs: number; size: number };
-    try {
-      file = await this.deps.readFile(path);
-    } catch (err) {
-      return {
-        declared: [],
-        edges: { resolved: 0, unresolved: 0 },
-        parseErrors: [{ path, message: (err as Error).message }],
-        elapsedMs: Date.now() - start,
-      };
-    }
-    if (file.size > DEFAULT_MAX_FILE_SIZE_BYTES) {
-      return { declared: [], edges: { resolved: 0, unresolved: 0 }, parseErrors: [], elapsedMs: Date.now() - start };
-    }
+    const skipped = (): FileIndexResult => ({ declared: [], edges: { resolved: 0, unresolved: 0 }, parseErrors: [], elapsedMs: Date.now() - start });
+    const failed = (err: unknown): FileIndexResult => ({
+      declared: [],
+      edges: { resolved: 0, unresolved: 0 },
+      parseErrors: [{ path, message: (err as Error).message }],
+      elapsedMs: Date.now() - start,
+    });
 
     if (!this.fileCache) {
       const known = await this.deps.store.listFiles();
       this.fileCache = new Map(known.map((f) => [f.path, { mtimeMs: f.mtimeMs, size: f.size, hash: f.hash }]));
     }
     const prior = this.fileCache.get(path);
-    if (prior && prior.mtimeMs === file.mtimeMs && prior.size === file.size) {
-      return { declared: [], edges: { resolved: 0, unresolved: 0 }, parseErrors: [], elapsedMs: Date.now() - start };
+
+    // Stat first: an unchanged file costs one stat, not a full read. Without
+    // `statFile` the read below supplies mtime/size and the same check runs
+    // after it (behaviour identical, just slower).
+    if (this.deps.statFile) {
+      let st: { mtimeMs: number; size: number };
+      try {
+        st = await this.deps.statFile(path);
+      } catch (err) {
+        return failed(err);
+      }
+      if (st.size > DEFAULT_MAX_FILE_SIZE_BYTES) return skipped();
+      if (prior && prior.mtimeMs === st.mtimeMs && prior.size === st.size) return skipped();
+    }
+
+    let file: { source: string; mtimeMs: number; size: number };
+    try {
+      file = await this.deps.readFile(path);
+    } catch (err) {
+      return failed(err);
+    }
+    if (file.size > DEFAULT_MAX_FILE_SIZE_BYTES) return skipped();
+    if (prior && prior.mtimeMs === file.mtimeMs && prior.size === file.size) return skipped();
+
+    // Hash before parse: mtime moved but content did not (git checkout, a
+    // worktree seeded from another index, `touch`) — record the new stat so the
+    // next run short-circuits on stat alone, and skip the parse entirely.
+    // Same digest the extractor stores in File.hash.
+    const hash = crypto.createHash('sha1').update(file.source).digest('hex');
+    if (prior && prior.hash === hash) {
+      await this.deps.store.touchFile(path, file.mtimeMs, file.size);
+      this.fileCache.set(path, { mtimeMs: file.mtimeMs, size: file.size, hash });
+      return skipped();
     }
 
     const loaded = await this.deps.parsers.load(lang as CodeLang);
@@ -172,7 +199,9 @@ export class IndexerImpl implements Indexer {
     const extraction: FileExtraction = this.deps.extractor.extract(loaded, path, file.source, file, crate);
 
     if (prior && prior.hash === extraction.hash) {
-      return { declared: [], edges: { resolved: 0, unresolved: 0 }, parseErrors: [], elapsedMs: Date.now() - start };
+      await this.deps.store.touchFile(path, file.mtimeMs, file.size);
+      this.fileCache.set(path, { mtimeMs: file.mtimeMs, size: file.size, hash: extraction.hash });
+      return skipped();
     }
 
     const fileRecord = await this.deps.store.applyExtraction(extraction);
@@ -180,8 +209,15 @@ export class IndexerImpl implements Indexer {
 
     let resolvedCount = 0;
     if (!opts.skipResolve) {
-      const names = extraction.symbols.map((s) => s.name);
-      if (names.length) resolvedCount = await this.deps.store.resolvePending(names);
+      // Two retries, unioned by the store: (1) parked refs ELSEWHERE that name
+      // something this file just declared (forward references), and (2) this
+      // file's OWN parked refs. Method calls park during the inline pass (they
+      // need whole-workspace knowledge to earn `resolved`), and the names
+      // above are what this file declares — not what it calls — so without (2)
+      // an edited file loses its cross-file method-call edges until the next
+      // full index.
+      const names = [...new Set(extraction.symbols.map((s) => s.name))];
+      resolvedCount = await this.deps.store.resolvePending(names, { filePaths: [path] });
     }
 
     const parseErrors: SpanError[] = extraction.parseError ? [{ path, message: 'syntax error (partial tree indexed)' }] : [];

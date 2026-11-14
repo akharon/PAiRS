@@ -227,7 +227,36 @@ function tsReceiverDeclaredType(node: Node): string | null {
     const found = findVariableDeclaratorType(body, receiverName, typeNameOf);
     if (found) return found;
   }
+  // No local binding: a capitalised bare identifier receiver (`Cls.method()`) is
+  // a static call through the class/namespace itself. Report the identifier as
+  // the receiver "type" so the resolver looks the member up on that class; it
+  // stays unresolved (not fuzzy) when no workspace type of that name exists.
+  if (/^[A-Z]/.test(receiverName)) return receiverName;
   return null;
+}
+
+/** Built-in/global type names that never name a workspace symbol — not worth a pending ref. */
+const TS_BUILTIN_TYPE_NAMES: ReadonlySet<string> = new Set([
+  'Array', 'ReadonlyArray', 'Promise', 'PromiseLike', 'Record', 'Partial', 'Required', 'Readonly', 'Pick', 'Omit',
+  'Exclude', 'Extract', 'NonNullable', 'ReturnType', 'Parameters', 'InstanceType', 'Awaited', 'Map', 'Set',
+  'WeakMap', 'WeakSet', 'Date', 'Error', 'RegExp', 'Function', 'Object', 'Iterable', 'Iterator', 'AsyncIterable',
+  'AsyncIterator', 'IterableIterator', 'AsyncGenerator', 'Generator', 'Uint8Array', 'Buffer', 'Symbol', 'Boolean',
+  'String', 'Number',
+]);
+
+/**
+ * TypeScript `type_identifier` captured as `@ref.reference` that must NOT become
+ * an edge: a declaration's own name (`class Foo`, `type T = ...`, `<T>`) and
+ * heritage-clause members (already captured as extends/implements).
+ */
+function isTypeReferenceNoise(node: Node): boolean {
+  if (node.type !== 'type_identifier') return false;
+  if (TS_BUILTIN_TYPE_NAMES.has(node.text)) return true;
+  const parent = node.parent;
+  if (!parent) return false;
+  const nameField = parent.childForFieldName('name');
+  if (nameField && nameField.id === node.id && parent.type !== 'generic_type' && parent.type !== 'nested_type_identifier') return true;
+  return /^(extends_type_clause|implements_clause|extends_clause|class_heritage)$/.test(parent.type);
 }
 
 /** Depth-first search for a `variable_declarator` binding `name` with a written type annotation. */
@@ -427,7 +456,16 @@ export class ExtractorImpl implements Extractor {
         return false;
       };
 
+      // TypeScript type references: nodes already captured as extends/implements
+      // (e.g. `const x: I = {...}`) must not also emit a REFERENCES edge, and a
+      // symbol naming the same type twice needs only one edge.
+      const claimedByOtherKind = new Set<number>();
+      for (const r of rawRefs) if (r.kind !== 'REFERENCES') claimedByOtherKind.add(r.node.id);
+      const seenTypeRefs = new Set<string>();
+
       for (const ref of rawRefs) {
+        const isTypeRef = loaded.lang === 'typescript' && ref.kind === 'REFERENCES' && ref.node.type === 'type_identifier';
+        if (isTypeRef && (isTypeReferenceNoise(ref.node) || claimedByOtherKind.has(ref.node.id))) continue;
         let enclosing = 0; // module symbol
         let bestSize = Infinity;
         for (const dr of defRanges) {
@@ -448,6 +486,17 @@ export class ExtractorImpl implements Extractor {
         // Qualified refs are exempt: the qualifier already constrains them.
         const bare = bareRefName(ref.name);
         if (qualifiedRefName(ref.name) === null && shadowedByParam(ref.node, bare)) continue;
+        if (isTypeRef) {
+          // A member mentioning its own enclosing type adds no dependency, and
+          // one edge per (symbol, type) is enough.
+          let selfMention = false;
+          for (let i: number | null = enclosing; i !== null; i = extraction.symbols[i]!.parentIndex) {
+            if (extraction.symbols[i]!.name === bare) selfMention = true;
+          }
+          const key = `${enclosing}\0${bare}`;
+          if (selfMention || seenTypeRefs.has(key)) continue;
+          seenTypeRefs.add(key);
+        }
 
         extraction.refs.push({
           fromIndex: enclosing,

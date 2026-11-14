@@ -11,14 +11,9 @@ import * as fs from 'node:fs/promises';
 // not a Promise, so the preview reader cannot use the promises API above.
 import * as fsSync from 'node:fs';
 import * as path from 'node:path';
-import { ParserRegistryImpl, fileQuerySource } from '../../core/indexer/parserRegistryImpl';
-import { ExtractorImpl } from '../../core/indexer/extractorImpl';
-import { IndexerImpl } from '../../core/indexer/codeIndexerImpl';
-import { nodeListNamedFiles, nodeListWorkspaceFiles, nodeReadFile, nodeWatchWorkspace } from '../../core/indexer/nodeFsDeps';
-import { WatchQueue } from '../../core/indexer/watchQueue';
-import { SqliteCodeStore } from '../../store/graph/sqliteCodeStore';
-import { nodeSqlDriver } from '../../store/graph/sqliteDriver';
-import { IMPACT_EDGE_KINDS } from '../../core/analyze/impact';
+import type { SqliteCodeStore } from '../../store/graph/sqliteCodeStore';
+import { commandList, parseToolArgs, toolHelp, wantsHelp } from './args';
+import { bootstrapCli, parseGlobalFlags, runIndexCommand, runWatchCommand } from './context';
 import { createExecutors } from '../../core/tools/executors';
 import { collectDiffHunks } from '../../platform/gitDiff';
 import { codeToolSchemas, type CodeToolInput, type CodeToolName } from '../../core/tools/tools';
@@ -36,38 +31,11 @@ import {
   jsonOutline,
   jsonRenameSymbol,
   jsonWhoCalls,
+  renderFilesProse,
+  renderStatsProse,
 } from './json';
 
 const MAX_READ_BYTES = 1024 * 1024;
-
-/** CLI arg → tool input, per tool: positional args mapped to the schema's fields in order. */
-const TOOL_ARG_SPECS: Record<CodeToolName, string[]> = {
-  find_symbol: ['name'],
-  get_symbol: ['name', 'path'],
-  outline: ['path'],
-  impact: ['name', 'path', 'depth', 'includeTests'],
-  // No positional `rev`: it is optional and every other field is a flag, so a
-  // bare `pairs diff_impact` must mean "the working tree", not a missing arg.
-  diff_impact: [],
-  hierarchy: ['name', 'path', 'depth'],
-  who_calls: ['name', 'direction', 'path', 'includeTests'],
-  file_deps: ['path', 'direction'],
-  module_map: ['boundary'],
-  analyze: ['kind', 'pathPrefix'],
-  rename_symbol: ['name', 'newName', 'path', 'includeFuzzy'],
-  grep_symbols: ['pattern', 'pathPrefix'],
-  // No positional `path`: context_pack takes EITHER name or path, and `name`
-  // sits first, so `pairs context_pack somefile.ts` would try to resolve
-  // "somefile.ts" as a symbol name. Use --path to pass a file instead — see
-  // the --path handling below.
-  context_pack: ['name', 'limit'],
-};
-
-/** Fields that are numbers in the zod schema — CLI positionals arrive as strings. */
-const NUMERIC_FIELDS = new Set(['depth', 'limit', 'offset']);
-
-/** Fields that are booleans in the zod schema — CLI positionals arrive as strings. */
-const BOOLEAN_FIELDS = new Set(['includeFuzzy', 'includeTests']);
 
 /** Dispatches to the per-tool JSON builder in ./json — one shape per tool, built from the same store/analyze calls the prose executors use. */
 async function renderToolJson(
@@ -109,32 +77,73 @@ async function renderToolJson(
 /** Commands that only ever read the graph — safe to serve from a snapshot copy. */
 
 async function main(): Promise<void> {
-  const [, , command, ...rest] = process.argv;
-  const root = process.cwd();
-  const dbPath = path.join(root, '.pairs', 'index.db');
+  // Global flags (--root, --no-refresh) are stripped before dispatch; root
+  // discovery, seeding, auto-index/refresh and locking live in ./context.
+  const globals = parseGlobalFlags(process.argv.slice(2));
+  if (globals.error) {
+    process.stderr.write(`${globals.error}\n`);
+    process.exitCode = 1;
+    return;
+  }
+  const { command, rest } = globals;
+
+  // Output mode. Prose is the default (what agents read most reliably, and the
+  // cheapest in tokens); `--json` is compact JSON, `--pretty` indented. `--naked`
+  // (the old opt-in for prose) is accepted and ignored. Stripped here, before
+  // tool-flag parsing, so they never reach parseToolArgs.
+  const takeFlag = (flag: string): boolean => {
+    let found = false;
+    for (let i = rest.indexOf(flag); i !== -1; i = rest.indexOf(flag)) {
+      rest.splice(i, 1);
+      found = true;
+    }
+    return found;
+  };
+  takeFlag('--naked');
+  const pretty = takeFlag('--pretty');
+  const wantJson = takeFlag('--json') || pretty;
+  const stringify = (data: unknown): string => JSON.stringify(data, null, pretty ? 2 : undefined);
+
+  // Help and argument errors are answered before the workspace is touched, so a
+  // typo never triggers an auto-index.
+  const isTool = command !== undefined && (codeToolSchemas as Record<string, unknown>)[command] !== undefined;
+  const toolHelpTarget = (name: string | undefined): name is CodeToolName =>
+    name !== undefined && (codeToolSchemas as Record<string, unknown>)[name] !== undefined;
+  if (command === undefined || command === '--help' || command === '-h' || command === 'help') {
+    const target = command === 'help' ? rest[0] : undefined;
+    process.stdout.write(`${toolHelpTarget(target) ? toolHelp(target) : commandList()}\n`);
+    if (command === undefined) process.exitCode = 1;
+    return;
+  }
+  let toolName: CodeToolName | undefined;
+  let toolRaw: Record<string, unknown> = {};
+  if (isTool) {
+    toolName = command as CodeToolName;
+    if (wantsHelp(rest)) {
+      process.stdout.write(`${toolHelp(toolName)}\n`);
+      return;
+    }
+    const parsedArgs = parseToolArgs(toolName, rest);
+    if (!parsedArgs.ok) {
+      process.stderr.write(`${parsedArgs.error}\n`);
+      process.exitCode = 1;
+      return;
+    }
+    toolRaw = parsedArgs.raw;
+  } else if (!['index', 'query', 'stats', 'watch', 'read', 'files'].includes(command)) {
+    process.stderr.write(`Unknown command "${command}".\n${commandList()}\n`);
+    process.exitCode = 1;
+    return;
+  }
+
   // This file ships bundled as dist/cli.js, so grammars/queries sit alongside
   // it in dist/ — resolve from __dirname, not from the src/ tree layout.
-  const grammarsDir = path.join(__dirname, 'grammars');
-  const queriesDir = path.join(__dirname, 'queries');
-
-  // SQLite creates the database file itself but not its parent directory.
-  await fs.mkdir(path.dirname(dbPath), { recursive: true });
-
-  // No lock dance here: SQLite in WAL mode allows concurrent readers, so the
-  // CLI can read an index the VS Code extension has open. (Kuzu took an
-  // exclusive lock even for read-only opens, which forced a snapshot-copy
-  // fallback — deleted along with it.)
-  const store: SqliteCodeStore = await SqliteCodeStore.open(dbPath, nodeSqlDriver);
-  const parsers = new ParserRegistryImpl(grammarsDir, fileQuerySource(queriesDir));
-  const extractor = new ExtractorImpl();
-  const indexer = new IndexerImpl({
-    store,
-    parsers,
-    extractor,
-    listWorkspaceFiles: nodeListWorkspaceFiles(root),
-    readFile: nodeReadFile(root),
-    listNamedFiles: nodeListNamedFiles(root),
+  const ctx = await bootstrapCli(command, globals, {
+    grammarsDir: path.join(__dirname, 'grammars'),
+    queriesDir: path.join(__dirname, 'queries'),
   });
+  if (ctx === null) return;
+  const { root, store } = ctx;
   /**
    * Preview reader for find_symbol/get_symbol. Reuses MAX_READ_BYTES so a
    * generated or minified file can't cost megabytes of memory to produce a
@@ -158,165 +167,21 @@ async function main(): Promise<void> {
   });
 
   try {
-    // JSON is the CLI's default output (Step 5): a script or another agent
-    // process invoking `pairs` should get parseable structured data without
-    // having to remember a flag. `--naked` opts into the original prose
-    // rendering (executors.ts) instead — the name signals "no JSON wrapper",
-    // not "less output". `--json` is kept as a harmless no-op alias so
-    // existing `pairs impact --json` invocations keep working unchanged now
-    // that JSON is the default anyway.
-    const nakedIdx = rest.indexOf('--naked');
-    const naked = nakedIdx !== -1;
-    if (naked) rest.splice(nakedIdx, 1);
-    const jsonIdx = rest.indexOf('--json');
-    if (jsonIdx !== -1) rest.splice(jsonIdx, 1);
-
-    if ((codeToolSchemas as Record<string, unknown>)[command] !== undefined) {
-      const toolName = command as CodeToolName;
-      const fields = TOOL_ARG_SPECS[toolName];
-      const raw: Record<string, string | number | boolean | string[]> = {};
-      if (toolName === 'rename_symbol') {
-        const idx = rest.indexOf('--include-fuzzy');
-        if (idx !== -1) {
-          rest.splice(idx, 1);
-          raw.includeFuzzy = true;
-        }
-      }
-      // Boolean flags can't ride the positional mapping either: `preview` sits
-      // after `offset` in the schema, so reaching it positionally would mean
-      // typing limit and offset first. It is the CLI's main token-saving
-      // switch, so it gets a real flag.
-      if (toolName === 'find_symbol') {
-        const idx = rest.indexOf('--preview');
-        if (idx !== -1) {
-          rest.splice(idx, 1);
-          raw.preview = true;
-        }
-      }
-      if (toolName === 'grep_symbols') {
-        const idx = rest.indexOf('--regex');
-        if (idx !== -1) {
-          rest.splice(idx, 1);
-          raw.isRegex = true;
-        }
-      }
-      if (toolName === 'context_pack') {
-        const idx = rest.indexOf('--path');
-        if (idx !== -1) {
-          const value = rest[idx + 1];
-          if (value === undefined || value.startsWith('--')) {
-            process.stderr.write('--path needs a workspace-relative file path.\n');
-            process.exitCode = 1;
-            return;
-          }
-          rest.splice(idx, 2);
-          raw.path = value;
-        }
-      }
-      // `kinds` is a list, so it cannot ride the positional mapping below
-      // (it would have to sit after includeTests and be unreachable). Spliced
-      // out here, before that loop, or the flag and its value would be eaten
-      // as positionals.
-      if (toolName === 'impact' || toolName === 'diff_impact') {
-        const idx = rest.indexOf('--kinds');
-        if (idx !== -1) {
-          const value = rest[idx + 1];
-          if (value === undefined || value.startsWith('--')) {
-            process.stderr.write(
-              `--kinds needs a comma-separated list, e.g. --kinds ${IMPACT_EDGE_KINDS.slice(0, 2).join(',')}\n`
-            );
-            process.exitCode = 1;
-            return;
-          }
-          rest.splice(idx, 2);
-          const requested = value
-            .split(',')
-            .map((k) => k.trim().toUpperCase())
-            .filter(Boolean);
-          // Validate here rather than deferring to zod: zod's error for a bad
-          // member of an enum array is a nested JSON dump, unreadable at a
-          // terminal, and this is the one flag a user is likely to mistype.
-          const bad = requested.filter((k) => !(IMPACT_EDGE_KINDS as readonly string[]).includes(k));
-          if (bad.length > 0) {
-            process.stderr.write(
-              `Unknown edge kind(s): ${bad.join(', ')}. Legal values: ${IMPACT_EDGE_KINDS.join(', ')}\n`
-            );
-            process.exitCode = 1;
-            return;
-          }
-          raw.kinds = requested;
-        }
-      }
-      if (toolName === 'diff_impact') {
-        const stagedIdx = rest.indexOf('--staged');
-        if (stagedIdx !== -1) {
-          rest.splice(stagedIdx, 1);
-          raw.staged = true;
-        }
-        const revIdx = rest.indexOf('--rev');
-        if (revIdx !== -1) {
-          const value = rest[revIdx + 1];
-          if (value === undefined || value.startsWith('--')) {
-            process.stderr.write('--rev needs a git revision or range, e.g. --rev main...HEAD\n');
-            process.exitCode = 1;
-            return;
-          }
-          rest.splice(revIdx, 2);
-          raw.rev = value;
-        }
-        const depthIdx = rest.indexOf('--depth');
-        if (depthIdx !== -1) {
-          const value = rest[depthIdx + 1];
-          if (value === undefined || value.startsWith('--')) {
-            process.stderr.write('--depth needs a number of hops, e.g. --depth 2\n');
-            process.exitCode = 1;
-            return;
-          }
-          rest.splice(depthIdx, 2);
-          raw.depth = Number(value);
-        }
-      }
-      for (let i = 0; i < fields.length && i < rest.length; i++) {
-        const field = fields[i]!;
-        const value = rest[i]!;
-        if (NUMERIC_FIELDS.has(field)) raw[field] = Number(value);
-        else if (BOOLEAN_FIELDS.has(field)) raw[field] = value === 'true' || value === '1';
-        else raw[field] = value;
-      }
-      const parsed = codeToolSchemas[toolName].input.safeParse(raw);
-      if (!parsed.success) {
-        const suffix =
-          toolName === 'impact'
-            ? ' [--kinds CALLS,READS] [--naked]'
-            : toolName === 'diff_impact'
-              ? ' [--rev <range>] [--staged] [--depth N] [--kinds CALLS,READS] [--naked]'
-            : toolName === 'find_symbol'
-              ? ' [--preview] [--naked]'
-              : toolName === 'grep_symbols'
-                ? ' [--regex] [--naked]'
-                : toolName === 'context_pack'
-                  ? ' [--path <file>] [--naked]'
-                  : ' [--naked]';
-        process.stderr.write(`Usage: pairs ${toolName} ${fields.map((f) => `<${f}>`).join(' ')}${suffix}\n`);
-        process.stderr.write(`${parsed.error.message}\n`);
-        process.exitCode = 1;
-      } else if (naked) {
-        const out = await (executors[toolName] as (input: unknown) => Promise<string>)(parsed.data);
-        process.stdout.write(`${out}\n`);
+    if (toolName !== undefined) {
+      const parsed = codeToolSchemas[toolName].input.parse(toolRaw);
+      if (wantJson) {
+        const data = await renderToolJson(store, root, toolName, parsed);
+        process.stdout.write(`${stringify(data)}\n`);
       } else {
-        const data = await renderToolJson(store, root, toolName, parsed.data);
-        process.stdout.write(`${JSON.stringify(data, null, 2)}\n`);
+        const out = await (executors[toolName] as (input: unknown) => Promise<string>)(parsed);
+        process.stdout.write(`${out}\n`);
       }
       return;
     }
     switch (command) {
       case 'index': {
-        // --rebuild: a plain fullIndex short-circuits unchanged files and can
-        // write nothing at all, so it can't recover from a corrupted or
-        // stale-shaped store. Drop everything and reparse from scratch.
-        if (rest.includes('--rebuild')) await store.reset();
-        const report = await indexer.fullIndex(root);
-        process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+        // Full index under the cross-process lock (see ./context).
+        await runIndexCommand(ctx, rest);
         break;
       }
       case 'query': {
@@ -327,37 +192,19 @@ async function main(): Promise<void> {
           break;
         }
         const rows = await store.query(sql);
-        process.stdout.write(`${JSON.stringify(rows, null, 2)}\n`);
+        // Always JSON (it is raw rows), compact unless --pretty.
+        process.stdout.write(`${stringify(rows)}\n`);
         break;
       }
       case 'stats': {
-        const stats = await indexer.stats();
-        process.stdout.write(`${JSON.stringify(stats, null, 2)}\n`);
+        const stats = await ctx.indexer.stats();
+        process.stdout.write(`${wantJson ? stringify(stats) : renderStatsProse(stats)}\n`);
         break;
       }
       case 'watch': {
-        // pairs watch — incremental re-index on save.
-        process.stderr.write('Indexing…\n');
-        const report = await indexer.fullIndex(root);
-        process.stderr.write(`Indexed ${report.files} files in ${report.elapsedMs} ms. Watching (Ctrl-C to stop).\n`);
-        const queue = new WatchQueue({
-          indexFile: (p) => indexer.indexFile(p),
-          removeFile: (p) => indexer.removeFile(p),
-          async onFlushed(changed, removed) {
-            await store.checkpoint();
-            for (const p of [...changed, ...removed]) process.stderr.write(`  ~ ${p}\n`);
-          },
-          onError: (p, err) => process.stderr.write(`  ! ${p}: ${err.message}\n`),
-        });
-        const stop = nodeWatchWorkspace(root, queue);
-        // Keep the process alive until SIGINT.
-        await new Promise<void>((resolve) => {
-          process.on('SIGINT', () => {
-            stop();
-            queue.dispose();
-            resolve();
-          });
-        });
+        // pairs watch — incremental re-index on save; heartbeat + idle cache
+        // release live in ./context.
+        await runWatchCommand(ctx);
         break;
       }
       case 'read': {
@@ -411,42 +258,30 @@ async function main(): Promise<void> {
         break;
       }
       case 'files': {
-        // pairs files [pattern] [--paths] [--naked] — list/search indexed non-source filenames.
+        // pairs files [pattern] [--paths] [--json] — list/search indexed non-source filenames.
         // pattern is a filename glob (*.txt, Pic*.svg); --paths also matches full paths.
         const withPaths = rest.includes('--paths');
         const pattern = rest.find((a) => a !== '--paths');
         const files = await store.findNamedFiles(pattern, { withPaths });
-        if (naked) {
-          if (files.length === 0) {
-            process.stdout.write('No matching files.\n');
-            break;
-          }
-          process.stdout.write(files.map((f) => f.path).join('\n') + '\n');
+        if (wantJson) {
+          process.stdout.write(`${stringify({ pattern: pattern ?? null, files: files.map((f) => f.path) })}\n`);
           break;
         }
-        process.stdout.write(`${JSON.stringify({ pattern: pattern ?? null, files }, null, 2)}\n`);
+        process.stdout.write(renderFilesProse(files.map((f) => f.path)) + '\n');
         break;
       }
-      default:
-        // Every tool defaults to JSON output (see renderToolJson above);
-        // --naked switches to the original prose rendering.
-        process.stderr.write(
-          `Usage: pairs <index|query|stats|watch|files|read|${Object.keys(codeToolSchemas).join('|')}> [...args] [--naked]\n`
-        );
-        process.exitCode = 1;
     }
   } finally {
     // Checkpoint before exit so a one-shot invocation (e.g. `pairs index`)
-    // leaves the WAL merged rather than growing it every run — dispose()
-    // Skipped for a read-only snapshot copy: nothing writes to it, and its
-    // scratch dir is discarded on process exit anyway.
-    await store.checkpoint();
-    store.dispose();
-    parsers.dispose();
+    // leaves the WAL merged rather than growing it every run, then dispose
+    // the store and parsers.
+    await ctx.close();
   }
 }
 
 main().catch((err) => {
-  process.stderr.write(`${(err as Error).stack ?? String(err)}\n`);
+  // One line for users and agents; the stack only when debugging the CLI itself.
+  const e = err as Error;
+  process.stderr.write(`pairs: ${process.env.PAIRS_DEBUG ? (e.stack ?? String(e)) : (e.message ?? String(err))}\n`);
   process.exitCode = 1;
 });

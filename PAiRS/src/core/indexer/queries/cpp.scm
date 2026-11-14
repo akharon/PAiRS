@@ -43,6 +43,8 @@
 (call_expression function: (identifier) @ref.call)
 (call_expression function: (field_expression field: (field_identifier) @ref.call))
 (call_expression function: (qualified_identifier name: (identifier) @ref.call))
+; Constructor calls: `new Foo(...)` is a call to class Foo.
+(new_expression type: (type_identifier) @ref.call)
 
 ; --- includes -----------------------------------------------------------------------
 (preproc_include path: (string_literal) @import.specifier)

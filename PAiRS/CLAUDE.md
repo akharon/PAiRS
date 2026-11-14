@@ -79,7 +79,7 @@ src/
 
 1. **Adapter Layer** (`adapters/`)
    - `vscode/extension.ts`: Activates the extension, opens workspace store, indexes, registers tools, writes Claude Code skill
-   - `cli/index.ts`: CLI subcommand router; converts tool outputs to JSON (default) or prose (`--naked`)
+   - `cli/index.ts`: CLI subcommand router; renders tool outputs as compact prose (default), compact JSON (`--json`) or indented JSON (`--pretty`)
    - Adapter **never imports `vscode`** except in extension.ts (enforced by eslint `no-restricted-imports`)
 
 2. **Indexer** (`core/indexer/`)
@@ -159,7 +159,7 @@ These CLI commands are the same ones exposed via VS Code Language Model Tools an
 - **[src/adapters/vscode/skills.ts](src/adapters/vscode/skills.ts)** — Generates `.claude/skills/pairs/SKILL.md` (auto-synced skill file)
 
 ### CLI
-- **[src/adapters/cli/index.ts](src/adapters/cli/index.ts)** — Subcommand router, output formatting (JSON default, `--naked` for prose)
+- **[src/adapters/cli/index.ts](src/adapters/cli/index.ts)** — Subcommand router, output formatting (prose default, `--json` compact, `--pretty` indented)
 
 ### Core Indexing
 - **[src/core/indexer/codeIndexerImpl.ts](src/core/indexer/codeIndexerImpl.ts)** — Orchestrates parsing + store writes
@@ -249,8 +249,11 @@ pairs watch                    # Index once, then watch & re-index on save
 pairs find_symbol login --preview
 pairs get_symbol login --path src/auth.ts
 pairs grep_symbols "^login" --regex
-pairs who_calls login --direction callers
+pairs who_calls login --direction callers   # or: pairs who_calls login callees
+pairs find_symbol login --kind function --lang go --limit 5
 ```
+
+**Flags:** every field of a tool's zod input schema is a `--flag` (also `--kebab-case`, `--flag=value`). Booleans: `--flag`, `--no-flag` or `--flag false`; lists are comma-separated (`--kinds CALLS,READS`). Unknown flags and bad values fail with a one-line error. `pairs <tool> --help` prints flags generated from the schema; `pairs --help` lists all commands. Parsing lives in `src/adapters/cli/args.ts`.
 
 ### Graph Analysis
 ```bash
@@ -264,7 +267,7 @@ pairs diff_impact --rev main...HEAD
 
 ### Refactoring
 ```bash
-pairs rename_symbol login signIn --naked
+pairs rename_symbol login signIn
 pairs context_pack login
 ```
 

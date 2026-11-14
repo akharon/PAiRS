@@ -11,11 +11,11 @@
 
 import type { CodeStore } from '../../store/graph/codeStore';
 import type { AmbiguousSymbol, DeadCodeCandidate, EdgeKind, SymbolRecord } from '../indexer/types';
-import { impact } from '../analyze/impact';
+import { impact, IMPACT_MAX_NODES } from '../analyze/impact';
 import { diffImpact } from '../analyze/diffImpact';
 import type { DiffHunk } from '../analyze/diffImpact';
 import { hierarchy } from '../analyze/hierarchy';
-import { moduleMap, moduleKeyOf } from '../analyze/moduleMap';
+import { moduleMap, moduleKeyOf, moduleNeighbours } from '../analyze/moduleMap';
 import type { ModuleMap } from '../analyze/moduleMap';
 import { planRename, applyPlan } from './rename';
 import type { CodeToolInput, CodeToolName } from './tools';
@@ -55,18 +55,56 @@ export type Executors = {
 // to pay for it.
 const SIGNATURE_CITE_MAX = 100;
 
+/** One-line, length-capped signature (whitespace collapsed). Shared with the CLI JSON builders. */
+export function shortSignature(sig: string): string {
+  const one = sig.replace(/\s+/g, ' ').trim();
+  return one.length > SIGNATURE_CITE_MAX ? `${one.slice(0, SIGNATURE_CITE_MAX)}…` : one;
+}
+
+/**
+ * The one line every empty-index answer collapses to. An empty index makes
+ * every query a miss, and "No symbol named X" would read as a real answer —
+ * the agent then greps, or worse, concludes the symbol doesn't exist.
+ */
+export const EMPTY_INDEX_MESSAGE =
+  'PAiRS index for this workspace is empty — run `pairs index` (or open the folder in VS Code with the PAiRS extension).';
+
+/** EMPTY_INDEX_MESSAGE when the store has no indexed files, else null. Used by every executor and JSON builder. */
+export async function emptyIndexMessage(store: CodeStore): Promise<string | null> {
+  return (await store.fileCount()) === 0 ? EMPTY_INDEX_MESSAGE : null;
+}
+
+/**
+ * Footer for a truncated list: always states how many items were dropped and
+ * the argument that reveals them — a bounded list must never look complete.
+ * `canOffset` tools whose limit can't grow any further page with `offset`.
+ */
+export function moreFooter(
+  more: number,
+  o: { limit: number; offset?: number; max?: number; canOffset?: boolean; atLeast?: boolean }
+): string {
+  const offset = o.offset ?? 0;
+  const max = o.max ?? 200;
+  const n = `${more}${o.atLeast ? '+' : ''}`;
+  if (o.canOffset && (offset > 0 || o.limit + more > max)) return `\n… +${n} more (pass offset=${offset + o.limit})`;
+  return `\n… +${n} more (pass limit=${Math.min(o.limit + more + offset, max)})`;
+}
+
 /**
  * @param full Skip whitespace-collapsing/truncation — for get_symbol, which
  *   exists precisely to return the complete shape.
+ * @param sig Include the signature. List tools whose rows are navigation
+ *   targets (impact, who_calls, …) pass false: a dependant's parameter list is
+ *   rarely what the reader needs and costs ~30% of the row.
  */
-function cite(s: SymbolRecord, full = false): string {
-  let sig = s.signature ? ` ${s.signature}` : '';
-  if (sig && !full) {
-    sig = sig.replace(/\s+/g, ' ');
-    if (sig.length > SIGNATURE_CITE_MAX) sig = `${sig.slice(0, SIGNATURE_CITE_MAX)}…`;
-  }
-  return `${s.qualified || s.name} [${s.kind}]${sig}  ${s.file}:${s.startLine}`;
+function cite(s: SymbolRecord, full = false, sig = true): string {
+  let sigText = sig && s.signature ? ` ${s.signature}` : '';
+  if (sigText && !full) sigText = ` ${shortSignature(sigText)}`;
+  return `${s.qualified || s.name} [${s.kind}]${sigText}  ${s.file}:${s.startLine}`;
 }
+
+/** cite() without the signature: for rows that are only navigation targets. */
+const citeBare = (s: SymbolRecord): string => cite(s, false, false);
 
 /**
  * Lines of a symbol's body to inline in a hit. Three lines is the point where
@@ -152,6 +190,58 @@ function isAmbiguous(x: SymbolRecord[] | AmbiguousSymbol): x is AmbiguousSymbol 
   return !Array.isArray(x) && x.ambiguous === true;
 }
 
+/** Hint `tools.ts` matches `src/core/tools/tools.ts` but not `src/xtools.ts` (suffix on a `/` boundary). */
+export function pathMatchesHint(file: string, hint: string): boolean {
+  const h = hint.trim().replace(/\\/g, '/').replace(/^(?:\.\/)+/, '');
+  return file === h || file.endsWith(`/${h}`);
+}
+
+/** Max paths named in an ambiguity / suggestion message. */
+const PATHS_SHOWN = 5;
+
+/** The `Did you mean: a, b, c?` tail for a symbol miss (empty when there is nothing close). */
+export function didYouMeanTail(names: readonly string[]): string {
+  return names.length ? ` Did you mean: ${names.join(', ')}?` : '';
+}
+
+/** Outcome of resolving a user-supplied file path (see CodeStore.resolveFilePath). */
+export type PathResolution =
+  | { path: string; /** `(resolved a → b)\n` when the input was not already the indexed path, else ''. */ note: string }
+  | { error: 'no_file'; input: string; suggestions: string[]; message: string }
+  | { error: 'ambiguous_path'; input: string; matches: string[]; message: string };
+
+/**
+ * Resolve a file path argument: exact, normalised, or unique `/`-boundary
+ * suffix. A miss says "no such indexed file" (with near matches) so it can
+ * never be mistaken for a genuinely empty result for a real file.
+ */
+export async function resolvePathArg(store: CodeStore, input: string): Promise<PathResolution> {
+  const r = await store.resolveFilePath(input);
+  if ('exact' in r) {
+    return { path: r.exact, note: r.exact === input ? '' : `(resolved ${input} → ${r.exact})\n` };
+  }
+  if (r.matches.length > 1) {
+    const shown = r.matches.slice(0, PATHS_SHOWN).join(', ') + (r.matches.length > PATHS_SHOWN ? `, +${r.matches.length - PATHS_SHOWN} more` : '');
+    return {
+      error: 'ambiguous_path',
+      input,
+      matches: r.matches.slice(0, PATHS_SHOWN),
+      message: `"${input}" is ambiguous: ${shown} (pass the full path).`,
+    };
+  }
+  return {
+    error: 'no_file',
+    input,
+    suggestions: r.closest,
+    message: `No indexed file matches "${input}".${r.closest.length ? ` Closest: ${r.closest.join(', ')}.` : ''}`,
+  };
+}
+
+/** "No symbol named …" plus close names, so the next call is a retry rather than a grep. */
+async function symbolMiss(store: CodeStore, name: string, suffix = ' in the index'): Promise<string> {
+  return `No symbol named "${name}"${suffix}.` + didYouMeanTail(await store.suggestNames(name));
+}
+
 /** Resolve a name to a single symbol, or return a message asking to qualify. */
 async function resolveOne(
   store: CodeStore,
@@ -162,7 +252,7 @@ async function resolveOne(
   if (isAmbiguous(hit)) {
     let cands = hit.candidates;
     if (pathHint) {
-      const narrowed = cands.filter((c) => c.file === pathHint || c.file.endsWith(pathHint));
+      const narrowed = cands.filter((c) => pathMatchesHint(c.file, pathHint));
       if (narrowed.length === 1) return { sym: narrowed[0]! };
       if (narrowed.length > 0) cands = narrowed;
     }
@@ -172,17 +262,85 @@ async function resolveOne(
         cands.map((c) => `  - ${cite(c)}`).join('\n'),
     };
   }
-  if (hit.length === 0) return { message: `No symbol named "${name}" in the index.` };
+  if (hit.length === 0) return { message: await symbolMiss(store, name) };
   if (hit.length === 1) return { sym: hit[0]! };
   // lookup returned an exact multi-match array (same qualified in >1 file).
-  const chosen = pathHint ? hit.find((c) => c.file.endsWith(pathHint)) : undefined;
+  const chosen = pathHint ? hit.find((c) => pathMatchesHint(c.file, pathHint)) : undefined;
   return { sym: chosen ?? hit[0]! };
 }
 
-function paginate<T>(rows: T[], limit: number, offset = 0): { page: T[]; note: string } {
+/** One caller (or callee) with every call site collapsed into it. */
+export interface CallGroup {
+  id: number;
+  /** Distinct call-site lines, ascending. */
+  lines: number[];
+  /** Total edges (call sites) folded in. */
+  n: number;
+  fuzzy: number;
+  test: number;
+}
+
+/** Group call edges by counterpart symbol, in first-seen order (the store's order). */
+export function groupCallEdges(
+  edges: ReadonlyArray<{ fromId: number; toId: number; line: number; confidence: string; test?: boolean | number }>,
+  side: 'from' | 'to'
+): CallGroup[] {
+  const byId = new Map<number, CallGroup>();
+  for (const e of edges) {
+    const id = side === 'from' ? e.fromId : e.toId;
+    let g = byId.get(id);
+    if (!g) byId.set(id, (g = { id, lines: [], n: 0, fuzzy: 0, test: 0 }));
+    g.n++;
+    if (e.line && !g.lines.includes(e.line)) g.lines.push(e.line);
+    if (e.confidence === 'fuzzy') g.fuzzy++;
+    if (e.test) g.test++;
+  }
+  const out = [...byId.values()];
+  for (const g of out) g.lines.sort((a, b) => a - b);
+  return out;
+}
+
+/** Call-site lines shown per grouped caller; the `×N` count says how many exist. */
+export const SITES_SHOWN = 5;
+
+const groupFuzzy = (g: CallGroup): string => (g.fuzzy === 0 ? '' : g.fuzzy === g.n ? '  [fuzzy]' : `  [${g.fuzzy} fuzzy]`);
+
+/** `×N (lines a, b, c, d, e, …)`; the ellipsis means more distinct lines exist than shown. */
+function groupSites(g: CallGroup): string {
+  const shown = g.lines.slice(0, SITES_SHOWN).join(', ');
+  return `×${g.n}${shown ? ` (lines ${shown}${g.lines.length > SITES_SHOWN ? ', …' : ''})` : ''}`;
+}
+
+/** One row per caller: `file:line` when it calls once, `file ×N (lines …)` when it calls repeatedly. */
+function callerRow(s: SymbolRecord, g: CallGroup): string {
+  const label = s.qualified || s.name;
+  if (g.n === 1) return `  - ${label} [${s.kind}]  ${s.file}:${g.lines[0] ?? 0}${groupFuzzy(g)}`;
+  // A module symbol is named by its path: don't print the file twice.
+  return `  - ${label} [${s.kind}]${label === s.file ? '' : `  ${s.file}`} ${groupSites(g)}${groupFuzzy(g)}`;
+}
+
+/** One row per callee: its declaration, plus the repeat count when called more than once. */
+const calleeRow = (s: SymbolRecord, g: CallGroup): string => `  - ${citeBare(s)}${g.n > 1 ? ` ${groupSites(g)}` : ''}${groupFuzzy(g)}`;
+
+/**
+ * @param offset rows to skip within `rows`
+ * @param o.max the tool's schema maximum for `limit`
+ * @param o.canOffset the tool has an `offset` parameter (else only `limit` can grow)
+ * @param o.baseOffset offset the store already applied before returning `rows`
+ * @param o.atLeast `rows` was itself capped, so the dropped count is a lower bound
+ */
+function paginate<T>(
+  rows: T[],
+  limit: number,
+  offset = 0,
+  o: { max?: number; canOffset?: boolean; baseOffset?: number; atLeast?: boolean } = {}
+): { page: T[]; note: string } {
   const page = rows.slice(offset, offset + limit);
   const more = rows.length - (offset + page.length);
-  const note = more > 0 ? `\n… ${more} more; re-call with offset ${offset + limit}.` : '';
+  const note =
+    more > 0
+      ? moreFooter(more, { limit, offset: offset + (o.baseOffset ?? 0), max: o.max, canOffset: o.canOffset, atLeast: o.atLeast })
+      : '';
   return { page, note };
 }
 
@@ -286,7 +444,7 @@ async function renderBoundary(
   const ranked = [...targets.values()].sort(
     (a, b) => confirmed(b) - confirmed(a) || b.refs.length - a.refs.length || a.label.localeCompare(b.label)
   );
-  const { page, note } = paginate(ranked, limit);
+  const { page, note } = paginate(ranked, limit, 0, { max: 100 });
   const inCycle = map.cycles.some((c) => c.includes(from) && c.includes(to));
   const crossCluster = map.drift.some((d) => d.from === from && d.to === to);
   const total = ranked.reduce((s, t) => s + t.refs.length, 0);
@@ -334,23 +492,38 @@ function renderModuleMap(map: ModuleMap, limit: number): string {
     `Per module: L = dependency layer (0 = depends on nothing), ↻ = in a cycle (layer shared with it), ` +
     `← fan-in (modules depending on it), → fan-out.`;
 
+  const foot = (total: number): string => (total > limit ? moreFooter(total - limit, { limit, max: 100 }) : '');
+  const MODS_PER_LINE = 12;
+  const capList = (items: string[]): string =>
+    items.length > MODS_PER_LINE ? `${items.slice(0, MODS_PER_LINE).join(' ↔ ')} … +${items.length - MODS_PER_LINE} more` : items.join(' ↔ ');
+
   const cycles = map.cycles.length
     ? `\n\nModule cycles (${map.cycles.length}) — no layering is valid while these exist:\n` +
       map.cycles
         .slice(0, limit)
-        .map((c) => `  - ${c.length} modules: ${c.join(' ↔ ')}`)
+        .map((c) => `  - ${c.length} modules: ${capList(c)}`)
         .join('\n') +
-      `\nBreaking all of them takes cutting these ${map.cycleCuts.length} edge(s) (lightest first — ` +
-      `invert the dependency or move the shared code down a layer):\n` +
+      foot(map.cycles.length) +
+      `\nBreaking all of them takes cutting these ${map.cycleCuts.length} edge(s) (lightest first; ` +
+      `\`boundary: "a -> b"\` lists the uses):\n` +
       map.cycleCuts
         .slice(0, limit)
-        .map((e) => `  - ${e.from} → ${e.to}  (×${e.weight}; module_map boundary: "${e.from} -> ${e.to}" lists the uses)`)
-        .join('\n')
+        .map((e) => `  - ${e.from} → ${e.to}  (×${e.weight})`)
+        .join('\n') +
+      foot(map.cycleCuts.length)
     : '';
 
+  const tagMods = (mods: string[]): string =>
+    mods.length > MODS_PER_LINE
+      ? `${mods.slice(0, MODS_PER_LINE).map(tag).join(', ')}, … +${mods.length - MODS_PER_LINE} more`
+      : mods.map(tag).join(', ');
   const clusters =
     `\n\nSubsystems:\n` +
-    map.clusters.map((c, i) => `  subsystem ${i + 1} (${c.modules.length}): ${c.modules.map(tag).join(', ')}`).join('\n');
+    map.clusters
+      .slice(0, limit)
+      .map((c, i) => `  subsystem ${i + 1} (${c.modules.length}): ${tagMods(c.modules)}`)
+      .join('\n') +
+    foot(map.clusters.length);
 
   // Foundations: everyone depends on them, so a change there is the widest
   // blast radius in the repo. Bottlenecks both serve and consume heavily —
@@ -378,7 +551,8 @@ function renderModuleMap(map: ModuleMap, limit: number): string {
 
   const drift = map.drift.length
     ? `\n\nCross-subsystem edges (drift, heaviest first):\n` +
-      map.drift.slice(0, limit).map((e) => `  - ${e.from} → ${e.to}  (×${e.weight})`).join('\n')
+      map.drift.slice(0, limit).map((e) => `  - ${e.from} → ${e.to}  (×${e.weight})`).join('\n') +
+      foot(map.drift.length)
     : '\n\nNo cross-subsystem drift.';
 
   return (
@@ -392,17 +566,31 @@ function renderModuleMap(map: ModuleMap, limit: number): string {
   );
 }
 
+/** `limit` the store is asked for when the caller only needs to know whether more rows exist. */
+const PROBE_MAX = { analyze: 100, grep: 100, fileDeps: 200, cycles: 100 } as const;
+
+/** Cycle members shown per line; a 40-module SCC is noise past this. */
+const CYCLE_MEMBERS_MAX = 12;
+/** Members listed by get_symbol for a large type. */
+const MEMBERS_MAX = 40;
+
+const fuzzyTag = (c: string): string => (c === 'fuzzy' ? '  [fuzzy]' : '');
+
 export function createExecutors(deps: ExecutorDeps): Executors {
   const { store } = deps;
 
-  return {
+  const base: Executors = {
     async find_symbol(input) {
       const hit = await store.lookup(input.name);
       let syms = isAmbiguous(hit) ? hit.candidates : hit;
       if (input.kinds?.length) syms = syms.filter((s) => input.kinds!.includes(s.kind));
       if (input.langs?.length) syms = syms.filter((s) => input.langs!.includes(s.lang));
-      if (syms.length === 0) return `No symbol named "${input.name}" (after filters).`;
-      const { page, note } = paginate(syms, input.limit, input.offset);
+      if (syms.length === 0) {
+        const hadAny = isAmbiguous(hit) ? hit.candidates.length > 0 : hit.length > 0;
+        // Filtered-out hits exist, so a near-name suggestion would only mislead.
+        return hadAny ? `No symbol named "${input.name}" (after filters).` : await symbolMiss(store, input.name, '');
+      }
+      const { page, note } = paginate(syms, input.limit, input.offset, { max: 50, canOffset: true });
       const body = page
         .map((s) => {
           const line = `  - ${cite(s)}`;
@@ -431,26 +619,31 @@ export function createExecutors(deps: ExecutorDeps): Executors {
       if (input.includeMembers) {
         const members = await store.membersOf(s.id);
         if (members.length > 0) {
+          // Members get the capped one-line citation: the type's own signature
+          // above is the full-fidelity part, and a large class would otherwise
+          // dump every method's untruncated signature into one answer.
           lines.push(`\nmembers (${members.length}):`);
-          for (const m of members) lines.push(`  - ${cite(m, true)}`);
+          for (const m of members.slice(0, MEMBERS_MAX)) lines.push(`  - ${cite(m)}`);
+          if (members.length > MEMBERS_MAX) lines.push(`… +${members.length - MEMBERS_MAX} more (use outline on ${s.file})`);
         }
       }
       return lines.join('\n');
     },
 
     async outline(input) {
-      const syms = await store.outline(input.path);
-      if (syms.length === 0) return `No indexed symbols in ${input.path} (not indexed, or empty).`;
+      const p = await resolvePathArg(store, input.path);
+      if ('error' in p) return p.message;
+      const syms = await store.outline(p.path);
+      if (syms.length === 0) return `${p.note}${p.path} is indexed but declares no symbols.`;
       // Same rationale as cite(): a multi-line signature interpolated verbatim
       // would blow up a file-wide listing far worse than a single find_symbol
-      // hit does. Collapse + truncate here too rather than duplicating the
-      // constant's reasoning.
+      // hit does.
       return (
-        `${input.path} — ${syms.length} symbols:\n` +
+        p.note +
+        `${p.path} — ${syms.length} symbols:\n` +
         syms
           .map((s) => {
-            let sig = s.signature ? ` ${s.signature.replace(/\s+/g, ' ')}` : '';
-            if (sig.length > SIGNATURE_CITE_MAX + 1) sig = `${sig.slice(0, SIGNATURE_CITE_MAX)}…`;
+            const sig = s.signature ? ` ${shortSignature(s.signature)}` : '';
             return `  ${s.startLine}: ${s.qualified || s.name} [${s.kind}]${sig}`;
           })
           .join('\n')
@@ -471,11 +664,13 @@ export function createExecutors(deps: ExecutorDeps): Executors {
       const res = await impact(store, r.sym.id, input.depth, kinds, input.includeTests);
       if (!res) return `No symbol id for "${input.name}".`;
       if (res.dependants.length === 0) return `Nothing depends on ${cite(res.seed)} within ${input.depth} hop(s)${kindNote}.`;
-      const { page, note } = paginate(res.dependants, input.limit);
-      const trunc = res.truncated ? ` (walk truncated at depth ${input.depth})` : '';
-      const body = page
-        .map((d) => `  - d${d.depth} ${cite(d.symbol)}${d.confidence === 'fuzzy' ? '  [fuzzy]' : ''}`)
-        .join('\n');
+      const { page, note } = paginate(res.dependants, input.limit, 0, { max: 200 });
+      const trunc = res.capped
+        ? ` (walk capped at ${IMPACT_MAX_NODES} nodes — a hub; narrow with kinds or depth)`
+        : res.truncated
+          ? ` (walk truncated at depth ${input.depth})`
+          : '';
+      const body = page.map((d) => `  - d${d.depth} ${citeBare(d.symbol)}${fuzzyTag(d.confidence)}`).join('\n');
       // An agent must never mistake a filtered list for a complete one.
       const hiddenNote = res.hiddenTestEdges > 0 ? `\n(… ${res.hiddenTestEdges} test-file edge(s) hidden; pass includeTests to see them)` : '';
       return `${res.dependants.length} dependant(s)${kindNote} of ${res.seed.qualified || res.seed.name}${trunc}:\n${body}${note}${hiddenNote}`;
@@ -501,13 +696,15 @@ export function createExecutors(deps: ExecutorDeps): Executors {
       lines.push(
         `${res.changed.length} changed symbol(s) across ${new Set(res.changed.map((c) => c.symbol.file)).size} file(s):`
       );
-      for (const c of res.changed) lines.push(`  * ${cite(c.symbol)}`);
+      const changed = paginate(res.changed, input.limit, 0, { max: 200 });
+      for (const c of changed.page) lines.push(`  * ${citeBare(c.symbol)}`);
+      if (changed.note) lines.push(changed.note.trimStart());
 
       if (res.dependants.length === 0) {
         lines.push(`\nNothing depends on the changed symbols within ${input.depth} hop(s)${kindNote}.`);
       } else {
         const external = res.dependants.filter((d) => !d.alsoChanged);
-        const { page, note } = paginate(external, input.limit, input.offset);
+        const { page, note } = paginate(external, input.limit, input.offset, { max: 200, canOffset: true });
         const trunc = res.truncated ? ` (walk truncated at depth ${input.depth})` : '';
         lines.push(`\n${external.length} dependant(s)${kindNote} outside the change${trunc}:`);
         // seedCount is the payload a per-symbol impact call cannot give: a
@@ -516,12 +713,14 @@ export function createExecutors(deps: ExecutorDeps): Executors {
           page
             .map((d) => {
               const shared = d.viaSeeds.length > 1 ? `  [via ${d.viaSeeds.length} changed symbols]` : '';
-              return `  - d${d.depth} ${cite(d.symbol)}${d.confidence === 'fuzzy' ? '  [fuzzy]' : ''}${shared}`;
+              return `  - d${d.depth} ${citeBare(d.symbol)}${fuzzyTag(d.confidence)}${shared}`;
             })
             .join('\n') + note
         );
+        const files = paginate(res.affectedFiles, input.limit, 0, { max: 200 });
         lines.push(`\n${res.affectedFiles.length} file(s) to re-check:`);
-        for (const f of res.affectedFiles.slice(0, input.limit)) lines.push(`  ${f}`);
+        for (const f of files.page) lines.push(`  ${f}`);
+        if (files.note) lines.push(files.note.trimStart());
       }
 
       if (res.unattributed.length > 0) {
@@ -529,9 +728,9 @@ export function createExecutors(deps: ExecutorDeps): Executors {
         // could not reason about at all, so "0 dependants" plus a silent
         // unattributed hunk would be a false all-clear.
         lines.push(`\n${res.unattributed.length} changed hunk(s) matched no indexed symbol (review by hand):`);
-        for (const u of res.unattributed.slice(0, input.limit)) {
-          lines.push(`  ${u.path}:${u.startLine}-${u.endLine} [${u.reason}]`);
-        }
+        const un = paginate(res.unattributed, input.limit, 0, { max: 200 });
+        for (const u of un.page) lines.push(`  ${u.path}:${u.startLine}-${u.endLine} [${u.reason}]`);
+        if (un.note) lines.push(un.note.trimStart());
       }
       if (res.hiddenTestEdges > 0) {
         lines.push(`\n(… ${res.hiddenTestEdges} test-file edge(s) hidden; pass includeTests to see them)`);
@@ -547,14 +746,13 @@ export function createExecutors(deps: ExecutorDeps): Executors {
       if (res.ancestors.length === 0 && res.descendants.length === 0) {
         return `No EXTENDS/IMPLEMENTS edges for ${cite(res.seed)} within ${input.depth} hop(s).`;
       }
-      const render = (nodes: typeof res.ancestors) =>
-        paginate(nodes, input.limit);
+      const render = (nodes: typeof res.ancestors) => paginate(nodes, input.limit, 0, { max: 200 });
       const lines = [`Hierarchy for ${res.seed.qualified || res.seed.name}:`];
       if (res.ancestors.length > 0) {
         const { page, note } = render(res.ancestors);
         const trunc = res.ancestorsTruncated ? ` (walk truncated at depth ${input.depth})` : '';
         lines.push(`\n${res.ancestors.length} ancestor(s)${trunc}:`);
-        lines.push(page.map((d) => `  - up${d.depth} ${cite(d.symbol)}${d.confidence === 'fuzzy' ? '  [fuzzy]' : ''}`).join('\n') + note);
+        lines.push(page.map((d) => `  - up${d.depth} ${citeBare(d.symbol)}${fuzzyTag(d.confidence)}`).join('\n') + note);
       } else {
         lines.push('\nNo ancestors (extends/implements nothing indexed).');
       }
@@ -562,7 +760,7 @@ export function createExecutors(deps: ExecutorDeps): Executors {
         const { page, note } = render(res.descendants);
         const trunc = res.descendantsTruncated ? ` (walk truncated at depth ${input.depth})` : '';
         lines.push(`\n${res.descendants.length} descendant(s)${trunc}:`);
-        lines.push(page.map((d) => `  - down${d.depth} ${cite(d.symbol)}${d.confidence === 'fuzzy' ? '  [fuzzy]' : ''}`).join('\n') + note);
+        lines.push(page.map((d) => `  - down${d.depth} ${citeBare(d.symbol)}${fuzzyTag(d.confidence)}`).join('\n') + note);
       } else {
         lines.push('\nNo descendants (nothing extends/implements this).');
       }
@@ -577,40 +775,42 @@ export function createExecutors(deps: ExecutorDeps): Executors {
           ? await store.edgesTo([r.sym.id], CALL_KINDS)
           : await store.edgesFrom([r.sym.id], CALL_KINDS);
       const fuzzyFiltered = input.includeFuzzy ? edges : edges.filter((e) => e.confidence !== 'fuzzy');
-      const hiddenTestCount = input.includeTests ? 0 : fuzzyFiltered.filter((e) => e.test).length;
+      const side = input.direction === 'callers' ? 'from' : 'to';
+      const hiddenTestCount = input.includeTests
+        ? 0
+        : groupCallEdges(fuzzyFiltered.filter((e) => e.test), side).length;
       const filtered = input.includeTests ? fuzzyFiltered : fuzzyFiltered.filter((e) => !e.test);
       if (filtered.length === 0) return `No ${input.direction} for ${cite(r.sym)}.`;
-      // Paginate the edge list first, then fetch only that page's symbols —
-      // fetching every counterpart before slicing made large fan-ins cost one
-      // store round-trip per edge for rows that were then discarded.
-      const { page: edgePage, note } = paginate(filtered, input.limit);
-      const syms = await Promise.all(edgePage.map((e) => store.get(input.direction === 'callers' ? e.fromId : e.toId)));
-      const page = syms.map((s, i) => ({ s, e: edgePage[i]! })).filter((x) => x.s);
-      // Cite the *reference site*, not the counterpart's declaration line.
-      // `EdgeRecord.line` is in `from`'s file, so it only re-anchors the
-      // `callers` direction; for `callees` the edge line belongs to the
-      // caller's file, not the callee's, so the declaration stands.
-      //
-      // Without this, N calls from one function collapsed into N identical
-      // rows: `who_calls checkRules` printed `rules.test.ts:1` ten times for
-      // ten distinct call sites, none of them navigable.
-      const body = page
-        .map((x) => {
-          const at = input.direction === 'callers' ? `${x.s!.file}:${x.e.line}` : null;
-          return `  - ${cite(x.s!)}${at ? `  → called at ${at}` : ''}${x.e.confidence === 'fuzzy' ? '  [fuzzy]' : ''}`;
-        })
-        .join('\n');
+      // One row per distinct caller/callee: a test file calling the seed 19
+      // times used to be 19 near-identical rows. Count, paginate and footer
+      // all work on the groups, so `limit`/`offset` mean distinct counterparts.
+      const groups = groupCallEdges(filtered, side);
+      // Fetch only the page's symbols — fetching every counterpart before
+      // slicing made large fan-ins cost a store round-trip per discarded row.
+      const { page: groupPage, note } = paginate(groups, input.limit, 0, { max: 100 });
+      const syms = await store.getMany(groupPage.map((g) => g.id));
+      const page = groupPage.map((g) => ({ s: syms.get(g.id), g })).filter((x) => x.s);
+      // Callers are cited at the *reference site* (`EdgeRecord.line` is in the
+      // caller's file), not at the caller's declaration. For callees the edge
+      // line belongs to the seed's file, so the callee's declaration stands.
+      const body = page.map(({ s, g }) => (input.direction === 'callers' ? callerRow(s!, g) : calleeRow(s!, g))).join('\n');
       // An agent must never mistake a filtered list for a complete one.
       const hiddenNote = hiddenTestCount > 0 ? `\n(… ${hiddenTestCount} test-file ${input.direction === 'callers' ? 'caller' : 'callee'}(s) hidden; pass includeTests to see them)` : '';
-      return `${filtered.length} ${input.direction} of ${r.sym.qualified || r.sym.name}:\n${body}${note}${hiddenNote}`;
+      const sites = input.direction === 'callers' ? ' (file:line = call site)' : '';
+      const total = groups.length === filtered.length ? '' : ` / ${filtered.length} call sites`;
+      return `${groups.length} ${input.direction}${total} of ${r.sym.qualified || r.sym.name}${sites}:\n${body}${note}${hiddenNote}`;
     },
 
     async file_deps(input) {
       const dir = input.direction === 'importers' ? 'importers' : 'imports';
-      const deps = await store.fileEdges(input.path, dir, { transitive: input.transitive, limit: input.limit });
-      if (deps.length === 0) return `No ${dir} for ${input.path}.`;
-      const body = deps.map((d) => `  - d${d.depth} ${d.path}:${d.line}`).join('\n');
-      return `${deps.length} ${dir} of ${input.path}:\n${body}`;
+      // Probe past the cap so a truncated list says how much is missing.
+      const p = await resolvePathArg(store, input.path);
+      if ('error' in p) return p.message;
+      const all = await store.fileEdges(p.path, dir, { transitive: input.transitive, limit: PROBE_MAX.fileDeps + 1 });
+      if (all.length === 0) return `${p.note}No ${dir} for ${p.path}.`;
+      const { page, note } = paginate(all, input.limit, 0, { max: 200, atLeast: all.length > PROBE_MAX.fileDeps });
+      const body = page.map((d) => `  - ${input.transitive ? `d${d.depth} ` : ''}${d.path}:${d.line}`).join('\n');
+      return `${p.note}${all.length > PROBE_MAX.fileDeps ? `${PROBE_MAX.fileDeps}+` : all.length} ${dir} of ${p.path}:\n${body}${note}`;
     },
 
     async module_map(input) {
@@ -622,40 +822,49 @@ export function createExecutors(deps: ExecutorDeps): Executors {
     },
 
     async analyze(input) {
+      const probe = PROBE_MAX.analyze + 1;
+      // Rows come back from the store already offset; paginate only trims to
+      // `limit` and words the footer (baseOffset keeps its offset= hint right).
+      const pageOf = <T>(rows: T[]): { page: T[]; note: string } =>
+        paginate(rows, input.limit, 0, { max: 100, canOffset: true, baseOffset: input.offset, atLeast: rows.length >= probe });
       switch (input.kind) {
         case 'dead_code': {
           const c = await store.unreferenced({
             pathPrefix: input.pathPrefix,
             excludePath: input.excludePath,
             includeExported: input.includeExported,
-            limit: input.limit,
+            limit: probe,
             offset: input.offset,
           });
           if (c.length === 0) return 'No dead-code candidates (given filters).';
-          // The old blanket "verify each (syntactic only)" header understated
-          // what's actually in the list: some candidates (like a type-only
-          // interface) aren't just syntactically unverified, they're
-          // structurally unprovable with this extractor — so that gets a
-          // specific per-candidate note instead of one vague disclaimer.
+          // Some candidates (like a type-only interface) aren't just
+          // syntactically unverified, they're structurally unprovable with this
+          // extractor — so those get a specific per-candidate note.
           const noteText = (n: DeadCodeCandidate['note']): string =>
             n === 'type-only' ? '  [type-only — no reference edges are emitted for type positions]' : n ? `  [${n}]` : '';
-          return `${c.length} dead-code candidate(s) — verify each (syntactic only):\n` +
-            c.map((x) => `  - ${cite(x.symbol)}${noteText(x.note)}`).join('\n');
+          const { page, note } = pageOf(c);
+          return `${page.length} dead-code candidate(s) — verify each (syntactic only):\n` +
+            page.map((x) => `  - ${citeBare(x.symbol)}${noteText(x.note)}`).join('\n') + note;
         }
         case 'fan_out': {
-          const rows = await store.hotspots({ pathPrefix: input.pathPrefix, limit: input.limit, offset: input.offset });
+          const rows = await store.hotspots({ pathPrefix: input.pathPrefix, limit: probe, offset: input.offset });
           if (rows.length === 0) return 'No functions with outgoing calls found.';
-          return `Top ${rows.length} by call fan-out:\n` + rows.map((s) => `  - ${cite(s)}`).join('\n');
+          const { page, note } = pageOf(rows);
+          return `Top ${page.length} by call fan-out:\n` + page.map((s) => `  - ${citeBare(s)}`).join('\n') + note;
         }
         case 'cycles': {
-          const cycles = await store.findCycles({ edge: 'DEPENDS_ON', scope: input.scope, pathPrefix: input.pathPrefix, limit: input.limit });
+          const cycles = await store.findCycles({ edge: 'DEPENDS_ON', scope: input.scope, pathPrefix: input.pathPrefix, limit: PROBE_MAX.cycles + 1 });
           if (cycles.length === 0) return `No ${input.scope}-scope dependency cycles.`;
-          return `${cycles.length} cycle(s):\n` + cycles.map((c, i) => `  ${i + 1}. ${c.join(' → ')} → ${c[0]}`).join('\n');
+          const { page, note } = paginate(cycles, input.limit, 0, { max: 100, atLeast: cycles.length > PROBE_MAX.cycles });
+          const ring = (c: string[]): string =>
+            (c.length > CYCLE_MEMBERS_MAX ? [...c.slice(0, CYCLE_MEMBERS_MAX), `… +${c.length - CYCLE_MEMBERS_MAX} more`] : [...c, c[0]!]).join(' → ');
+          return `${page.length} cycle(s):\n` + page.map((c, i) => `  ${i + 1}. ${ring(c)}`).join('\n') + note;
         }
         case 'test_gap': {
-          const rows = await store.untested({ pathPrefix: input.pathPrefix, excludePath: input.excludePath, limit: input.limit, offset: input.offset });
+          const rows = await store.untested({ pathPrefix: input.pathPrefix, excludePath: input.excludePath, limit: probe, offset: input.offset });
           if (rows.length === 0) return 'No untested exported symbols (given filters).';
-          return `${rows.length} exported symbol(s) with no test reference:\n` + rows.map((s) => `  - ${cite(s)}`).join('\n');
+          const { page, note } = pageOf(rows);
+          return `${page.length} exported symbol(s) with no test reference:\n` + page.map((s) => `  - ${citeBare(s)}`).join('\n') + note;
         }
       }
     },
@@ -694,25 +903,45 @@ export function createExecutors(deps: ExecutorDeps): Executors {
         isRegex: input.isRegex,
         kinds: input.kinds as SymbolRecord['kind'][] | undefined,
         pathPrefix: input.pathPrefix,
-        limit: input.limit,
+        limit: PROBE_MAX.grep + 1,
       });
-      if (symbols.length === 0) return `No symbols match "${input.pattern}"${input.isRegex ? ' (regex)' : ''}.`;
-      return `${symbols.length} symbol(s) match "${input.pattern}"${input.isRegex ? ' (regex)' : ''}:\n` + symbols.map((s) => `  - ${cite(s)}`).join('\n');
+      const mode = input.isRegex ? ' (regex)' : '';
+      if (symbols.length === 0) return `No symbols match "${input.pattern}"${mode}.`;
+      const { page, note } = paginate(symbols, input.limit, 0, { max: 100, atLeast: symbols.length > PROBE_MAX.grep });
+      return `${symbols.length > PROBE_MAX.grep ? `${PROBE_MAX.grep}+` : symbols.length} symbol(s) match "${input.pattern}"${mode}:\n` +
+        page.map((s) => `  - ${cite(s)}`).join('\n') + note;
     },
 
     async context_pack(input) {
       if (!input.name && !input.path) return 'context_pack needs `name` or `path`.';
+      const section = <T>(title: string, rows: T[], render: (r: T) => string): string => {
+        const { page, note } = paginate(rows, input.limit, 0, { max: 50 });
+        return `\n${title}:\n` + page.map(render).join('\n') + note;
+      };
+      const moduleLines = async (file: string): Promise<{ key: string; lines: string[] }> => {
+        const key = moduleKeyOf(file, {});
+        const nb = await moduleNeighbours(store, key);
+        const names = (edges: typeof nb.dependsOn, side: 'to' | 'from'): string => {
+          const { page, note } = paginate(edges, input.limit, 0, { max: 50 });
+          return page.map((e) => e[side]).join(', ') + note.replace('\n', ' ');
+        };
+        return {
+          key,
+          lines: [
+            nb.dependsOn.length ? `  depends on: ${names(nb.dependsOn, 'to')}` : '  depends on nothing.',
+            nb.dependedOnBy.length ? `  depended on by: ${names(nb.dependedOnBy, 'from')}` : '  depended on by nothing.',
+          ],
+        };
+      };
 
       if (input.path && !input.name) {
-        const symbols = await store.outline(input.path);
-        const map = await moduleMap(store);
-        const key = moduleKeyOf(input.path, {});
-        const dependsOn = map.edges.filter((e) => e.from === key).slice(0, input.limit);
-        const dependedOnBy = map.edges.filter((e) => e.to === key).slice(0, input.limit);
-        const lines = [`Context pack for ${input.path} (module ${key}):`];
-        lines.push(symbols.length ? `\n${symbols.length} symbol(s):\n` + symbols.slice(0, input.limit).map((s) => `  - ${cite(s)}`).join('\n') : '\nNo indexed symbols.');
-        lines.push(dependsOn.length ? `\nDepends on:\n` + dependsOn.map((e) => `  - ${e.to}  (×${e.weight})`).join('\n') : '\nDepends on nothing.');
-        lines.push(dependedOnBy.length ? `\nDepended on by:\n` + dependedOnBy.map((e) => `  - ${e.from}  (×${e.weight})`).join('\n') : '\nNothing depends on this module.');
+        const p = await resolvePathArg(store, input.path);
+        if ('error' in p) return p.message;
+        const symbols = await store.outline(p.path);
+        const mod = await moduleLines(p.path);
+        const lines = [`${p.note}Context pack for ${p.path} (module ${mod.key}):`];
+        lines.push(symbols.length ? section(`${symbols.length} symbol(s)`, symbols, (s) => `  - ${cite(s)}`).trimStart() : 'No indexed symbols.');
+        lines.push(`\nModule ${mod.key}:`, ...mod.lines);
         return lines.join('\n');
       }
 
@@ -720,54 +949,57 @@ export function createExecutors(deps: ExecutorDeps): Executors {
       if ('message' in r) return r.message;
       const sym = r.sym;
 
-      const [callerEdges, calleeEdges, hierarchyRes, map] = await Promise.all([
+      const [callerEdges, calleeEdges, hierarchyRes, mod] = await Promise.all([
         store.edgesTo([sym.id], CALL_KINDS),
         store.edgesFrom([sym.id], CALL_KINDS),
         hierarchy(store, sym.id, 2),
-        moduleMap(store),
+        moduleLines(sym.file),
       ]);
-      const callerIds = callerEdges.slice(0, input.limit).map((e) => e.fromId);
-      const calleeIds = calleeEdges.slice(0, input.limit).map((e) => e.toId);
-      const [callerSyms, calleeSyms] = await Promise.all([store.getMany(callerIds), store.getMany(calleeIds)]);
-      const key = moduleKeyOf(sym.file, {});
-      const dependsOn = map.edges.filter((e) => e.from === key).slice(0, input.limit);
-      const dependedOnBy = map.edges.filter((e) => e.to === key).slice(0, input.limit);
+      // Distinct callers/callees, not call sites: one caller hitting the seed
+      // 19 times is one row (`×19`), and the footer counts rows.
+      const callerGroups = groupCallEdges(callerEdges, 'from');
+      const calleeGroups = groupCallEdges(calleeEdges, 'to');
+      const callerPage = callerGroups.slice(0, input.limit);
+      const calleePage = calleeGroups.slice(0, input.limit);
+      const [callerSyms, calleeSyms] = await Promise.all([
+        store.getMany(callerPage.map((g) => g.id)),
+        store.getMany(calleePage.map((g) => g.id)),
+      ]);
 
       const lines = [`Context pack for ${cite(sym)}:`];
-      lines.push(
-        callerEdges.length
-          ? `\n${callerEdges.length} caller(s):\n` +
-              callerEdges
-                .slice(0, input.limit)
-                .map((e) => callerSyms.get(e.fromId))
-                .filter((s): s is SymbolRecord => !!s)
-                .map((s) => `  - ${cite(s)}`)
-                .join('\n')
-          : '\nNo callers.'
-      );
-      lines.push(
-        calleeEdges.length
-          ? `\n${calleeEdges.length} callee(s):\n` +
-              calleeEdges
-                .slice(0, input.limit)
-                .map((e) => calleeSyms.get(e.toId))
-                .filter((s): s is SymbolRecord => !!s)
-                .map((s) => `  - ${cite(s)}`)
-                .join('\n')
-          : '\nNo callees.'
-      );
-      if (hierarchyRes && (hierarchyRes.ancestors.length > 0 || hierarchyRes.descendants.length > 0)) {
-        if (hierarchyRes.ancestors.length > 0) {
-          lines.push(`\nExtends/implements:\n` + hierarchyRes.ancestors.slice(0, input.limit).map((a) => `  - ${cite(a.symbol)}`).join('\n'));
-        }
-        if (hierarchyRes.descendants.length > 0) {
-          lines.push(`\nExtended/implemented by:\n` + hierarchyRes.descendants.slice(0, input.limit).map((d) => `  - ${cite(d.symbol)}`).join('\n'));
-        }
+      const listed = (
+        title: string,
+        groups: CallGroup[],
+        shown: CallGroup[],
+        syms: Map<number, SymbolRecord>,
+        row: (s: SymbolRecord, g: CallGroup) => string,
+        empty: string
+      ): string => {
+        if (groups.length === 0) return `\n${empty}`;
+        const note = groups.length > input.limit ? moreFooter(groups.length - input.limit, { limit: input.limit, max: 50 }) : '';
+        const body = shown.flatMap((g) => (syms.has(g.id) ? [row(syms.get(g.id)!, g)] : [])).join('\n');
+        return `\n${groups.length} ${title}:\n` + body + note;
+      };
+      lines.push(listed('caller(s)', callerGroups, callerPage, callerSyms, callerRow, 'No callers.'));
+      lines.push(listed('callee(s)', calleeGroups, calleePage, calleeSyms, calleeRow, 'No callees.'));
+      if (hierarchyRes && hierarchyRes.ancestors.length > 0) {
+        lines.push(section('Extends/implements', hierarchyRes.ancestors, (a) => `  - ${citeBare(a.symbol)}`));
       }
-      lines.push(`\nModule ${key}:`);
-      lines.push(dependsOn.length ? `  depends on: ` + dependsOn.map((e) => e.to).join(', ') : '  depends on nothing.');
-      lines.push(dependedOnBy.length ? `  depended on by: ` + dependedOnBy.map((e) => e.from).join(', ') : '  depended on by nothing.');
+      if (hierarchyRes && hierarchyRes.descendants.length > 0) {
+        lines.push(section('Extended/implemented by', hierarchyRes.descendants, (d) => `  - ${citeBare(d.symbol)}`));
+      }
+      lines.push(`\nModule ${mod.key}:`, ...mod.lines);
       return lines.join('\n');
     },
   };
+
+  // Every tool answers an empty index with the same one-liner (see
+  // EMPTY_INDEX_MESSAGE) instead of a tool-specific "nothing found".
+  const guarded = {} as Executors;
+  for (const name of Object.keys(base) as CodeToolName[]) {
+    const fn = base[name] as (input: unknown) => Promise<string>;
+    (guarded as Record<CodeToolName, (input: unknown) => Promise<string>>)[name] = async (input) =>
+      (await emptyIndexMessage(store)) ?? fn(input);
+  }
+  return guarded;
 }

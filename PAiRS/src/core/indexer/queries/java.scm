@@ -59,6 +59,8 @@
 
 ; --- calls -----------------------------------------------------------------------
 (method_invocation name: (identifier) @ref.call)
+; Constructor calls: `new Foo(...)` is a call to class Foo.
+(object_creation_expression type: (type_identifier) @ref.call)
 
 ; --- imports -----------------------------------------------------------------------
 (import_declaration (scoped_identifier) @import.specifier)

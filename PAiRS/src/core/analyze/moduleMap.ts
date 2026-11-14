@@ -173,7 +173,7 @@ export async function moduleMap(store: CodeStore, opts: ModuleMapOptions = {}): 
     const from = moduleKeyOf(String(r.af), opts);
     const to = moduleKeyOf(String(r.bf), opts);
     const n = Number(r.n);
-    const w = r.conf === 'fuzzy' ? n * 0.5 : n;
+    const w = depWeight(r.conf, n);
     // Same-module file deps don't belong on the graph, but they are exactly
     // the cohesion signal: a module whose files never reference each other is
     // a folder, not a module.
@@ -194,6 +194,72 @@ export async function moduleMap(store: CodeStore, opts: ModuleMapOptions = {}): 
   });
 
   return moduleMapFromEdges(modules, edges, opts, await moduleFacts(store, opts, internal));
+}
+
+/** Confidence-weighted file-dependency count: fuzzy edges count half. Shared by moduleMap and moduleNeighbours so their weights agree. */
+function depWeight(conf: unknown, n: number): number {
+  return conf === 'fuzzy' ? n * 0.5 : n;
+}
+
+export interface ModuleNeighbours {
+  /** Modules `key` depends on, heaviest first. */
+  dependsOn: Array<{ from: string; to: string; weight: number }>;
+  /** Modules that depend on `key`, heaviest first. */
+  dependedOnBy: Array<{ from: string; to: string; weight: number }>;
+}
+
+/**
+ * One module's incoming and outgoing module edges, without clustering the
+ * whole graph. Equivalent to filtering `moduleMap(store, opts).edges` for
+ * `from === key` / `to === key` (same weights), but costs a single aggregated
+ * query over only the DEPENDS_ON edges touching the module's directory instead
+ * of Louvain + layer/cycle analysis over every module.
+ *
+ * The SQL prefilter is deliberately coarse (path prefix `key/`); the exact
+ * module boundary is re-checked with `moduleKeyOf`, the same function
+ * moduleMap uses, so container roll-ups and `depth` collapsing stay in sync.
+ */
+export async function moduleNeighbours(
+  store: CodeStore,
+  key: string,
+  opts: ModuleMapOptions = {}
+): Promise<ModuleNeighbours> {
+  // `_`/`%` are LIKE wildcards and occur in real paths: escape them.
+  const esc = (s: string): string => s.replace(/[\\%_]/g, (c) => `\\${c}`);
+  const side = (col: 'a.file' | 'b.file'): string =>
+    key === '.' ? `${col} NOT LIKE '%/%'` : `${col} LIKE ? ESCAPE '\\'`;
+  const params: Record<string, unknown> = {};
+  if (key !== '.') {
+    params.a = `${esc(key)}/%`;
+    params.b = `${esc(key)}/%`;
+  }
+  const rows = await store.query(
+    `SELECT a.file AS af, b.file AS bf, e.confidence AS conf, COUNT(*) AS n
+     FROM Edge e
+     JOIN Symbol a ON a.id = e.src
+     JOIN Symbol b ON b.id = e.dst
+     WHERE e.kind = 'DEPENDS_ON' AND a.file <> b.file AND COALESCE(e.test, 0) = 0
+       AND (${side('a.file')} OR ${side('b.file')})
+     GROUP BY a.file, b.file, e.confidence`,
+    params
+  );
+
+  const out = new Map<string, number>(); // dep key -> weight
+  const inn = new Map<string, number>();
+  for (const r of rows) {
+    const from = moduleKeyOf(String(r.af), opts);
+    const to = moduleKeyOf(String(r.bf), opts);
+    if (from === to) continue;
+    const w = depWeight(r.conf, Number(r.n));
+    if (from === key) out.set(to, (out.get(to) ?? 0) + w);
+    if (to === key) inn.set(from, (inn.get(from) ?? 0) + w);
+  }
+  const byWeight = (a: { weight: number; from: string; to: string }, b: { weight: number; from: string; to: string }): number =>
+    b.weight - a.weight || a.from.localeCompare(b.from) || a.to.localeCompare(b.to);
+  return {
+    dependsOn: [...out].map(([to, weight]) => ({ from: key, to, weight })).sort(byWeight),
+    dependedOnBy: [...inn].map(([from, weight]) => ({ from, to: key, weight })).sort(byWeight),
+  };
 }
 
 /**

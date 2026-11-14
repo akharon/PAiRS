@@ -1,74 +1,33 @@
 ---
 name: pairs
-description: Leverage PAiRS's code graph. Use instead of grep/Read for definitions, dependencies, and refactoring safety. In VS Code with Copilot, prefer the language model tools (find_symbol, impact, rename_symbol, etc.); for CLI use the pairs commands.
+description: Code-graph queries (definitions, callers, impact, outlines) via the `pairs` CLI or Copilot tools. Prefer over grep/Read for navigation and safe refactors.
 ---
 
-# PAiRS: Code Graph
+# PAiRS
 
-PAiRS maintains a live code graph (symbols, call/import edges, dependencies)
-for this workspace, updated by the VS Code extension while it's open. Use
-PAiRS instead of grep/Read for code navigation and refactoring — it catches
-renamed-import references grep misses and understands module structure.
+`pairs <tool> ...` answers from a prebuilt code graph in a few hundred tokens. Prose by default; `--json` = compact JSON, `--pretty` = indented. Copilot gets the same tools as language model tools.
 
-## In VS Code with Copilot (Language Model Tools)
+- Works from any subdirectory or git worktree: root = nearest dir with `.pairs/index.db` or `.git` (`--root <dir>` / `PAIRS_ROOT` override).
+- First use auto-indexes (a worktree seeds from the main worktree's index); queries refresh changed files first (`--no-refresh` skips).
+- Lists are capped; the last line `… +N more (pass limit=M)` means add `--limit M` (or `--offset`). `[fuzzy]` = name-matched, unverified.
+- Every tool input is a `--flag` (`--kind function`, `--lang go`, `--include-tests false`, `--no-preview`, `--direction callees`); `pairs <tool> --help` lists them, unknown flags error.
 
-Copilot has direct access to PAiRS tools — use these for navigation and refactoring:
+## Cheapest call for the job
 
-- **find_symbol** — locate where a symbol is defined (by name, bare or qualified).
-  Pass `preview: true` to also get each hit's doc line and first body lines —
-  that usually answers "is this the right symbol?" without a follow-up Read.
-- **get_symbol** — full declaration: signature, doc, members.
-- **outline** — file structure: all symbols in order.
-- **impact** — blast radius of a symbol (all dependants, transitive). Call BEFORE
-  renaming/removing/changing. Pass `kinds: ["CALLS"]` (or `["READS","WRITES"]`,
-  etc.) to slice by edge type when you only want callers or only data access;
-  the header states the restriction, so a filtered empty result is never
-  mistaken for "nothing depends on this".
-- **diff_impact** — blast radius of the CURRENT CHANGE, in one call. Maps the git
-  diff's changed line ranges to the symbols containing them, then walks every
-  dependant of all of them in one merged pass. Use this INSTEAD of reading the
-  diff and then calling `impact` once per changed function: a dependant reached
-  from several changed symbols is reported once, tagged with how many reach it.
-  Answers "what do I re-test / re-review for this change". Changed lines that
-  sit in no symbol (imports, module-level code, unindexed files) are listed
-  separately, so an empty dependant list is never a false all-clear.
-- **hierarchy** — inheritance tree: what a type EXTENDS/IMPLEMENTS (ancestors)
-  and what EXTENDS/IMPLEMENTS it (descendants). Call before changing a base
-  class/interface to see every subclass affected.
-- **who_calls** — direct callers or callees of a function/method.
-- **file_deps** — which files depend on this one, and what it depends on.
-- **module_map** — detected subsystems, module cycles, each module's dependency
-  layer and fan-in/fan-out, and architectural drift. Pass
-  `boundary: "src/a -> src/b"` to drill into one edge: the symbols of the
-  target that the source actually uses, with reference sites — what breaking
-  that dependency would require.
-- **analyze** — dead code, cycles, hotspots, untested exports.
-- **rename_symbol** — rename a symbol and all direct reference sites consistently
-  in one pass. Aborts if any site can't be matched safely (stale index, ambiguous
-  text), or if the new name is already declared in the same file or impl block.
-  Same-named symbols in other files are reported as a note, not blocked. Revert
-  via git or your own backups.
+| Need | Command |
+|---|---|
+| Where is X defined | `pairs find_symbol X --preview` (not grep + Read) |
+| Shape of a file | `pairs outline path` (not Read) |
+| Signature, doc, members | `pairs get_symbol X` |
+| Name unknown | `pairs grep_symbols "pat" [--regex]` |
+| Callers / callees | `pairs who_calls X [callers\|callees]` |
+| Before editing or deleting X | `pairs impact X [--depth N] [--kinds CALLS]` |
+| Reviewing a change | `pairs diff_impact [--rev main...HEAD] [--staged]` |
+| Base types / subclasses | `pairs hierarchy T` |
+| Importers of a file | `pairs file_deps path [importers\|imports]` |
+| Broad context, one call | `pairs context_pack X` or `--path file` |
+| Architecture | `pairs module_map [src/a -> src/b]`, `pairs analyze dead_code\|fan_out\|cycles\|test_gap` |
+| Rename everywhere | `pairs rename_symbol Old New` (all-or-nothing; fuzzy sites need `--include-fuzzy`) |
+| Slice of a file | `pairs read path [start] [end]` |
 
-## In the CLI (from workspace root)
-
-For automation and CI/CD, use `pairs` commands:
-
-- `pairs find_symbol <name> [--preview]` — locate a definition. `--preview` adds the doc line and first body lines, which usually removes the follow-up Read.
-- `pairs get_symbol <name>` — full declaration: signature, doc, a body excerpt, and members.
-- `pairs impact <name> [depth] [--kinds CALLS,READS] [--json]` — blast radius (same as the tool above). `--kinds` restricts the walk to specific edge kinds. Prints prose like every other CLI tool by default; pass `--json` for the structured result (breaking change from the old bare-JSON default — update any script that parsed `pairs impact` output directly).
-- `pairs diff_impact [--rev <range>] [--staged] [--depth N] [--kinds CALLS,READS]` — blast radius of the current change. No args diffs the working tree; `--rev main...HEAD` a range; `--staged` the index.
-- `pairs query '<sql>'` — raw read-only SQL for anything not covered above.
-- `pairs stats` — index size and resolution quality.
-- `pairs index` — full re-index (rarely needed; extension keeps it live).
-
-## When to Use PAiRS
-
-- **Finding definitions** — `find_symbol` / `outline` instead of grep/Read. Add
-  `preview: true` to `find_symbol` when you would otherwise Read the file next.
-- **Checking impact before a change** — `impact` shows callers, readers, type
-  references, etc. that might break.
-- **Refactoring safely** — `rename_symbol` renames definition + all reference
-  sites together.
-- **Understanding module structure** — `module_map` shows subsystems, cycles,
-  layers and drift; `module_map` with `boundary` shows why one module depends
-  on another. Ask it "where does this code belong" before adding a new file.
+Also: `pairs query '<sql>'`, `pairs stats`, `pairs index`. "index is empty" means run `pairs index`.
