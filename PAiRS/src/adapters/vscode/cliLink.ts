@@ -16,6 +16,40 @@ function binDirFor(platform: NodeJS.Platform, homeDir: string): string {
   return path.join(homeDir, '.local', 'bin');
 }
 
+export interface CliShim {
+  file: string;
+  content: string;
+}
+
+// The CLI needs node:sqlite (Node >= 22.13). The `node` on PATH may be older
+// or absent, so every shim runs the CLI on the runtime hosting the extension
+// (`process.execPath`): VS Code's Electron in plain-Node mode, which always
+// has node:sqlite since the extension itself uses it.
+export function shimsFor(platform: NodeJS.Platform, runtime: string, cliSource: string): CliShim[] {
+  if (platform === 'win32') {
+    const fwd = (p: string): string => p.replace(/\\/g, '/');
+    return [
+      // cmd/PowerShell. A .cmd shim works without Developer Mode/admin, unlike
+      // an NTFS symlink; setlocal keeps the variable out of the caller's shell.
+      {
+        file: 'pairs.cmd',
+        content: `@echo off\r\nsetlocal\r\nset ELECTRON_RUN_AS_NODE=1\r\n"${runtime}" "${cliSource}" %*\r\n`,
+      },
+      // Git Bash/MSYS ignores .cmd when resolving a bare `pairs`.
+      { file: 'pairs', content: posixShim(fwd(runtime), fwd(cliSource)) },
+    ];
+  }
+  return [{ file: 'pairs', content: posixShim(runtime, cliSource) }];
+}
+
+function posixShim(runtime: string, cliSource: string): string {
+  return `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec ${shQuote(runtime)} ${shQuote(cliSource)} "$@"\n`;
+}
+
+function shQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
 export async function ensureCliLinked(extensionPath: string): Promise<void> {
   try {
     const cliSource = path.join(extensionPath, 'dist', 'cli.js');
@@ -25,30 +59,17 @@ export async function ensureCliLinked(extensionPath: string): Promise<void> {
     const binDir = binDirFor(process.platform, homeDir);
     await fs.mkdir(binDir, { recursive: true });
 
-    if (process.platform === 'win32') {
-      await linkWindows(binDir, cliSource);
-    } else {
-      await linkPosix(binDir, cliSource);
+    for (const shim of shimsFor(process.platform, process.execPath, cliSource)) {
+      const target = path.join(binDir, shim.file);
+      await replaceLink(target, async () => {
+        await fs.writeFile(target, shim.content, 'utf8');
+        await fs.chmod(target, 0o755);
+      });
     }
   } catch {
     // Graceful degradation — the extension's Language Model Tools work
     // regardless of whether the standalone `pairs` CLI is on PATH.
   }
-}
-
-async function linkPosix(binDir: string, cliSource: string): Promise<void> {
-  const target = path.join(binDir, 'pairs');
-  await replaceLink(target, async () => {
-    await fs.symlink(cliSource, target, 'file');
-    await fs.chmod(target, 0o755);
-  });
-}
-
-async function linkWindows(binDir: string, cliSource: string): Promise<void> {
-  // A .cmd shim works without Developer Mode/admin, unlike an NTFS symlink.
-  const target = path.join(binDir, 'pairs.cmd');
-  const shim = `@echo off\r\nnode "${cliSource}" %*\r\n`;
-  await replaceLink(target, () => fs.writeFile(target, shim, 'utf8'));
 }
 
 async function replaceLink(target: string, create: () => Promise<void>): Promise<void> {

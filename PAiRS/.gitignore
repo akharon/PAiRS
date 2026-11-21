@@ -1,49 +1,47 @@
-# Node modules & package managers
+# Dependencies
 node_modules/
-package-lock.json
-yarn.lock
-pnpm-lock.yaml
 
-# Build outputs
+# Build outputs and packages
 dist/
 build/
 out/
 *.vsix
 *.mcpb
+*.tgz
 
-# TypeScript
+# TypeScript / test output
 *.tsbuildinfo
-tsconfig.tsbuildlog
-
-# Tests
 coverage/
 .nyc_output/
 *.lcov
+.vitest/
 
 # Environment & secrets
 .env
 .env.local
 .env.*.local
 
-# IDE
+# IDE / OS
 .vscode/*
 !.vscode/extensions.json
 !.vscode/launch.json
 !.vscode/settings.json
 !.vscode/tasks.json
 .idea/
+*.code-workspace
 *.swp
 *.swo
 *~
 .DS_Store
+Thumbs.db
+
+# Local Claude Code state (the shared skill under .claude/skills/ IS tracked)
+.claude/settings.local.json
 
 # PAiRS derived index — disposable, rebuildable from source, never committed
-# (holds the SQLite code graph, cache, and build-state sidecar)
+# (holds the SQLite code graph, WAL/SHM sidecars, cache, and build-state files)
 .pairs/
 .pairs*/
-
-# rules.ron and baseline.json ARE committed (team-owned policy) — they live
-# in the repo being analyzed, not here, so no ignore needed in this repo.
 
 # Temporary / backups
 *.tmp

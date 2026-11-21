@@ -1,13 +1,18 @@
 # PAiRS derived indices — disposable, rebuildable from source, never committed
 .pairs/
-.pairs*
+.pairs*/
 
 # SaRp derived indices
 .sarp/
 
-# IDE
-.vscode/
+# IDE / local workspace files
+.vscode/*
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/settings.json
+!.vscode/tasks.json
 .idea/
+*.code-workspace
 
 # OS
 .DS_Store
@@ -18,21 +23,23 @@ Thumbs.db
 .env.local
 *.local
 
+# Local Claude Code state (shared skills under .claude/skills/ ARE tracked)
+.claude/settings.json
+.claude/settings.local.json
+
 # Build outputs
 *.egg-info/
 dist/
 build/
+out/
 __pycache__/
 *.pyc
 .pytest_cache/
 .vitest/
+*.vsix
 
-# Node/npm
+# Node (lockfiles ARE tracked: CI installs with `npm ci`)
 node_modules/
-*.tgz
-pnpm-lock.yaml
-yarn.lock
-package-lock.json
 
 # Temporary
 *.swp

@@ -1,0 +1,31 @@
+name: Bug report
+description: Something in PAiRS (extension or CLI) misbehaves
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: PAiRS version
+      description: Extension version, or output of `pairs --version`.
+    validations: {required: true}
+  - type: input
+    id: env
+    attributes:
+      label: VS Code version and OS
+    validations: {required: true}
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations: {required: true}
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The command or tool call, the language involved, and a minimal snippet if the problem is a wrong or missing symbol/edge.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Output
+      description: CLI output, or errors from Help → Toggle Developer Tools → Console. `pairs stats` is useful too.
+      render: shell

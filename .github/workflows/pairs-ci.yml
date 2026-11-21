@@ -1,0 +1,106 @@
+name: PAiRS CI
+
+on:
+  push:
+    branches: [main, master]
+    paths: ['PAiRS/**', '.github/workflows/pairs-*.yml']
+  pull_request:
+    branches: [main, master]
+    paths: ['PAiRS/**', '.github/workflows/pairs-*.yml']
+  workflow_dispatch:
+
+concurrency:
+  group: pairs-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: PAiRS
+
+jobs:
+  check:
+    name: Check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: PAiRS/package-lock.json
+
+      # The GDScript grammar is compiled to wasm at build time (no prebuilt
+      # exists); cache the result so CI does not re-download the toolchain.
+      - name: Cache compiled grammars
+        uses: actions/cache@v4
+        with:
+          path: PAiRS/node_modules/.cache/pairs-grammars
+          key: grammars-${{ runner.os }}-${{ hashFiles('PAiRS/package-lock.json') }}
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Smoke test the built CLI
+        shell: bash
+        run: |
+          set -e
+          rm -rf .pairs
+          node dist/cli.js index --root .
+          node dist/cli.js stats --root .
+          node dist/cli.js find_symbol WatchQueue --root . | grep -q WatchQueue
+
+  package:
+    name: Package .vsix
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: PAiRS/package-lock.json
+
+      - name: Cache compiled grammars
+        uses: actions/cache@v4
+        with:
+          path: PAiRS/node_modules/.cache/pairs-grammars
+          key: grammars-${{ runner.os }}-${{ hashFiles('PAiRS/package-lock.json') }}
+
+      - run: npm ci
+
+      # `vscode:prepublish` runs the production build.
+      - name: Package
+        run: npm run package
+
+      - name: Show contents
+        run: npx vsce ls --no-dependencies
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pairs-vsix
+          path: PAiRS/pairs-*.vsix
+          if-no-files-found: error
+          retention-days: 14

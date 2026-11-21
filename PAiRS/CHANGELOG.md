@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.28.0
+
+### Marketplace readiness, footprint
+
+- **Smaller and faster to load.** Production bundles are minified: `dist/extension.js` and `dist/cli.js` drop from ~490 KB / ~510 KB to ~260 KB each. The `.vsix` ships only the two bundles, grammars, queries, icon and docs (it previously also carried CI files and a skill copy). CLI output is byte-identical to 0.27.
+- **Lower idle memory.** After a full index, and 60 s after the last file-change flush, the extension now also releases the loaded tree-sitter grammars (the largest resident cost), not just the store caches. They reload lazily on the next index. Release never runs while an indexing operation is in flight.
+- **Cheaper file watching.** The watcher rejects non-source files before any path or ignore-rule work.
+- **Workspace Trust.** The extension declares limited support for untrusted workspaces: `diff_impact` (which runs `git`) is disabled there; everything else works. Virtual workspaces are declared unsupported (the index needs a local disk).
+- Manifest: categories, keywords, homepage/bugs/repository (monorepo `directory`), gallery banner, shorter description.
+
+### Build / CI
+
+- **CI now runs.** The workflow lived in `PAiRS/.github/`, which GitHub ignores because the repository root is one level up; it moved to `.github/workflows/pairs-ci.yml` (typecheck, lint, tests and a CLI smoke test on Linux/macOS/Windows, plus a `.vsix` packaging job). `pairs-release.yml` publishes on a `pairs-v<version>` tag when `VSCE_PAT` / `OVSX_PAT` secrets exist.
+- `package-lock.json` is tracked (CI uses `npm ci`, which needs it; it was git-ignored).
+- **npm lifecycle fix.** The `install` and `postinstall` scripts ran on every `npm install`/`npm ci` (full build+test+package+`code --install-extension`, then writing launchers into `$HOME`). Renamed to `install:vscode`; `link-cli` / `unlink-cli` are now opt-in. The extension itself still links the CLI on activation.
+- `npm run package` calls `vsce` directly with `--no-dependencies` and monorepo link bases; `vscode:prepublish` builds. Runtime libraries (`web-tree-sitter`, `zod`) are `devDependencies` because they are bundled.
+- `fetch-grammars.mjs` builds the GDScript grammar on Windows (`npx` is `npx.cmd`).
+- Tests: default timeout raised to 30 s for slow CI disks.
+- Removed the committed `pairs-0.26.0.vsix`, a SQLite WAL file, local Claude settings and the `.code-workspace` file from version control; added `.gitattributes`, issue/PR templates, security policy, contributing guide and Dependabot config.
+
 ## 0.27.0
 
 ### Token cost (breaking CLI output changes)

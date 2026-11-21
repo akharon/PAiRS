@@ -1,0 +1,59 @@
+name: PAiRS Release
+
+# Tag `pairs-v<version>` (matching PAiRS/package.json) to publish.
+#   git tag pairs-v0.28.0 && git push origin pairs-v0.28.0
+# Marketplace publishing needs the VSCE_PAT secret (and OVSX_PAT for Open VSX);
+# a missing secret skips that registry, the GitHub release is always created.
+on:
+  push:
+    tags: ['pairs-v*']
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    working-directory: PAiRS
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      VSCE_PAT: ${{ secrets.VSCE_PAT }}
+      OVSX_PAT: ${{ secrets.OVSX_PAT }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: PAiRS/package-lock.json
+
+      - run: npm ci
+
+      - name: Verify tag matches package version
+        run: |
+          v=$(node -p "require('./package.json').version")
+          [ "refs/tags/pairs-v$v" = "$GITHUB_REF" ] || { echo "Tag $GITHUB_REF does not match package.json version $v"; exit 1; }
+
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+
+      - name: Package
+        run: npm run package
+
+      - name: Publish to VS Code Marketplace
+        if: env.VSCE_PAT != ''
+        run: npx vsce publish --no-dependencies --packagePath pairs-*.vsix
+
+      - name: Publish to Open VSX
+        if: env.OVSX_PAT != ''
+        run: npx --yes ovsx publish pairs-*.vsix -p "$OVSX_PAT"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: PAiRS/pairs-*.vsix
+          generate_release_notes: true

@@ -64,10 +64,35 @@ interface Workspace {
    * just re-renders from this cache.
    */
   stats?: IndexStats;
+  /** Indexing operations in flight; memory is only released when this is 0. */
+  busy: number;
 }
 
-/** Drop the store's in-memory caches this long after the last watcher flush. */
+/** Drop the store's caches and loaded grammars this long after the last watcher flush. */
 const IDLE_RELEASE_MS = 60_000;
+
+/**
+ * Give back what an idle workspace does not need: the store's statement/symbol
+ * caches and every loaded tree-sitter grammar (the wasm heaps are the biggest
+ * resident cost; C++ alone is several MB). Both reload lazily on the next
+ * index/query. Never runs while an index operation is in flight — disposing a
+ * grammar mid-parse would free memory the parser is still using.
+ */
+function releaseMemory(ws: Workspace): void {
+  if (ws.busy > 0) return;
+  ws.store.releaseCaches();
+  ws.parsers.dispose();
+}
+
+/** Run an indexing operation, marking the workspace busy for its duration. */
+async function whileBusy<T>(ws: Workspace, op: () => Promise<T>): Promise<T> {
+  ws.busy++;
+  try {
+    return await op();
+  } finally {
+    ws.busy--;
+  }
+}
 
 let statusBar: vscode.StatusBarItem | undefined;
 // Module-level so reindex()/rebuildIndex() (which act on one Workspace) can
@@ -113,7 +138,7 @@ async function openWorkspace(folder: vscode.WorkspaceFolder, extensionPath: stri
     readFile: nodeReadFile(root),
     statFile: nodeStatFile(root),
   });
-  return { root, name: folder.name, pairsDir, store, indexer, parsers, filter: createWorkspaceFilter(root) };
+  return { root, name: folder.name, pairsDir, store, indexer, parsers, filter: createWorkspaceFilter(root), busy: 0 };
 }
 
 /** Recompute (and cache) one workspace's stats. Call after a fullIndex or watcher flush only. */
@@ -183,20 +208,22 @@ async function refreshStatus(workspaces: Workspace[]): Promise<void> {
  */
 async function runLockedFullIndex(ws: Workspace, title: string, wait: boolean, resetFirst = false): Promise<void> {
   await vscode.window.withProgress({ location: vscode.ProgressLocation.Window, title }, async () => {
-    const r = await withIndexLock(
-      ws.pairsDir,
-      async () => {
-        if (resetFirst) await ws.store.reset();
-        await ws.indexer.fullIndex(ws.root);
-        markRefreshed(ws.pairsDir);
-      },
-      { wait }
-    );
-    if (r.skipped) {
-      void vscode.window.setStatusBarMessage(`PAiRS: another indexer is running on ${ws.name}; using its index.`, 5000);
-    }
-    await recomputeStats(ws);
-    ws.store.releaseCaches();
+    await whileBusy(ws, async () => {
+      const r = await withIndexLock(
+        ws.pairsDir,
+        async () => {
+          if (resetFirst) await ws.store.reset();
+          await ws.indexer.fullIndex(ws.root);
+          markRefreshed(ws.pairsDir);
+        },
+        { wait }
+      );
+      if (r.skipped) {
+        void vscode.window.setStatusBarMessage(`PAiRS: another indexer is running on ${ws.name}; using its index.`, 5000);
+      }
+      await recomputeStats(ws);
+    });
+    releaseMemory(ws);
   });
   await refreshStatus(allWorkspaces);
 }
@@ -257,7 +284,14 @@ function buildExecutorsByFolder(workspaces: Workspace[]): Map<string, ReturnType
         store: ws.store,
         root: ws.root,
         readSource,
-        collectDiff: (src) => collectDiffHunks(ws.root, src),
+        collectDiff: async (src) => {
+          // `git diff` honours repo-local config (e.g. core.fsmonitor) that can
+          // run arbitrary commands, so it must not run in an untrusted folder.
+          if (!vscode.workspace.isTrusted) {
+            throw new Error('diff_impact runs git in the workspace; trust this workspace (Workspaces: Manage Workspace Trust) to use it.');
+          }
+          return collectDiffHunks(ws.root, src);
+        },
       })
     );
   }
@@ -432,14 +466,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     };
     context.subscriptions.push({ dispose: clearIdle });
     const queue = new WatchQueue({
-      indexFile: (p) => ws.indexer.indexFile(p),
-      removeFile: (p) => ws.indexer.removeFile(p),
+      indexFile: (p) => whileBusy(ws, () => ws.indexer.indexFile(p)),
+      removeFile: (p) => whileBusy(ws, () => ws.indexer.removeFile(p)),
       onFlushed: async () => {
         await ws.store.checkpoint();
         await recomputeStats(ws);
         await refreshStatus(allWorkspaces);
         clearIdle();
-        idleTimer = setTimeout(() => ws.store.releaseCaches(), IDLE_RELEASE_MS);
+        idleTimer = setTimeout(() => releaseMemory(ws), IDLE_RELEASE_MS);
       },
     });
     context.subscriptions.push({ dispose: () => queue.dispose() });
@@ -448,8 +482,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // nested-repo boundaries, root + nested .gitignore) — so a gitignored file
     // or a linked worktree's copy never gets indexed between full indexes.
     const rel = (uri: vscode.Uri): string | null => {
+      // Cheapest test first: most events (assets, lockfiles, build output) are
+      // not source files, so skip the path math and ignore-rule matching.
+      if (!langForPath(uri.fsPath)) return null;
       const r = path.relative(ws.root, uri.fsPath).split(path.sep).join('/');
-      return !r.startsWith('..') && !path.isAbsolute(r) && !ws.filter.isExcluded(r) && langForPath(r) ? r : null;
+      return !r.startsWith('..') && !path.isAbsolute(r) && !ws.filter.isExcluded(r) ? r : null;
     };
     srcWatcher.onDidChange((u) => { const r = rel(u); if (r) { clearIdle(); queue.changed(r); } });
     srcWatcher.onDidCreate((u) => { const r = rel(u); if (r) { clearIdle(); queue.changed(r); } });

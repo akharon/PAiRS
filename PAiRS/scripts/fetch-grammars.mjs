@@ -52,8 +52,13 @@ async function buildGdscriptWasm() {
   const grammarStat = await fs.stat(path.join(grammarDir, 'src', 'parser.c')).catch(() => null);
   if (!cachedStat || !grammarStat || cachedStat.mtimeMs < grammarStat.mtimeMs) {
     await fs.mkdir(cacheDir, { recursive: true });
-    execFileSync('npx', ['--yes', 'tree-sitter-cli', 'build', '--wasm', '-o', cached, grammarDir], {
+    // On Windows `npx` is npx.cmd, which execFile cannot spawn without a shell
+    // (and a shell needs the paths quoted).
+    const win = process.platform === 'win32';
+    const q = (p) => (win ? `"${p}"` : p);
+    execFileSync('npx', ['--yes', 'tree-sitter-cli', 'build', '--wasm', '-o', q(cached), q(grammarDir)], {
       stdio: 'inherit',
+      shell: win,
     });
   }
   return cached;

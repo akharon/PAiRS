@@ -1,18 +1,12 @@
-**/*.test.ts
-**/*.test.js
-.git
-.gitignore
-.pairs/**
-.claude/settings.local.json
-scripts/
-spikes/
-# Everything else in node_modules is bundled into dist/ and excluded.
-node_modules/**
-*.md
-esbuild.mjs
-eslint.config.mjs
-tsconfig.json
-vitest.config.ts
-src/
-dist/**/*.js.map
-dist/v3-bench.*
+# Whitelist: ship only what runs. Everything else (sources, tests, scripts,
+# configs, CI, sourcemaps, bundle analysis) stays out of the .vsix.
+**
+!package.json
+!README.md
+!CHANGELOG.md
+!LICENSE
+!assets/icon.png
+!dist/extension.js
+!dist/cli.js
+!dist/grammars/*.wasm
+!dist/queries/*.scm

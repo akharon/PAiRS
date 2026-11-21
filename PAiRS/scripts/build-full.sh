@@ -81,7 +81,7 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo "✅ Build complete!"
 echo ""
 echo "Extension package ready (one platform-specific .vsix per OS — R4):"
-ls -lh pairs-*.vsix 2>/dev/null || echo "  (run scripts/package.sh once Phase 1 packaging lands)"
+ls -lh pairs-*.vsix 2>/dev/null || echo "  (run npm run package)"
 echo ""
 echo "Install to VS Code:"
 echo "  • UI: Extensions → ⋯ → Install from VSIX"

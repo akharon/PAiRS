@@ -39,11 +39,13 @@ C, C++, Python, JavaScript, TypeScript, Java, Go, Ruby, Dart, Rust, CSS, HTML, G
 ## Scripts & Automation
 
 Available in `/scripts/`:
-- `build.sh` — Compile TS → JS (esbuild), typecheck
-- `test.sh` — Run integration tests (index/parse validation)
-- `package.sh` — Build `.vsix` extension
-- `install.sh` — Build + test + package + install to VS Code
-- `lint.sh` — ESLint + Prettier
+- `build-full.sh` — sync generated files, typecheck, test, build, package
+- `install.sh` — Build + test + package + install to VS Code (`npm run install:vscode`)
+- `fetch-grammars.mjs` — copy/compile tree-sitter wasm grammars + queries into `dist/` (run by every build)
+- `sync-lm-tools.mjs` / `sync-skill.mjs` — regenerate the package.json tool manifest / Claude skill
+- `link-cli.mjs` / `unlink-cli.mjs` — dev-only: put the repo's `pairs` on PATH (`npm run link-cli`)
+
+CI lives at the repo root (`../.github/workflows/`), not in this directory.
 
 **Bash aliases** (add to session):
 ```bash
@@ -204,20 +206,15 @@ npm run build:watch   # Watch mode
 npm run typecheck     # tsc --noEmit
 npm run lint          # eslint src
 
+npm run build:dev     # Unminified build (the default build is minified)
+npm run check         # typecheck + lint + tests
 npm run package       # Build .vsix (VS Code extension)
-npm run install       # Install locally to VS Code (full pipeline: build → test → package → install)
+npm run install:vscode # Install locally to VS Code (full pipeline: build → test → package → install)
 ```
 
 ### CLI Auto-Installation
 
-When the extension is installed (via `npm install` or VS Code extension marketplace), the `postinstall` hook automatically:
-1. Creates a symlink `~/.local/bin/pairs` → `<projectRoot>/dist/cli.js`
-2. Makes the `pairs` CLI immediately available in any terminal
-3. Warns if `~/.local/bin` isn't in `PATH` (with instructions to add it)
-
-When the package is removed/uninstalled, the `postrm` hook cleans up the symlink.
-
-**Result**: No need to manually run `npm link` — the CLI is ready to use after installation.
+On every extension activation `src/adapters/vscode/cliLink.ts` writes a `pairs` launcher into `~/.local/bin` (`%LOCALAPPDATA%Pairsin` on Windows) that runs the bundled `dist/cli.js`. This covers Marketplace, .vsix and dev installs alike. There are no npm lifecycle hooks (a root `install`/`postinstall` script would also run on CI's `npm ci`); for a dev checkout use `npm run link-cli` / `npm run unlink-cli`.
 
 ---
 

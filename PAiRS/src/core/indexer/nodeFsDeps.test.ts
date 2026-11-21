@@ -20,9 +20,25 @@ function makeRoot(): string {
   return root;
 }
 
+/**
+ * Creating symlinks needs a privilege on Windows (Developer Mode or admin);
+ * CI runners have it, many dev machines do not. Skip rather than fail there.
+ */
+function canSymlink(): boolean {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pairs-symlink-probe-'));
+  try {
+    fs.symlinkSync(dir, path.join(dir, 'probe'), 'dir');
+    return true;
+  } catch {
+    return false;
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 const list = (root: string): Promise<string[]> => nodeListWorkspaceFiles(path.join(root, 'ws'))();
 
-describe('nodeListWorkspaceFiles symlink support', () => {
+describe.skipIf(!canSymlink())('nodeListWorkspaceFiles symlink support', () => {
   it('indexes files inside a symlinked directory, addressed through the link', async () => {
     const root = makeRoot();
     fs.mkdirSync(path.join(root, 'external', 'lib'), { recursive: true });

@@ -1,18 +1,23 @@
-// Two bundles: the VS Code extension (vscode external) and the standalone
-// MCP server / CLI. External modules marked below are not bundled:
-// - vscode: provided by VS Code extension host
+// Two bundles: the VS Code extension (`vscode` external) and the standalone
+// `pairs` CLI. External modules marked below are not bundled:
+// - vscode: provided by the VS Code extension host
+// - node:sqlite: Node 22+ builtin (no native addon, so one .vsix covers every
+//   platform)
 // web-tree-sitter itself is bundled fine (pure JS); its grammar/runtime .wasm
 // assets are copied into dist/grammars by scripts/fetch-grammars.mjs and
 // located at runtime via an explicit path, not import.meta.url resolution.
 //
-// The store runs on `node:sqlite`, a Node 22+ builtin — no native addon, so
-// nothing platform-specific to ship and one .vsix covers every platform.
-// (This replaced KuzuDB, which needed a per-platform prebuilt binary.)
+// `node esbuild.mjs`            minified production bundles (what the .vsix ships)
+// `node esbuild.mjs --watch`    unminified, rebuilds on change
+// `node esbuild.mjs --dev`      unminified one-shot build
+// `node esbuild.mjs --metafile` also writes dist/meta-<bundle>.json (bundle analysis)
 import * as esbuild from 'esbuild';
-import { existsSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
 import { copyGrammarsAndQueries } from './scripts/fetch-grammars.mjs';
 
 const watch = process.argv.includes('--watch');
+const dev = watch || process.argv.includes('--dev');
+const metafile = process.argv.includes('--metafile');
 
 await copyGrammarsAndQueries();
 
@@ -22,6 +27,9 @@ const common = {
   target: 'node22',
   format: 'cjs',
   sourcemap: true,
+  minify: !dev,
+  legalComments: 'none',
+  metafile,
   external: ['vscode', 'node:sqlite'],
   // web-tree-sitter's emscripten glue calls createRequire(import.meta.url);
   // esbuild's CJS output rewrites import.meta to {}, so shim the url.
@@ -29,26 +37,26 @@ const common = {
   banner: { js: "const __importMetaUrl = require('node:url').pathToFileURL(__filename).href;" },
 };
 
-// Phase 0 scaffolds the CLI only; the extension host and MCP server entry
-// points land in Phase 1. Skip bundles whose entry point doesn't exist yet so
-// `npm run build` stays green as they arrive — no config change needed then.
 const bundles = [
   { entry: 'src/adapters/vscode/extension.ts', outfile: 'dist/extension.js' },
   { entry: 'src/adapters/cli/index.ts', outfile: 'dist/cli.js' },
-  { entry: 'src/adapters/mcp/serverCli.ts', outfile: 'dist/mcp-server.js' },
-].filter(({ entry }) => {
-  if (existsSync(entry)) return true;
-  console.log(`[esbuild] skipping ${entry} — not implemented yet`);
-  return false;
-});
+];
 
 const contexts = await Promise.all(
-  bundles.map(({ entry, outfile }) => esbuild.context({ ...common, entryPoints: [entry], outfile }))
+  bundles.map(async ({ entry, outfile }) => ({
+    outfile,
+    ctx: await esbuild.context({ ...common, entryPoints: [entry], outfile }),
+  }))
 );
 
 if (watch) {
-  await Promise.all(contexts.map((c) => c.watch()));
+  await Promise.all(contexts.map(({ ctx }) => ctx.watch()));
 } else {
-  await Promise.all(contexts.map((c) => c.rebuild()));
-  await Promise.all(contexts.map((c) => c.dispose()));
+  const results = await Promise.all(contexts.map(({ ctx }) => ctx.rebuild()));
+  if (metafile) {
+    results.forEach((r, i) => {
+      writeFileSync(`dist/meta-${bundles[i].entry.includes('cli') ? 'cli' : 'extension'}.json`, JSON.stringify(r.metafile));
+    });
+  }
+  await Promise.all(contexts.map(({ ctx }) => ctx.dispose()));
 }

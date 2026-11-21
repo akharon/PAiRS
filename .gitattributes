@@ -1,0 +1,13 @@
+# Normalise line endings in the repo; checkouts use the platform default except
+# where a file must stay LF to run (shell/Node scripts, shebang files).
+* text=auto
+*.sh text eol=lf
+*.mjs text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Binary assets: never diff or normalise.
+*.png binary
+*.wasm binary
+*.vsix binary
+*.db binary
