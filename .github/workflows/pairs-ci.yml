@@ -41,7 +41,7 @@ jobs:
       # The GDScript grammar is compiled to wasm at build time (no prebuilt
       # exists); cache the result so CI does not re-download the toolchain.
       - name: Cache compiled grammars
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: PAiRS/node_modules/.cache/pairs-grammars
           key: grammars-${{ runner.os }}-${{ hashFiles('PAiRS/package-lock.json') }}
@@ -84,7 +84,7 @@ jobs:
           cache-dependency-path: PAiRS/package-lock.json
 
       - name: Cache compiled grammars
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: PAiRS/node_modules/.cache/pairs-grammars
           key: grammars-${{ runner.os }}-${{ hashFiles('PAiRS/package-lock.json') }}
